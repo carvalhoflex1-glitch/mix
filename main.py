@@ -188,8 +188,8 @@ def coin_fmt(value, asset):
     value = D(value)
     precision = Decimal("0.000001") if asset == "LTC" else Decimal("0.01")
     out = value.quantize(precision, rounding=ROUND_DOWN)
-    if asset == "TL":
-        return f"{{{{TL}}}}{out}"
+if asset == "TL":
+    return f"{out} {{{{TL}}}}"
     return f"{out} {{{{{asset}}}}}"
 
 
