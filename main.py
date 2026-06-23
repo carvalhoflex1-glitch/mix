@@ -9,6 +9,7 @@ import threading
 import secrets
 import shutil
 import re
+import contextlib
 from collections import defaultdict, deque
 from datetime import datetime, date
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
@@ -20,12 +21,20 @@ from PIL import Image
 from flask import Flask, request, redirect, session, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 
+try:
+    import psycopg
+    from psycopg.types.json import Jsonb
+except ImportError:
+    psycopg = None
+    Jsonb = None
+
 TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
 PANEL_USERNAME = os.getenv("PANEL_USERNAME", "")
 PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")
 PORT = int(os.getenv("PORT", "8080"))
 OFFSET_FILE = os.getenv("OFFSET_FILE", "telegram_offset.json")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 OFFSET = None
 LOGIN_ATTEMPTS = defaultdict(deque)
 LOGIN_WINDOW_SECONDS = 900
@@ -61,25 +70,79 @@ def today():
     return date.today().isoformat()
 
 
-def load_json(path, default):
+def _db_key(path):
+    return os.path.basename(str(path))
+
+
+def _require_database():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL tanımlı değil. Railway PostgreSQL bağlantısını ekleyiniz.")
+    if psycopg is None:
+        raise RuntimeError("PostgreSQL sürücüsü bulunamadı. Railway'e psycopg[binary] paketi eklenmelidir.")
+
+
+def _db_connect():
+    _require_database()
+    return psycopg.connect(DATABASE_URL, autocommit=False)
+
+
+def init_database():
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_state (
+                    state_key TEXT PRIMARY KEY,
+                    state_data JSONB NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+        conn.commit()
+
+
+def _read_legacy_json(path, default):
     if not os.path.exists(path):
         return default
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as exc:
-        raise RuntimeError(f"Veri dosyası okunamadı: {path}: {exc}") from exc
+        raise RuntimeError(f"Eski veri dosyası okunamadı: {path}: {exc}") from exc
+
+
+def load_json(path, default):
+    key = _db_key(path)
+    with data_lock, _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT state_data FROM app_state WHERE state_key = %s", (key,))
+            row = cur.fetchone()
+            if row is not None:
+                return row[0]
+
+            initial = _read_legacy_json(path, default)
+            cur.execute(
+                "INSERT INTO app_state (state_key, state_data) VALUES (%s, %s) ON CONFLICT (state_key) DO NOTHING",
+                (key, Jsonb(initial)),
+            )
+        conn.commit()
+        return initial
 
 
 def save_json(path, data):
-    with data_lock:
-        tmp = path + ".tmp"
-        backup = path + ".bak"
-        if os.path.exists(path): shutil.copy2(path, backup)
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.flush(); os.fsync(f.fileno())
-        os.replace(tmp, path)
+    key = _db_key(path)
+    with data_lock, _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO app_state (state_key, state_data, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (state_key)
+                DO UPDATE SET state_data = EXCLUDED.state_data, updated_at = NOW()
+                """,
+                (key, Jsonb(data)),
+            )
+        conn.commit()
 
 
 def validate_runtime_config():
@@ -221,6 +284,8 @@ DEFAULT_SETTINGS = {
     "icon_TRX": "5895440778150288520",
     "icon_TL": "",
 }
+
+init_database()
 
 users = load_json(FILES["users"], {})
 requests_db = load_json(FILES["requests"], {})
