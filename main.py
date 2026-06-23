@@ -282,7 +282,7 @@ DEFAULT_SETTINGS = {
     "icon_USDT": "5895571353746021767",
     "icon_LTC": "5895441495409828662",
     "icon_TRX": "5895440778150288520",
-    "icon_TL": "",
+    "icon_TL": "5897961936837943618",
 }
 
 init_database()
@@ -334,18 +334,18 @@ def _render_asset_icons(value):
 
         asset = match.group(1)
         emoji_id = str(settings.get(f"icon_{asset}", "")).strip()
-        if asset == "TL":
-            replacement = "₺"
-        elif emoji_id:
-            replacement = "🪙"
-            entities.append({
-                "type": "custom_emoji",
-                "offset": offset,
-                "length": _utf16_len(replacement),
-                "custom_emoji_id": emoji_id,
-            })
-        else:
-            replacement = asset
+if emoji_id:
+    replacement = "🪙"
+    entities.append({
+        "type": "custom_emoji",
+        "offset": offset,
+        "length": _utf16_len(replacement),
+        "custom_emoji_id": emoji_id,
+    })
+elif asset == "TL":
+    replacement = "₺"
+else:
+    replacement = asset
 
         output.append(replacement)
         offset += _utf16_len(replacement)
