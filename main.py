@@ -12,7 +12,7 @@ from html import escape
 
 import requests
 import qrcode
-from PIL import Image, ImageDraw
+from PIL import Image
 from flask import Flask, request, redirect, session
 
 TOKEN = os.getenv("BOT_TOKEN", "")
@@ -160,6 +160,7 @@ DEFAULT_SETTINGS = {
     "icon_support": "5895698390288703053",
     "icon_fees": "5895334439055009075",
     "icon_info": "5895656948149263789",
+    "icon_swap": "5893252234614939371",
     "icon_pending": "5895304795190730655",
     "icon_processing": "5895589615946964496",
     "icon_security": "5895439304976506343",
@@ -200,34 +201,36 @@ def api(method, data=None, files=None):
 
 
 def send(chat_id, text, keyboard=None):
-    payload = {"chat_id": chat_id, "text": str(text), "parse_mode": "HTML", "disable_web_page_preview": True}
+    payload = {"chat_id": chat_id, "text": str(text)}
     if keyboard:
         payload["reply_markup"] = keyboard
     return api("sendMessage", payload)
 
+
 def send_qr(chat_id, content, caption=""):
-    qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_H, box_size=18, border=4)
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=12,
+        border=4,
+    )
     qr.add_data(content)
     qr.make(fit=True)
     img = qr.make_image(fill_color="#07111f", back_color="white").convert("RGBA")
     try:
         logo = Image.open(io.BytesIO(base64.b64decode(ZAQEL_LOGO_BASE64))).convert("RGBA")
-        target = int(img.width * 0.23)
-        logo.thumbnail((target, target), Image.Resampling.LANCZOS)
-        circle_size = int(max(logo.width, logo.height) * 1.18)
-        scale = 4
-        hi = Image.new("RGBA", (circle_size * scale, circle_size * scale), (255,255,255,0))
-        draw = ImageDraw.Draw(hi)
-        draw.ellipse((0,0,hi.width-1,hi.height-1), fill=(255,255,255,255))
-        plate = hi.resize((circle_size,circle_size), Image.Resampling.LANCZOS)
-        plate.alpha_composite(logo, ((circle_size-logo.width)//2,(circle_size-logo.height)//2))
-        img.alpha_composite(plate, ((img.width-circle_size)//2,(img.height-circle_size)//2))
+        logo.thumbnail((img.width // 4, img.height // 4), Image.Resampling.LANCZOS)
+        pad = 10
+        plate = Image.new("RGBA", (logo.width + pad * 2, logo.height + pad * 2), "white")
+        plate.alpha_composite(logo, (pad, pad))
+        img.alpha_composite(plate, ((img.width - plate.width) // 2, (img.height - plate.height) // 2))
     except Exception as exc:
         print("QR LOGO ERROR:", exc)
-    buf=io.BytesIO()
-    img.convert("RGB").save(buf, format="PNG", optimize=True, quality=100)
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, format="PNG", optimize=True)
     buf.seek(0)
-    return api("sendPhoto", {"chat_id":str(chat_id),"caption":caption,"parse_mode":"HTML"}, {"photo":("zaqel-qr.png",buf,"image/png")})
+    return api("sendPhoto", {"chat_id": str(chat_id), "caption": caption}, {"photo": ("zaqel-qr.png", buf, "image/png")})
+
 
 def answer(cb_id, text=""):
     payload = {"callback_query_id": cb_id}
@@ -242,27 +245,6 @@ def inline_button(text, data, icon_key=None):
     if emoji_id:
         b["icon_custom_emoji_id"] = emoji_id
     return b
-
-
-def copy_button(text, value):
-    return {"text": text, "copy_text": {"text": str(value)}}
-
-
-def asset_emoji(asset):
-    emoji_id = str(settings.get(f"icon_{asset}", "")).strip()
-    fallback = {"TL":"₺","USDT":"💵","LTC":"Ł","TRX":"◆"}.get(asset,"•")
-    return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>' if emoji_id else fallback
-
-
-def bot_fmt(value, asset=""):
-    value = D(value)
-    out = value.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
-    return f"{out} {asset_emoji(asset)}" if asset else str(out)
-
-
-def short_address(value):
-    value = str(value or "")
-    return value if len(value) <= 12 else f"{value[:6]}...{value[-6:]}"
 
 
 def reply_keyboard():
@@ -448,13 +430,13 @@ def withdrawn_today(uid, asset):
 
 def wallet_text(uid):
     u = users[str(uid)]
-    lines = [messages["wallet_title"], f"Hesap Seviyesi: {h(u.get('tier','Basic'))}", ""]
-    for asset in ASSETS:
-        lines.append(f"Kullanılabilir: {bot_fmt(u['balances'].get(asset,'0'), asset)}")
-        pending = D(u.get('pending_balances',{}).get(asset,'0'))
-        if pending > 0:
-            lines.append(f"Bekleyen: {bot_fmt(pending, asset)}")
+    lines = [messages["wallet_title"], f"Hesap Seviyesi: {u.get('tier', 'Basic')}", ""]
+    for a in ASSETS:
+        lines.append(f"{a} · Kullanılabilir: {fmt(u['balances'].get(a, '0'), a)}")
+        if D(u.get('pending_balances', {}).get(a, '0')) > 0:
+            lines.append(f"{a} · Bekleyen: {fmt(u['pending_balances'].get(a, '0'), a)}")
     return "\n".join(lines)
+
 
 def active_balances(uid):
     return [a for a in ASSETS if balance(uid, a) > 0]
@@ -464,31 +446,32 @@ def request_summary(rid):
     r = requests_db.get(str(rid), {})
     if not r:
         return "İşlem bulunamadı."
-    title = {"deposit":"Bakiye Yükleme","withdraw":"Para Çekme","convert":"Dönüştürme"}.get(r.get("type"),"Cüzdan İşlemi")
-    lines=[f"<b>{h(title)}</b>","",f"İşlem No: {h(rid)}",f"Durum: {h(status_label(r.get('status')))}",""]
+    type_name = {"deposit": "Bakiye Yükleme", "withdraw": "Para Çekme", "convert": "Dönüştürme"}.get(r.get("type"), r.get("type"))
+    lines = [f"İşlem No: #{rid}", f"İşlem Türü: {type_name}", f"Durum: {status_label(r.get('status'))}"]
     if r.get("type") == "deposit":
-        a=r.get("asset")
-        lines += [f"Yatırılan: {bot_fmt(r.get('amount'),a)}",f"Bakiyeye Geçecek: {bot_fmt(r.get('net_amount'),a)}"]
-        lines += [f"Ağ: {h(r.get('network','-'))}"] if a != "TL" else [f"Gönderen: {h(r.get('sender_name','-'))}"]
+        lines += [f"Yatırılan: {fmt(r.get('amount'), r.get('asset'))}", f"Bakiyeye Geçecek: {fmt(r.get('net_amount'), r.get('asset'))}"]
+        if r.get("asset") == "TL":
+            lines += [f"Gönderen: {r.get('sender_name','-')}", f"Açıklama: {r.get('tx_note','-')}"]
+        else:
+            lines += [f"Ağ: {r.get('network','-')}"]
     elif r.get("type") == "withdraw":
-        a=r.get("asset")
-        lines += [f"Çekim Tutarı: {bot_fmt(r.get('amount'),a)}",f"Komisyon: {bot_fmt(r.get('fee'),a)}",f"Gönderilen: {bot_fmt(r.get('net_amount'),a)}"]
-        target = r.get("iban") if a == "TL" else r.get("address")
-        lines += [f"Hedef: <code>{h(short_address(target))}</code>"]
+        lines += [f"İşlem Tutarı: {fmt(r.get('amount'), r.get('asset'))}", f"Kesilecek Komisyon: {fmt(r.get('fee'), r.get('asset'))}", f"Net Gönderilecek: {fmt(r.get('net_amount'), r.get('asset'))}"]
+        if r.get("asset") == "TL":
+            lines += [f"Banka: {r.get('bank_name','')}", f"IBAN: {r.get('iban','')}", f"Alıcı: {r.get('name','')}"]
+        else:
+            lines += [f"Hedef Adres: {r.get('address','')}"]
     elif r.get("type") == "convert":
-        lines += [f"Dönüştürülen: {bot_fmt(r.get('from_amount'),r.get('from_asset'))}",f"Alınan: {bot_fmt(r.get('net_to_amount'),r.get('to_asset'))}",f"Komisyon: {bot_fmt(r.get('fee'),r.get('to_asset'))}"]
-    stamp=str(r.get("updated_at") or r.get("created_at") or "")
-    try: stamp=datetime.strptime(stamp,"%Y-%m-%d %H:%M:%S").strftime("%d.%m.%Y • %H:%M")
-    except Exception: pass
-    lines += ["",h(stamp)]
+        lines += [f"Dönüştürülen: {fmt(r.get('from_amount'), r.get('from_asset'))}", f"TL Karşılığı: {fmt(r.get('tl_value'), 'TL')}", f"Kesilecek Komisyon: {fmt(r.get('fee'), r.get('to_asset'))}", f"Alınacak Net: {fmt(r.get('net_to_amount'), r.get('to_asset'))}"]
+    lines.append(f"Oluşturulma: {r.get('created_at','')}")
     return "\n".join(lines)
+
 
 def receipt_text(rid):
     r = requests_db.get(str(rid), {})
     if not r:
         return "İşlem bulunamadı."
-    title={"completed":"İşlem tamamlandı","processing":"İşlem işleme alındı","rejected":"İşlem reddedildi","pending":"İşlem beklemede"}.get(r.get("status"),"İşlem detayı")
-    return f"<b>{title}</b>\n\n{request_summary(rid)}"
+    return "ZAQELV2 İŞLEM MAKBUZU\n\n" + request_summary(rid) + f"\n\nKayıt zamanı: {r.get('updated_at', r.get('created_at',''))}"
+
 
 def user_allowed(chat_id):
     u = get_user(chat_id)
@@ -603,13 +586,8 @@ def handle_text(chat_id, username, text):
         if not favs:
             send(chat_id, "Kayıtlı favori adresiniz bulunmuyor.", {"inline_keyboard": [[inline_button("Yeni Adres Ekle", "favorite:add")]]})
         else:
-            lines = ["<b>Favori Cüzdan Adresleri</b>"]
-            rows = []
-            for i, fav in enumerate(favs):
-                lines.append(f"{i+1}. <b>{h(fav['label'])}</b> · {asset_emoji(fav['asset'])}\n<code>{h(fav['address'])}</code>")
-                rows.append([inline_button(f"{fav['label']} · Yeniden Adlandır", f"favorite_rename:{i}"), inline_button("Sil", f"favorite_delete:{i}")])
-            rows.append([inline_button("Yeni Adres Ekle", "favorite:add")])
-            send(chat_id, "\n\n".join(lines), {"inline_keyboard": rows})
+            lines = ["Favori Cüzdan Adresleri"] + [f"{i+1}. {f['label']} · {f['asset']}\n{f['address']}" for i, f in enumerate(favs)]
+            send(chat_id, "\n\n".join(lines), {"inline_keyboard": [[inline_button("Yeni Adres Ekle", "favorite:add")]]})
         return
     if text == "Destek": send(chat_id, messages["support"], reply_keyboard()); return
 
@@ -643,12 +621,9 @@ def handle_text(chat_id, username, text):
         save_json(FILES["users"], users)
         add_security_event(uid, "pin_changed" if changing else "pin_created", "Tüm eski oturumlar geçersiz kılındı")
         if next_step:
-            saved = dict(state)
             state.clear()
-            state.update(saved)
-            state["step"] = "second_confirm"
-            preview = state.get("preview", "İşlemi onaylıyor musunuz?")
-            send(chat_id, messages["pin_saved"] + "\n\n" + preview, confirm_keyboard("second_confirm"))
+            state.update({"flow": flow, "step": next_step})
+            send(chat_id, messages["pin_saved"] + "\n\n" + messages["pin_question"])
         else:
             user_state.pop(uid, None)
             send(chat_id, messages["pin_changed"] if changing else messages["pin_saved"], reply_keyboard())
@@ -708,33 +683,35 @@ def handle_text(chat_id, username, text):
             net = amount - fee
             state.update({"fee": str(fee), "net_amount": str(net)})
             if asset == "TL":
-                iban = settings["iban"]
+                send(chat_id, "Banka")
+                send(chat_id, settings["bank_name"])
+                send(chat_id, "IBAN")
+                send(chat_id, settings["iban"])
+                send(chat_id, "Alıcı")
+                send(chat_id, settings["iban_owner"])
                 summary = (
-                    f"<b>TL Bakiye Yükleme</b>\n\n"
-                    f"Banka: {h(settings['bank_name'])}\n"
-                    f"Alıcı: {h(settings['iban_owner'])}\n"
-                    f"IBAN: <code>{h(iban)}</code>\n\n"
-                    f"Yatırılacak: {bot_fmt(amount, 'TL')}\n"
-                    f"Komisyon: {bot_fmt(fee, 'TL')}\n"
-                    f"Bakiyeye Geçecek: {bot_fmt(net, 'TL')}\n\n"
-                    f"{h(messages['iban_warning'])}"
+                    f"TL Bakiye Yükleme\n\n"
+                    f"Yatırılacak: {fmt(amount, 'TL')}\n"
+                    f"Kesilecek komisyon: {fmt(fee, 'TL')}\n"
+                    f"Bakiyeye geçecek: {fmt(net, 'TL')}\n\n"
+                    f"{messages['iban_warning']}"
                 )
-                send(chat_id, summary, {"inline_keyboard": [[copy_button("IBAN'ı Kopyala", iban)],[inline_button("Ödemeyi Yaptım", "deposit_sent")],[inline_button("İptal", "cancel")]]})
+                send(chat_id, summary, {"inline_keyboard": [[inline_button("Ödemeyi Yaptım", "deposit_sent")], [inline_button("İptal", "cancel")]]})
             else:
                 address = settings.get(f"wallet_{asset}", "")
                 network = settings.get(f"network_{asset}", asset)
                 state["network"] = network
                 card = (
-                    f"<b>Bakiye Yükleme</b>\n\n"
-                    f"Varlık: {asset_emoji(asset)}\n"
-                    f"Ağ: {h(network)}\n"
-                    f"Yatırılacak: {bot_fmt(amount, asset)}\n"
-                    f"Komisyon: {bot_fmt(fee, asset)}\n"
-                    f"Bakiyeye Geçecek: {bot_fmt(net, asset)}\n\n"
-                    f"Adres: <code>{h(address)}</code>\n\n"
-                    f"{h(messages['deposit_crypto_intro'])}"
+                    f"{asset} Bakiye Yükleme\n\n"
+                    f"Ağ: {network}\n"
+                    f"Yatırılacak: {fmt(amount, asset)}\n"
+                    f"Kesilecek komisyon: {fmt(fee, asset)}\n"
+                    f"Bakiyeye geçecek: {fmt(net, asset)}\n\n"
+                    f"Yatırma adresi:\n{address}\n\n"
+                    f"{messages['deposit_crypto_intro']}"
                 )
-                send(chat_id, card, {"inline_keyboard": [[copy_button("Adresi Kopyala", address), inline_button("QR Göster", "deposit_qr")],[inline_button("Gönderimi Bildir", "deposit_sent")],[inline_button("İptal", "cancel")]]})
+                send(chat_id, card, {"inline_keyboard": [[inline_button("Gönderimi Bildir", "deposit_sent")], [inline_button("İptal", "cancel")]]})
+                send_qr(chat_id, address, f"{asset} Yatırma QR Kodu · {network}")
             state["step"] = "waiting_sent"
             return
         if flow == "withdraw":
@@ -756,7 +733,7 @@ def handle_text(chat_id, username, text):
         if flow == "convert":
             to_asset = state["to_asset"]; tl_value = amount * rate(asset); gross = tl_value / rate(to_asset); p = fee_percent("convert", uid=uid); fee = fee_amount(gross, p); net = gross - fee
             state.update({"tl_value": str(tl_value), "gross_to": str(gross), "fee": str(fee), "net_amount": str(net)})
-            state["preview"] = f"<b>Dönüşüm Özeti</b>\n\nDönüştürülecek: {bot_fmt(amount, asset)}\nTL Karşılığı: {bot_fmt(tl_value, 'TL')}\nKomisyon: {bot_fmt(fee, to_asset)}\nAlınacak: {bot_fmt(net, to_asset)}"
+            state["preview"] = f"Dönüşüm Özeti\n\nDönüştürülecek: {fmt(amount, asset)}\nTL karşılığı: {fmt(tl_value, 'TL')}\nKesilecek komisyon: {fmt(fee, to_asset)}\nAlınacak net: {fmt(net, to_asset)}"
             require_pin(uid, state); return
 
     if flow == "deposit" and step == "sender_name":
@@ -785,19 +762,10 @@ def handle_text(chat_id, username, text):
     if flow == "withdraw" and step == "name":
         state["name"] = text.strip(); state["preview"] = f"Çekim Özeti\n\nTutar: {fmt(state['amount'], state['asset'])}\nKomisyon: {fmt(state['fee'], state['asset'])}\nNet: {fmt(state['net_amount'], state['asset'])}\nIBAN: {state['iban']}\nAd Soyad: {state['name']}"; require_pin(uid, state); return
     if flow == "withdraw" and step == "address":
-        state["address"] = text.strip(); state["preview"] = f"<b>Çekim Özeti</b>\n\nTutar: {bot_fmt(state['amount'], state['asset'])}\nKomisyon: {bot_fmt(state['fee'], state['asset'])}\nGönderilecek: {bot_fmt(state['net_amount'], state['asset'])}\nAdres: <code>{h(short_address(state['address']))}</code>"; require_pin(uid, state); return
+        state["address"] = text.strip(); state["preview"] = f"Çekim Özeti\n\nTutar: {fmt(state['amount'], state['asset'])}\nKomisyon: {fmt(state['fee'], state['asset'])}\nNet: {fmt(state['net_amount'], state['asset'])}\nAdres: {state['address']}"; require_pin(uid, state); return
     if flow == "favorite_add" and step == "label": state["label"] = text.strip(); state["step"] = "address"; send(chat_id, "Cüzdan adresini giriniz."); return
     if flow == "favorite_add" and step == "address":
         users[uid]["favorites"].append({"label": state["label"], "asset": state["asset"], "address": text.strip(), "created_at": now()}); save_json(FILES["users"], users); user_state.pop(uid, None); send(chat_id, "Favori adres kaydedildi.", reply_keyboard()); return
-
-    if flow == "favorite_rename" and step == "label":
-        index = int(state.get("index", -1))
-        if 0 <= index < len(users[uid].get("favorites", [])):
-            users[uid]["favorites"][index]["label"] = text.strip()
-            save_json(FILES["users"], users)
-            send(chat_id, "Favori adres adı güncellendi.", reply_keyboard())
-        user_state.pop(uid, None)
-        return
 
 
 def handle_callback(chat_id, username, data, cb_id):
@@ -807,30 +775,7 @@ def handle_callback(chat_id, username, data, cb_id):
     if data.startswith("detail:"):
         rid = data.split(":", 1)[1]
         if requests_db.get(rid, {}).get("user_id") == uid:
-            send(chat_id, receipt_text(rid), {"inline_keyboard": [[inline_button("İşlem Detayı", f"detail:{rid}")]]})
-        return
-    if data == "deposit_qr":
-        state = user_state.get(uid, {})
-        asset = state.get("asset")
-        if asset not in CRYPTO_ASSETS:
-            send(chat_id, "QR bilgisi bulunamadı.")
-            return
-        address = settings.get(f"wallet_{asset}", "")
-        network = state.get("network") or settings.get(f"network_{asset}", asset)
-        send_qr(chat_id, address, f"{asset_emoji(asset)} Yatırma QR Kodu · {h(network)}")
-        return
-    if data.startswith("favorite_rename:"):
-        index = int(data.split(":",1)[1])
-        if 0 <= index < len(users[uid].get("favorites", [])):
-            user_state[uid] = {"flow":"favorite_rename","step":"label","index":index}
-            send(chat_id, "Favori adres için yeni ismi giriniz.")
-        return
-    if data.startswith("favorite_delete:"):
-        index = int(data.split(":",1)[1])
-        if 0 <= index < len(users[uid].get("favorites", [])):
-            removed = users[uid]["favorites"].pop(index)
-            save_json(FILES["users"], users)
-            send(chat_id, f"<b>{h(removed.get('label','Favori adres'))}</b> silindi.", reply_keyboard())
+            send(chat_id, receipt_text(rid), {"inline_keyboard": [[inline_button("Makbuzu Yeniden Göster", f"detail:{rid}")]]})
         return
     if data.startswith("deposit_asset:"):
         asset = data.split(":", 1)[1]; user_state[uid] = {"flow": "deposit", "step": "amount", "asset": asset}; send(chat_id, f"{asset} için {messages['amount_question']}\nMinimum: {fmt(min_amount('deposit', asset), asset)}"); return
@@ -860,28 +805,7 @@ def handle_callback(chat_id, username, data, cb_id):
     if data.startswith("withdraw_asset:"):
         asset = data.split(":", 1)[1]
         if balance(uid, asset) <= 0: send(chat_id, messages["no_balance"]); return
-        user_state[uid] = {"flow": "withdraw", "step": "amount", "asset": asset}
-        send(chat_id, f"Çekilebilir Bakiye: {bot_fmt(balance(uid, asset), asset)}\nMinimum Çekim: {bot_fmt(min_amount('withdraw', asset), asset)}\n\nÇekmek istediğiniz tutarı giriniz.", {"inline_keyboard": [[inline_button("Tüm Bakiyeyi Çek", "withdraw_all")],[inline_button("İptal", "cancel")]]})
-        return
-    if data == "withdraw_all":
-        state = user_state.get(uid, {})
-        asset = state.get("asset")
-        amount = balance(uid, asset) if asset else Decimal("0")
-        if amount <= 0:
-            send(chat_id, messages["no_balance"]); return
-        fee = fee_amount(amount, fee_percent("withdraw", asset, uid))
-        state.update({"amount":str(amount),"fee":str(fee),"net_amount":str(amount-fee)})
-        if asset == "TL":
-            state["step"] = "bank_name"; send(chat_id, "Banka adını giriniz.")
-        else:
-            favs=[f for f in users[uid].get("favorites",[]) if f.get("asset")==asset]
-            if favs:
-                rows=[[inline_button(f["label"],f"favorite_use:{i}")] for i,f in enumerate(users[uid]["favorites"]) if f.get("asset")==asset]
-                rows.append([inline_button("Yeni adres gir","favorite_use:new")])
-                state["step"]="address_choice"; send(chat_id,"Çekim adresini seçiniz.",{"inline_keyboard":rows})
-            else:
-                state["step"]="address"; send(chat_id,"Alıcı cüzdan adresini giriniz.")
-        return
+        user_state[uid] = {"flow": "withdraw", "step": "amount", "asset": asset}; send(chat_id, f"Çekilebilir bakiye: {fmt(balance(uid, asset), asset)}\nMinimum çekim: {fmt(min_amount('withdraw', asset), asset)}\n\nÇekmek istediğiniz tutarı giriniz."); return
     if data.startswith("convert_from:"):
         asset = data.split(":", 1)[1]
         if balance(uid, asset) <= 0: send(chat_id, messages["no_balance"]); return
@@ -904,7 +828,7 @@ def handle_callback(chat_id, username, data, cb_id):
         choice = data.split(":", 1)[1]; state = user_state.get(uid, {})
         if choice == "new": state["step"] = "address"; send(chat_id, "Alıcı cüzdan adresini giriniz.")
         else:
-            fav = users[uid]["favorites"][int(choice)]; state["address"] = fav["address"]; state["preview"] = f"<b>Çekim Özeti</b>\n\nTutar: {bot_fmt(state['amount'], state['asset'])}\nKomisyon: {bot_fmt(state['fee'], state['asset'])}\nGönderilecek: {bot_fmt(state['net_amount'], state['asset'])}\nAdres: <code>{h(short_address(state['address']))}</code>"; require_pin(uid, state)
+            fav = users[uid]["favorites"][int(choice)]; state["address"] = fav["address"]; state["preview"] = f"Çekim Özeti\n\nTutar: {fmt(state['amount'], state['asset'])}\nKomisyon: {fmt(state['fee'], state['asset'])}\nNet: {fmt(state['net_amount'], state['asset'])}\nAdres: {state['address']}"; require_pin(uid, state)
         return
     if data == "security:set_pin":
         if users[uid].get("pin_hash"):
