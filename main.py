@@ -388,6 +388,19 @@ def confirm_keyboard(ok_data, cancel_data="cancel"):
     return {"inline_keyboard": [[inline_button("Onayla", ok_data), inline_button("İptal", cancel_data)]]}
 
 
+def copy_button(text, value):
+    return {"text": text, "copy_text": {"text": str(value)}}
+
+
+def order_summary(title, rows, note=""):
+    lines = [title, "━━━━━━━━━━━━"]
+    for label, value in rows:
+        lines.append(f"{label}\n{value}")
+    if note:
+        lines.extend(["━━━━━━━━━━━━", note])
+    return "\n\n".join(lines)
+
+
 def hash_pin(pin):
     return generate_password_hash(str(pin), method="scrypt")
 
@@ -872,41 +885,51 @@ def handle_text(chat_id, username, text):
             net = amount - fee
             state.update({"fee": str(fee), "net_amount": str(net)})
             if asset == "TL":
-                send(chat_id, "Banka")
-                send(chat_id, settings["bank_name"])
-                send(chat_id, "IBAN")
-                send(chat_id, settings["iban"])
-                send(chat_id, "Alıcı")
-                send(chat_id, settings["iban_owner"])
-                summary = (
-                    f"TL Bakiye Yükleme\n\n"
-                    f"Yatırılacak: {fmt(amount, 'TL')}\n"
-                    f"Kesilecek komisyon: {fmt(fee, 'TL')}\n"
-                    f"Bakiyeye geçecek: {fmt(net, 'TL')}\n\n"
-                    f"{messages['iban_warning']}"
+                summary = order_summary(
+                    "TL Yükleme Özeti",
+                    [
+                        ("Banka", settings["bank_name"] or "-"),
+                        ("Alıcı", settings["iban_owner"] or "-"),
+                        ("IBAN", settings["iban"] or "-"),
+                        ("Yüklenecek", coin_fmt(amount, "TL")),
+                        ("Komisyon", coin_fmt(fee, "TL")),
+                        ("Bakiyeye Geçecek", coin_fmt(net, "TL")),
+                    ],
+                    messages["iban_warning"],
                 )
-                send(chat_id, summary, {"inline_keyboard": [[inline_button("Ödemeyi Yaptım", "deposit_sent")], [inline_button("İptal", "cancel")]]})
+                send(chat_id, summary, {"inline_keyboard": [
+                    [copy_button("IBAN Kopyala", settings["iban"])],
+                    [inline_button("Ödemeyi Yaptım", "deposit_sent")],
+                    [inline_button("İptal", "cancel")],
+                ]})
             else:
                 address = settings.get(f"wallet_{asset}", "")
                 network = settings.get(f"network_{asset}", asset)
                 state["network"] = network
-                card = (
-                    f"{asset} Bakiye Yükleme\n\n"
-                    f"Ağ: {network}\n"
-                    f"Yatırılacak: {fmt(amount, asset)}\n"
-                    f"Kesilecek komisyon: {fmt(fee, asset)}\n"
-                    f"Bakiyeye geçecek: {fmt(net, asset)}\n\n"
-                    f"Yatırma adresi:\n{address}\n\n"
-                    f"{messages['deposit_crypto_intro']}"
+                state["qr_content"] = address
+                state["qr_caption"] = f"{asset} Yatırma QR Kodu · {network}"
+                card = order_summary(
+                    f"{asset} Yükleme Özeti",
+                    [
+                        ("Ağ", network),
+                        ("Yüklenecek", coin_fmt(amount, asset)),
+                        ("Komisyon", coin_fmt(fee, asset)),
+                        ("Bakiyeye Geçecek", coin_fmt(net, asset)),
+                        ("Yatırma Adresi", address or "-"),
+                    ],
+                    messages["deposit_crypto_intro"],
                 )
-                send(chat_id, card, {"inline_keyboard": [[inline_button("Gönderimi Bildir", "deposit_sent")], [inline_button("İptal", "cancel")]]})
-                send_qr(chat_id, address, f"{asset} Yatırma QR Kodu · {network}")
+                send(chat_id, card, {"inline_keyboard": [
+                    [inline_button("QR Göster", "show_deposit_qr")],
+                    [inline_button("Gönderimi Bildir", "deposit_sent")],
+                    [inline_button("İptal", "cancel")],
+                ]})
             state["step"] = "waiting_sent"
             return
         if flow == "withdraw":
             if withdrawn_today(uid, asset) + amount > daily_limit(asset) > 0:
                 remaining = daily_limit(asset) - withdrawn_today(uid, asset)
-                send(chat_id, f"Günlük çekim limitiniz aşılıyor. Kalan limit: {fmt(max(remaining, Decimal('0')), asset)}"); return
+                send(chat_id, f"Günlük çekim limitiniz aşılıyor. Kalan limit: {coin_fmt(max(remaining, Decimal('0')), asset)}"); return
             p = fee_percent("withdraw", asset, uid); fee = fee_amount(amount, p); net = amount - fee
             state.update({"fee": str(fee), "net_amount": str(net)})
             if asset == "TL": state["step"] = "bank_name"; send(chat_id, "Banka adını giriniz.")
@@ -922,11 +945,14 @@ def handle_text(chat_id, username, text):
         if flow == "convert":
             to_asset = state["to_asset"]; tl_value = amount * rate(asset); gross = tl_value / rate(to_asset); p = fee_percent("convert", uid=uid); fee = fee_amount(gross, p); net = gross - fee
             state.update({"tl_value": str(tl_value), "gross_to": str(gross), "fee": str(fee), "net_amount": str(net)})
-            state["preview"] = (
-                "Dönüşüm\n\n"
-                f"Verilen · {coin_fmt(amount, asset)}\n"
-                f"Alınan · {coin_fmt(net, to_asset)}\n"
-                f"Komisyon · {coin_fmt(fee, to_asset)}"
+            state["preview"] = order_summary(
+                "Takas Özeti",
+                [
+                    ("Gönderilen", coin_fmt(amount, asset)),
+                    ("Alınacak", coin_fmt(net, to_asset)),
+                    ("Komisyon", coin_fmt(fee, to_asset)),
+                ],
+                "Kur ve tutarlar onay anındaki değerlerdir.",
             )
             require_pin(uid, state); return
 
@@ -955,24 +981,28 @@ def handle_text(chat_id, username, text):
     if flow == "withdraw" and step == "iban": state["iban"] = text.replace(" ", "").upper(); state["step"] = "name"; send(chat_id, "Hesap sahibinin ad ve soyadını giriniz."); return
     if flow == "withdraw" and step == "name":
         state["name"] = text.strip()
-        state["preview"] = (
-            "Çekim\n\n"
-            f"Tutar · {coin_fmt(state['amount'], state['asset'])}\n"
-            f"Net · {coin_fmt(state['net_amount'], state['asset'])}\n"
-            f"Komisyon · {coin_fmt(state['fee'], state['asset'])}\n"
-            f"IBAN · {state['iban']}\n"
-            f"Alıcı · {state['name']}"
+        state["preview"] = order_summary(
+            "TL Çekim Özeti",
+            [
+                ("Tutar", coin_fmt(state["amount"], state["asset"])),
+                ("Komisyon", coin_fmt(state["fee"], state["asset"])),
+                ("Alıcıya Geçecek", coin_fmt(state["net_amount"], state["asset"])),
+                ("IBAN", state["iban"]),
+                ("Alıcı", state["name"]),
+            ],
         )
         require_pin(uid, state)
         return
     if flow == "withdraw" and step == "address":
         state["address"] = text.strip()
-        state["preview"] = (
-            "Çekim\n\n"
-            f"Tutar · {coin_fmt(state['amount'], state['asset'])}\n"
-            f"Net · {coin_fmt(state['net_amount'], state['asset'])}\n"
-            f"Komisyon · {coin_fmt(state['fee'], state['asset'])}\n"
-            f"Adres · {state['address']}"
+        state["preview"] = order_summary(
+            f"{state['asset']} Çekim Özeti",
+            [
+                ("Tutar", coin_fmt(state["amount"], state["asset"])),
+                ("Komisyon", coin_fmt(state["fee"], state["asset"])),
+                ("Gönderilecek", coin_fmt(state["net_amount"], state["asset"])),
+                ("Cüzdan Adresi", state["address"]),
+            ],
         )
         require_pin(uid, state)
         return
@@ -985,13 +1015,21 @@ def handle_callback(chat_id, username, data, cb_id):
     answer(cb_id)
     uid = str(chat_id); get_user(chat_id, username)
     if data == "cancel": user_state.pop(uid, None); send(chat_id, messages["request_cancelled"], reply_keyboard()); return
+    if data == "show_deposit_qr":
+        state = user_state.get(uid, {})
+        content = str(state.get("qr_content", "")).strip()
+        if not content:
+            send(chat_id, "QR bilgisi bulunamadı.")
+            return
+        send_qr(chat_id, content, state.get("qr_caption", "Yatırma QR Kodu"))
+        return
     if data.startswith("detail:"):
         rid = data.split(":", 1)[1]
         if requests_db.get(rid, {}).get("user_id") == uid:
             send(chat_id, receipt_text(rid), {"inline_keyboard": [[inline_button("Makbuzu Yeniden Göster", f"detail:{rid}")]]})
         return
     if data.startswith("deposit_asset:"):
-        asset = data.split(":", 1)[1]; user_state[uid] = {"flow": "deposit", "step": "amount", "asset": asset}; send(chat_id, f"{asset} için {messages['amount_question']}\nMinimum: {fmt(min_amount('deposit', asset), asset)}"); return
+        asset = data.split(":", 1)[1]; user_state[uid] = {"flow": "deposit", "step": "amount", "asset": asset}; send(chat_id, f"{asset} için {messages['amount_question']}\nMinimum: {coin_fmt(min_amount('deposit', asset), asset)}"); return
     if data == "deposit_sent":
         state = user_state.get(uid, {})
         if not state:
@@ -1018,12 +1056,12 @@ def handle_callback(chat_id, username, data, cb_id):
     if data.startswith("withdraw_asset:"):
         asset = data.split(":", 1)[1]
         if balance(uid, asset) <= 0: send(chat_id, messages["no_balance"]); return
-        user_state[uid] = {"flow": "withdraw", "step": "amount", "asset": asset}; send(chat_id, f"Çekilebilir bakiye: {fmt(balance(uid, asset), asset)}\nMinimum çekim: {fmt(min_amount('withdraw', asset), asset)}\n\nÇekmek istediğiniz tutarı giriniz."); return
+        user_state[uid] = {"flow": "withdraw", "step": "amount", "asset": asset}; send(chat_id, f"Çekilebilir bakiye: {coin_fmt(balance(uid, asset), asset)}\nMinimum çekim: {coin_fmt(min_amount('withdraw', asset), asset)}\n\nÇekmek istediğiniz tutarı giriniz."); return
     if data.startswith("convert_from:"):
         asset = data.split(":", 1)[1]
         if balance(uid, asset) <= 0: send(chat_id, messages["no_balance"]); return
         user_state[uid] = {"flow": "convert", "step": "to_asset", "from_asset": asset}
-        send(chat_id, f"Dönüştürülecek: {fmt(balance(uid, asset), asset)} kullanılabilir.", asset_keyboard("convert_to", ASSETS, asset)); return
+        send(chat_id, f"Dönüştürülecek: {coin_fmt(balance(uid, asset), asset)} kullanılabilir.", asset_keyboard("convert_to", ASSETS, asset)); return
     if data.startswith("convert_to:"):
         to_asset = data.split(":", 1)[1]; state = user_state.get(uid, {}); state.update({"to_asset": to_asset, "step": "amount"}); send(chat_id, f"Bakiye · {coin_fmt(balance(uid, state['from_asset']), state['from_asset'])}\nMinimum · {coin_fmt(min_amount('convert', state['from_asset']), state['from_asset'])}\n\nTutarı girin."); return
     if data == "second_confirm":
@@ -1045,12 +1083,14 @@ def handle_callback(chat_id, username, data, cb_id):
         if choice == "new": state["step"] = "address"; send(chat_id, "Alıcı cüzdan adresini giriniz.")
         else:
             fav = users[uid]["favorites"][int(choice)]; state["address"] = fav["address"]
-            state["preview"] = (
-                "Çekim\n\n"
-                f"Tutar · {coin_fmt(state['amount'], state['asset'])}\n"
-                f"Net · {coin_fmt(state['net_amount'], state['asset'])}\n"
-                f"Komisyon · {coin_fmt(state['fee'], state['asset'])}\n"
-                f"Adres · {state['address']}"
+            state["preview"] = order_summary(
+                f"{state['asset']} Çekim Özeti",
+                [
+                    ("Tutar", coin_fmt(state["amount"], state["asset"])),
+                    ("Komisyon", coin_fmt(state["fee"], state["asset"])),
+                    ("Gönderilecek", coin_fmt(state["net_amount"], state["asset"])),
+                    ("Cüzdan Adresi", state["address"]),
+                ],
             )
             require_pin(uid, state)
         return
