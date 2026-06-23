@@ -334,18 +334,19 @@ def _render_asset_icons(value):
 
         asset = match.group(1)
         emoji_id = str(settings.get(f"icon_{asset}", "")).strip()
-if emoji_id:
-    replacement = "🪙"
-    entities.append({
-        "type": "custom_emoji",
-        "offset": offset,
-        "length": _utf16_len(replacement),
-        "custom_emoji_id": emoji_id,
-    })
-elif asset == "TL":
-    replacement = "₺"
-else:
-    replacement = asset
+
+        if emoji_id:
+            replacement = "🪙"
+            entities.append({
+                "type": "custom_emoji",
+                "offset": offset,
+                "length": _utf16_len(replacement),
+                "custom_emoji_id": emoji_id,
+            })
+        elif asset == "TL":
+            replacement = "₺"
+        else:
+            replacement = asset
 
         output.append(replacement)
         offset += _utf16_len(replacement)
@@ -353,6 +354,7 @@ else:
 
     tail = source[cursor:]
     output.append(tail)
+
     return "".join(output), entities
 
 
