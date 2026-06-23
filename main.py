@@ -188,9 +188,11 @@ def coin_fmt(value, asset):
     value = D(value)
     precision = Decimal("0.000001") if asset == "LTC" else Decimal("0.01")
     out = value.quantize(precision, rounding=ROUND_DOWN)
-    if asset == "TL":
-        return f"{{{{TL}}}}{out}"
-    return f"{out} {{{{{asset}}}}}"
+
+    formatted = f"{out:,.6f}" if asset == "LTC" else f"{out:,.2f}"
+    formatted = formatted.replace(",", "X").replace(".", ",").replace("X", ".")
+
+    return f"{formatted} {{{{{asset}}}}}"
 
 
 def h(value):
@@ -282,7 +284,7 @@ DEFAULT_SETTINGS = {
     "icon_USDT": "5895571353746021767",
     "icon_LTC": "5895441495409828662",
     "icon_TRX": "5895440778150288520",
-    "icon_TL": "",
+    "icon_TL": "5897961936837943618",
 }
 
 init_database()
@@ -296,6 +298,8 @@ admin_logs = load_json(FILES["admin_logs"], [])
 security_events = load_json(FILES["security_events"], [])
 for k, v in DEFAULT_SETTINGS.items():
     settings.setdefault(k, v)
+if not str(settings.get("icon_TL", "")).strip():
+    settings["icon_TL"] = DEFAULT_SETTINGS["icon_TL"]
 for k, v in DEFAULT_MESSAGES.items():
     messages.setdefault(k, v)
 save_json(FILES["settings"], settings)
@@ -334,9 +338,7 @@ def _render_asset_icons(value):
 
         asset = match.group(1)
         emoji_id = str(settings.get(f"icon_{asset}", "")).strip()
-        if asset == "TL":
-            replacement = "₺"
-        elif emoji_id:
+        if emoji_id:
             replacement = "🪙"
             entities.append({
                 "type": "custom_emoji",
@@ -344,6 +346,8 @@ def _render_asset_icons(value):
                 "length": _utf16_len(replacement),
                 "custom_emoji_id": emoji_id,
             })
+        elif asset == "TL":
+            replacement = "₺"
         else:
             replacement = asset
 
@@ -433,7 +437,7 @@ def reply_keyboard():
             [{"text": "Cüzdanım"}, {"text": "Bakiye Yükle"}],
             [{"text": "Para Çek"}, {"text": "Dönüştür"}],
             [{"text": "İşlem Geçmişi"}, {"text": "Güvenlik"}],
-            [{"text": "Favori Adresler"}, {"text": "Destek"}],
+            [{"text": "Kayıtlı Adresler"}, {"text": "Destek"}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
@@ -618,18 +622,61 @@ def atomic_withdraw(uid, state):
 def atomic_convert(uid, state):
     uid = str(uid)
     with data_lock:
-        source, target = state["from_asset"], state["to_asset"]
-        amount, net = D(state["amount"]), D(state["net_amount"])
-        if balance(uid, source) < amount: raise ValueError("Yetersiz bakiye")
-        rid = new_request(uid, "convert", {"from_asset": source, "to_asset": target, "from_amount": state["amount"], "tl_value": state["tl_value"], "fee": state["fee"], "net_to_amount": state["net_amount"], "second_confirmation": True, "idempotency_key": state.get("confirm_token", "")})
+        source = state["from_asset"]
+        target = state["to_asset"]
+        amount = D(state["amount"])
+
+        if amount <= 0:
+            raise ValueError("Geçersiz dönüşüm tutarı")
+        if balance(uid, source) < amount:
+            raise ValueError("Yetersiz bakiye")
+
+        source_rate = rate(source)
+        target_rate = rate(target)
+        if source_rate <= 0 or target_rate <= 0:
+            raise ValueError("Geçersiz kur nedeniyle işlem yapılamıyor")
+
+        fee_rate = fee_percent("convert", uid=uid)
+        if fee_rate < 0 or fee_rate >= 100:
+            raise ValueError("Geçersiz komisyon oranı")
+
+        tl_value = amount * source_rate
+        gross = tl_value / target_rate
+        fee = fee_amount(gross, fee_rate)
+        net = gross - fee
+        if net <= 0:
+            raise ValueError("Komisyon sonrası geçerli tutar oluşmadı")
+
+        state.update({
+            "tl_value": str(tl_value),
+            "gross_to": str(gross),
+            "fee": str(fee),
+            "net_amount": str(net),
+        })
+
+        rid = new_request(uid, "convert", {
+            "from_asset": source,
+            "to_asset": target,
+            "from_amount": str(amount),
+            "tl_value": str(tl_value),
+            "fee": str(fee),
+            "net_to_amount": str(net),
+            "second_confirmation": True,
+            "idempotency_key": state.get("confirm_token", ""),
+        })
         old_source, old_target = balance(uid, source), balance(uid, target)
         try:
-            change_balance(uid, source, -amount, "convert_out", rid); change_balance(uid, target, net, "convert_in", rid)
-            requests_db[rid].update({"status": "completed", "completed_at": now(), "updated_at": now()}); save_json(FILES["requests"], requests_db)
+            change_balance(uid, source, -amount, "convert_out", rid)
+            change_balance(uid, target, net, "convert_in", rid)
+            requests_db[rid].update({"status": "completed", "completed_at": now(), "updated_at": now()})
+            save_json(FILES["requests"], requests_db)
             return rid
         except Exception:
-            users[uid]["balances"][source] = str(old_source); users[uid]["balances"][target] = str(old_target)
-            requests_db.pop(rid, None); save_json(FILES["users"], users); save_json(FILES["requests"], requests_db)
+            users[uid]["balances"][source] = str(old_source)
+            users[uid]["balances"][target] = str(old_target)
+            requests_db.pop(rid, None)
+            save_json(FILES["users"], users)
+            save_json(FILES["requests"], requests_db)
             raise
 
 
@@ -679,7 +726,8 @@ def wallet_text(uid):
         pending = D(u.get("pending_balances", {}).get(asset, "0"))
         if pending > 0:
             lines.append(f"Bekleyen · {coin_fmt(pending, asset)}")
-    return "\n".join(lines)
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def active_balances(uid):
@@ -848,12 +896,12 @@ def handle_text(chat_id, username, text):
     if text == "Dönüştür": begin_convert(chat_id); return
     if text == "İşlem Geçmişi": show_history(chat_id); return
     if text == "Güvenlik": show_security(chat_id); return
-    if text == "Favori Adresler":
+    if text == "Kayıtlı Adresler":
         favs = users[uid].get("favorites", [])
         if not favs:
-            send(chat_id, "Kayıtlı favori adresiniz bulunmuyor.", {"inline_keyboard": [[inline_button("Yeni Adres Ekle", "favorite:add")]]})
+            send(chat_id, "Kayıtlı adresiniz bulunmuyor.", {"inline_keyboard": [[inline_button("Yeni Adres Ekle", "favorite:add")]]})
         else:
-            lines = ["Favori Cüzdan Adresleri"] + [f"{i+1}. {f['label']} · {f['asset']}\n{f['address']}" for i, f in enumerate(favs)]
+            lines = ["Kayıtlı Cüzdan Adresleri"] + [f"{i+1}. {f['label']} · {f['asset']}\n{f['address']}" for i, f in enumerate(favs)]
             send(chat_id, "\n\n".join(lines), {"inline_keyboard": [[inline_button("Yeni Adres Ekle", "favorite:add")]]})
         return
     if text == "Destek": send(chat_id, messages["support"], reply_keyboard()); return
@@ -1073,7 +1121,7 @@ def handle_text(chat_id, username, text):
         return
     if flow == "favorite_add" and step == "label": state["label"] = text.strip(); state["step"] = "address"; send(chat_id, "Cüzdan adresini giriniz."); return
     if flow == "favorite_add" and step == "address":
-        users[uid]["favorites"].append({"label": state["label"], "asset": state["asset"], "address": text.strip(), "created_at": now()}); save_json(FILES["users"], users); user_state.pop(uid, None); send(chat_id, "Favori adres kaydedildi.", reply_keyboard()); return
+        users[uid]["favorites"].append({"label": state["label"], "asset": state["asset"], "address": text.strip(), "created_at": now()}); save_json(FILES["users"], users); user_state.pop(uid, None); send(chat_id, "Adres kaydedildi.", reply_keyboard()); return
 
 
 def handle_callback(chat_id, username, data, cb_id):
@@ -1128,7 +1176,77 @@ def handle_callback(chat_id, username, data, cb_id):
         user_state[uid] = {"flow": "convert", "step": "to_asset", "from_asset": asset}
         send(chat_id, f"Dönüştürülecek: {coin_fmt(balance(uid, asset), asset)} kullanılabilir.", asset_keyboard("convert_to", ASSETS, asset)); return
     if data.startswith("convert_to:"):
-        to_asset = data.split(":", 1)[1]; state = user_state.get(uid, {}); state.update({"to_asset": to_asset, "step": "amount"}); send(chat_id, f"Bakiye · {coin_fmt(balance(uid, state['from_asset']), state['from_asset'])}\nMinimum · {coin_fmt(min_amount('convert', state['from_asset']), state['from_asset'])}\n\nTutarı girin."); return
+        to_asset = data.split(":", 1)[1]
+        state = user_state.get(uid, {})
+        if state.get("flow") != "convert" or not state.get("from_asset"):
+            send(chat_id, "Dönüşüm oturumu bulunamadı.")
+            return
+        state.update({"to_asset": to_asset, "step": "amount"})
+        source = state["from_asset"]
+        send(
+            chat_id,
+            f"Bakiye · {coin_fmt(balance(uid, source), source)}\n"
+            f"Minimum · {coin_fmt(min_amount('convert', source), source)}\n\n"
+            "Tutarı girin veya tüm bakiyeyi dönüştürün.",
+            {"inline_keyboard": [
+                [inline_button("Tüm Bakiyeyi Dönüştür", "convert_all")],
+                [inline_button("İptal", "cancel")],
+            ]},
+        )
+        return
+    if data == "convert_all":
+        state = user_state.get(uid, {})
+        if state.get("flow") != "convert" or not state.get("from_asset") or not state.get("to_asset"):
+            send(chat_id, "Dönüşüm oturumu bulunamadı.")
+            return
+
+        source = state["from_asset"]
+        target = state["to_asset"]
+        amount = balance(uid, source)
+        if amount <= 0:
+            send(chat_id, messages["no_balance"])
+            return
+        if amount < min_amount("convert", source):
+            send(chat_id, f"Minimum · {coin_fmt(min_amount('convert', source), source)}")
+            return
+
+        source_rate = rate(source)
+        target_rate = rate(target)
+        if source_rate <= 0 or target_rate <= 0:
+            send(chat_id, "Geçersiz kur nedeniyle dönüşüm yapılamıyor.")
+            return
+
+        fee_rate = fee_percent("convert", uid=uid)
+        if fee_rate < 0 or fee_rate >= 100:
+            send(chat_id, "Geçersiz komisyon oranı.")
+            return
+
+        tl_value = amount * source_rate
+        gross = tl_value / target_rate
+        fee = fee_amount(gross, fee_rate)
+        net = gross - fee
+        if net <= 0:
+            send(chat_id, "Komisyon sonrası geçerli tutar oluşmadı.")
+            return
+
+        state.update({
+            "amount": str(amount),
+            "tl_value": str(tl_value),
+            "gross_to": str(gross),
+            "fee": str(fee),
+            "net_amount": str(net),
+        })
+        state["preview"] = order_summary(
+            "Takas Özeti",
+            [
+                ("Gönderilen", coin_fmt(amount, source)),
+                ("Alınacak", coin_fmt(net, target)),
+                ("Komisyon", coin_fmt(fee, target)),
+            ],
+            "Tüm kullanılabilir bakiye dönüştürülecektir. Kur son onayda yeniden hesaplanır.",
+        )
+        require_pin(uid, state)
+        return
     if data == "second_confirm":
         state = user_state.get(uid, {})
         if not consume_confirmation(state):
@@ -1141,7 +1259,7 @@ def handle_callback(chat_id, username, data, cb_id):
         except ValueError as exc:
             user_state.pop(uid, None); send(chat_id, str(exc), reply_keyboard())
         return
-    if data == "favorite:add": user_state[uid] = {"flow": "favorite_add", "step": "asset"}; send(chat_id, "Favori adresin para birimini seçiniz.", asset_keyboard("favorite_asset", CRYPTO_ASSETS)); return
+    if data == "favorite:add": user_state[uid] = {"flow": "favorite_add", "step": "asset"}; send(chat_id, "Kayıtlı adresin para birimini seçiniz.", asset_keyboard("favorite_asset", CRYPTO_ASSETS)); return
     if data.startswith("favorite_asset:"): user_state[uid] = {"flow": "favorite_add", "step": "label", "asset": data.split(":",1)[1]}; send(chat_id, "Bu adres için bir isim giriniz."); return
     if data.startswith("favorite_use:"):
         choice = data.split(":", 1)[1]; state = user_state.get(uid, {})
