@@ -188,7 +188,11 @@ def coin_fmt(value, asset):
     value = D(value)
     precision = Decimal("0.000001") if asset == "LTC" else Decimal("0.01")
     out = value.quantize(precision, rounding=ROUND_DOWN)
-    return f"{out} {{{{{asset}}}}}"
+
+    formatted = f"{out:,.6f}" if asset == "LTC" else f"{out:,.2f}"
+    formatted = formatted.replace(",", "X").replace(".", ",").replace("X", ".")
+
+    return f"{formatted} {{{{{asset}}}}}"
 
 
 def h(value):
