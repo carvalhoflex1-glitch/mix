@@ -1855,7 +1855,140 @@ def security_headers(response):
     return response
 
 @app.route("/")
-def home(): return "Nerlo Wallet aktif ✅"
+def home():
+    return """<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Nerlo Wallet ile kripto bakiye işlemlerinizi Telegram üzerinden kolayca yönetin.">
+  <meta name="color-scheme" content="dark">
+  <title>Nerlo Wallet</title>
+  <style>
+    :root {
+      --bg: #070a10;
+      --panel: #101722;
+      --line: #243042;
+      --text: #f4f7fb;
+      --muted: #9aa7b7;
+      --accent: #68e0d2;
+      --accent2: #7cc7ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background:
+        radial-gradient(circle at 15% 10%, rgba(104,224,210,.12), transparent 32%),
+        radial-gradient(circle at 90% 90%, rgba(124,199,255,.10), transparent 30%),
+        var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .page { width: min(920px, 100%); }
+    .hero {
+      padding: clamp(28px, 6vw, 64px);
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      background: rgba(16, 23, 34, .92);
+      box-shadow: 0 30px 100px rgba(0,0,0,.36);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 34px; }
+    .mark {
+      width: 46px;
+      height: 46px;
+      display: grid;
+      place-items: center;
+      border-radius: 15px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #051116;
+      font-size: 21px;
+      font-weight: 950;
+    }
+    .brand strong { display: block; font-size: 18px; }
+    .brand span { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; }
+    h1 {
+      max-width: 700px;
+      margin: 0;
+      font-size: clamp(34px, 7vw, 66px);
+      line-height: 1.02;
+      letter-spacing: -.055em;
+    }
+    .lead {
+      max-width: 680px;
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: clamp(16px, 2.2vw, 19px);
+      line-height: 1.65;
+    }
+    .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 30px; }
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 48px;
+      padding: 0 20px;
+      border-radius: 13px;
+      text-decoration: none;
+      font-weight: 850;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #061116;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 34px;
+    }
+    .card {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: #0c121b;
+    }
+    .card b { display: block; margin-bottom: 7px; font-size: 14px; }
+    .card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .note {
+      margin-top: 18px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    footer { padding: 18px 4px 0; color: #6f7e90; font-size: 11px; text-align: center; }
+    @media (max-width: 720px) {
+      .grid { grid-template-columns: 1fr; }
+      .button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <div class="brand">
+        <div class="mark">N</div>
+        <div><strong>Nerlo Wallet</strong><span>Telegram tabanlı dijital cüzdan</span></div>
+      </div>
+      <h1>Kripto bakiyenizi sade ve güvenli biçimde yönetin.</h1>
+      <p class="lead">USDT (TRC20), TRX, LTC ve XMR işlemleri için Telegram botumuz üzerinden bakiye yükleme, çekim talebi, dönüşüm ve işlem takibi yapabilirsiniz.</p>
+      <div class="actions">
+        <a class="button" href="https://t.me/netrowalletbot" target="_blank" rel="noopener noreferrer">Telegram Botunu Aç</a>
+      </div>
+      <div class="grid">
+        <div class="card"><b>Kripto işlemleri</b><p>Desteklenen varlıklar için yatırım ve çekim taleplerinizi bot üzerinden yönetin.</p></div>
+        <div class="card"><b>Bakiye takibi</b><p>Kullanılabilir ve bekleyen bakiyelerinizi tek ekranda görüntüleyin.</p></div>
+        <div class="card"><b>İşlem güvenliği</b><p>PIN doğrulaması, işlem kaydı ve yönetici incelemesiyle kontrollü işlem akışı.</p></div>
+      </div>
+      <div class="note">Türk lirası yatırma ve çekme işlemleri manuel incelemeye tabidir. Kripto varlık işlemlerinde yalnızca belirtilen ağı kullanınız.</div>
+    </section>
+    <footer>© 2026 Nerlo Wallet</footer>
+  </main>
+</body>
+</html>"""
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
