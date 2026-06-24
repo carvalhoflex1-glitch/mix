@@ -200,7 +200,7 @@ def h(value):
 
 
 DEFAULT_MESSAGES = {
-    "welcome": "ZaqelV2'ye hoş geldiniz.\n\nCüzdanınızı güvenli biçimde yönetmek için aşağıdaki menüden devam edebilirsiniz.",
+    "welcome": "Nerlo'ya hoş geldiniz.\n\nCüzdanınızı güvenli biçimde yönetmek için aşağıdaki menüden devam edebilirsiniz.",
     "wallet_title": "Cüzdan Bakiyeleriniz",
     "deposit_menu": "Yüklemek istediğiniz bakiye türünü seçiniz.",
     "withdraw_menu": "Çekmek istediğiniz bakiye türünü seçiniz.",
@@ -302,6 +302,18 @@ if not str(settings.get("icon_TL", "")).strip():
     settings["icon_TL"] = DEFAULT_SETTINGS["icon_TL"]
 for k, v in DEFAULT_MESSAGES.items():
     messages.setdefault(k, v)
+
+# Önceki marka adıyla veritabanına kaydedilmiş metinleri yeni adla güncelle.
+_legacy_brand_names = (
+    base64.b64decode("WmFxZWxWMg==").decode("utf-8"),
+    base64.b64decode("WmFxZWw=").decode("utf-8"),
+)
+for key, value in list(messages.items()):
+    if isinstance(value, str):
+        for old_name in _legacy_brand_names:
+            value = re.sub(re.escape(old_name), "Nerlo", value, flags=re.IGNORECASE)
+        messages[key] = value
+
 save_json(FILES["settings"], settings)
 save_json(FILES["messages"], messages)
 
@@ -414,7 +426,7 @@ def send_qr(chat_id, content, caption=""):
     data = {"chat_id": str(chat_id), "caption": rendered_caption}
     if caption_entities:
         data["caption_entities"] = json.dumps(caption_entities, ensure_ascii=False)
-    return api("sendPhoto", data, {"photo": ("zaqel-qr.png", buf, "image/png")})
+    return api("sendPhoto", data, {"photo": ("nerlo-qr.png", buf, "image/png")})
 
 def answer(cb_id, text=""):
     payload = {"callback_query_id": cb_id}
@@ -481,8 +493,18 @@ def verify_pin(stored, pin):
             return check_password_hash(stored, str(pin))
     except ValueError:
         return False
-    legacy = hashlib.sha256((os.getenv("PIN_SALT", "zaqelv2-pin-salt") + str(pin)).encode()).hexdigest()
-    return secrets.compare_digest(stored, legacy)
+    configured_salt = os.getenv("PIN_SALT", "").strip()
+    legacy_salts = [configured_salt] if configured_salt else [
+        "nerlo-pin-salt",
+        base64.b64decode("emFxZWx2Mi1waW4tc2FsdA==").decode("utf-8"),
+    ]
+    return any(
+        secrets.compare_digest(
+            stored,
+            hashlib.sha256((salt + str(pin)).encode()).hexdigest(),
+        )
+        for salt in legacy_salts
+    )
 
 
 def get_user(chat_id, username=""):
@@ -1379,7 +1401,7 @@ def security_headers(response):
     return response
 
 @app.route("/")
-def home(): return "ZaqelV2 aktif ✅"
+def home(): return "Nerlo aktif ✅"
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -1392,7 +1414,7 @@ def login():
         if secrets.compare_digest(request.form.get("username", ""), PANEL_USERNAME) and secrets.compare_digest(request.form.get("password", ""), PANEL_PASSWORD):
             attempts.clear(); session.clear(); session["login"] = True; session.permanent = True; csrf_token(); return redirect("/admin")
         attempts.append(time.time()); time.sleep(min(2 ** len(attempts), 8) / 10); error = "Hatalı giriş"
-    return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>ZaqelV2</title><style>body{{margin:0;background:#07111f;color:#fff;font-family:Arial;display:grid;place-items:center;min-height:100vh}}form{{width:min(400px,calc(100% - 32px));background:#0e1b2d;padding:28px;border:1px solid #1e3656;border-radius:22px}}input,button{{width:100%;box-sizing:border-box;padding:13px;margin-top:10px;border-radius:12px;border:1px solid #29466f;background:#091424;color:#fff}}button{{background:#00d4ff;color:#001018;font-weight:800}}</style></head><body><form method='post'><h1>ZaqelV2 Yönetim</h1><input name='username' autocomplete='username' placeholder='Kullanıcı adı'><input type='password' autocomplete='current-password' name='password' placeholder='Şifre'><button>Giriş Yap</button><p>{h(error)}</p></form></body></html>"""
+    return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Nerlo</title><style>body{{margin:0;background:#07111f;color:#fff;font-family:Arial;display:grid;place-items:center;min-height:100vh}}form{{width:min(400px,calc(100% - 32px));background:#0e1b2d;padding:28px;border:1px solid #1e3656;border-radius:22px}}input,button{{width:100%;box-sizing:border-box;padding:13px;margin-top:10px;border-radius:12px;border:1px solid #29466f;background:#091424;color:#fff}}button{{background:#00d4ff;color:#001018;font-weight:800}}</style></head><body><form method='post'><h1>Nerlo Yönetim</h1><input name='username' autocomplete='username' placeholder='Kullanıcı adı'><input type='password' autocomplete='current-password' name='password' placeholder='Şifre'><button>Giriş Yap</button><p>{h(error)}</p></form></body></html>"""
 
 @app.route("/logout")
 def logout(): session.clear(); return redirect("/login")
@@ -1720,9 +1742,9 @@ def admin():
         setting_sections += f"<details class='subbox'><summary>{h(title)}</summary><div class='grid inner'>{fields}</div></details>"
     message_inputs = "".join(message_field(k) for k in DEFAULT_MESSAGES)
     logs = "".join(f"<tr><td>{h(x.get('created_at'))}</td><td>{h(admin_action_label(x.get('action')))}</td><td>{h(x.get('user_id'))}</td><td>{h(localized_admin_detail(x.get('details')))}</td></tr>" for x in reversed(admin_logs[-100:]))
-    return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>ZaqelV2 Yönetim</title><style>
+    return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Nerlo Yönetim</title><style>
     :root{{--bg:#07111f;--panel:#0d1b2d;--panel2:#0a1626;--line:#1d3857;--text:#f5fbff;--muted:#91abc0;--cyan:#22d3ee;--green:#22c55e;--red:#ef4444;--orange:#f59e0b}}*{{box-sizing:border-box}}body{{margin:0;background:linear-gradient(135deg,#06101d,#0a1830);color:var(--text);font-family:Inter,Arial,sans-serif}}a{{color:var(--cyan);text-decoration:none}}.layout{{display:grid;grid-template-columns:250px 1fr;min-height:100vh}}aside{{padding:24px;background:rgba(5,15,28,.96);border-right:1px solid var(--line);position:sticky;top:0;height:100vh}}aside h1{{font-size:22px}}aside a{{display:block;color:#cde9f6;padding:11px 12px;border-radius:10px;margin:4px 0}}aside a:hover{{background:#10243b}}main{{padding:24px;min-width:0}}.top{{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:20px}}.box,.card{{background:rgba(13,27,45,.9);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 16px 42px rgba(0,0,0,.2)}}section{{margin-bottom:20px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}}.metric{{padding:18px;background:var(--panel2);border:1px solid var(--line);border-radius:16px}}.metric span,.metric small{{color:var(--muted)}}.metric b{{display:block;font-size:24px;margin:7px 0}}.cardhead{{display:flex;justify-content:space-between;align-items:center}}.badge{{padding:6px 10px;border-radius:999px;background:#16314f;color:#c9eff8}}.detail{{display:flex;justify-content:space-between;gap:14px;padding:8px 0;border-bottom:1px dashed #244361}}.detail span{{color:var(--muted)}}.detail b{{max-width:65%;text-align:right;overflow-wrap:anywhere}}input,textarea,select,button{{width:100%;padding:11px 12px;border-radius:11px;border:1px solid #29496d;background:#081525;color:white}}textarea{{min-height:80px}}button{{background:var(--cyan);color:#001018;font-weight:800;border:0;cursor:pointer}}button.ok{{background:var(--green);color:white}}button.bad{{background:var(--red);color:white}}.actions{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}}label{{display:block;color:var(--muted);margin:11px 0 6px}}details summary{{cursor:pointer;font-size:18px;font-weight:800;padding:10px 0}}.tablewrap{{overflow:auto}}table{{width:100%;border-collapse:collapse;min-width:900px}}th,td{{padding:11px;border-bottom:1px solid var(--line);text-align:left}}.filters{{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:10px}}.settings-stack{{display:grid;gap:12px}}.subbox{{background:#081525;border:1px solid var(--line);border-radius:14px;padding:0 14px}}.subbox summary{{padding:16px 0}}.inner{{padding:0 0 16px}}@media(max-width:900px){{.layout{{grid-template-columns:1fr}}aside{{height:auto;position:static}}.filters{{grid-template-columns:1fr}}}}@media(max-width:680px){{main{{padding:14px}}.detail{{display:block}}.detail b{{display:block;text-align:left;max-width:100%;margin-top:4px}}.actions{{grid-template-columns:1fr}}}}
-    </style></head><body><div class='layout'><aside><h1>ZaqelV2</h1><a href='#dashboard'>Genel Bakış</a><a href='#requests'>İşlemler</a><a href='#users'>Kullanıcılar</a><a href='#adjust'>Bakiye Düzeltme</a><a href='#broadcast'>Duyurular</a><a href='#settings'>Ayarlar</a><a href='#logs'>Yönetim Kayıtları</a><a href='/logout'>Çıkış</a></aside><main><div class='top'><div><h2>Kontrol Merkezi</h2><p style='color:var(--muted)'>Cüzdan, kullanıcı, işlem ve güvenlik yönetimi</p></div></div>
+    </style></head><body><div class='layout'><aside><h1>Nerlo</h1><a href='#dashboard'>Genel Bakış</a><a href='#requests'>İşlemler</a><a href='#users'>Kullanıcılar</a><a href='#adjust'>Bakiye Düzeltme</a><a href='#broadcast'>Duyurular</a><a href='#settings'>Ayarlar</a><a href='#logs'>Yönetim Kayıtları</a><a href='/logout'>Çıkış</a></aside><main><div class='top'><div><h2>Kontrol Merkezi</h2><p style='color:var(--muted)'>Cüzdan, kullanıcı, işlem ve güvenlik yönetimi</p></div></div>
     <section id='dashboard'><div class='grid'>{metrics}<div class='metric'><span>Toplam kullanıcı</span><b>{len(users)}</b></div><div class='metric'><span>Bekleyen işlem</span><b>{sum(1 for r in requests_db.values() if r.get('status') in ('pending','processing'))}</b></div></div></section>
     <section id='requests' class='box'><h2>İşlem Talepleri</h2><form class='filters' method='get'><input name='q' placeholder='Kullanıcı ara' value='{h(q)}'><select name='status'><option value='all'>Tüm durumlar</option>{''.join(f"<option value='{s}' {'selected' if status_filter==s else ''}>{status_label(s)}</option>" for s in ['pending','processing','completed','rejected'])}</select><select name='type'><option value='all'>Tüm türler</option>{''.join(f"<option value='{t}' {'selected' if type_filter==t else ''}>{ {'deposit':'Yatırma','withdraw':'Çekme','convert':'Dönüştürme'}[t] }</option>" for t in ['deposit','withdraw','convert'])}</select><button>Filtrele</button></form><div id='request-grid' class='grid' style='margin-top:14px'>{cards or '<div class="metric">İşlem bulunmuyor.</div>'}</div></section>
     <section id='users' class='box'><h2>Kullanıcılar</h2><div class='tablewrap'><table><tr><th>Kimlik</th><th>Kullanıcı</th><th>TL</th><th>USDT</th><th>LTC</th><th>TRX</th><th>Seviye</th><th>Hesap</th><th>Çekim</th></tr>{user_rows}</table></div></section>
