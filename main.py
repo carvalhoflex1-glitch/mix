@@ -62,6 +62,7 @@ FILES = {
     "messages": "messages.json",
     "admin_logs": "admin_logs.json",
     "security_events": "security_events.json",
+    "panel_users": "panel_users.json",
 }
 
 
@@ -395,7 +396,8 @@ DEFAULT_SETTINGS = {
     "fee_withdraw_USDT_percent": "1",
     "fee_withdraw_LTC_percent": "1",
     "fee_withdraw_TRX_percent": "1",
-    "fee_convert_percent": "2",
+    "fee_convert_tl_percent": "2",
+    "fee_convert_crypto_percent": "2",
     "min_deposit_TL": "100",
     "min_deposit_USDT": "5",
     "min_deposit_LTC": "0.01",
@@ -448,14 +450,24 @@ settings = load_json(FILES["settings"], {})
 messages = load_json(FILES["messages"], {})
 admin_logs = load_json(FILES["admin_logs"], [])
 security_events = load_json(FILES["security_events"], [])
+panel_users = load_json(FILES["panel_users"], {})
+legacy_convert_fee = str(settings.get("fee_convert_percent", "2"))
 for k, v in DEFAULT_SETTINGS.items():
-    settings.setdefault(k, v)
+    settings.setdefault(k, legacy_convert_fee if k in ("fee_convert_tl_percent", "fee_convert_crypto_percent") else v)
+settings.pop("fee_convert_percent", None)
 if not str(settings.get("icon_TL", "")).strip():
     settings["icon_TL"] = DEFAULT_SETTINGS["icon_TL"]
 for k, v in DEFAULT_MESSAGES.items():
     messages.setdefault(k, v)
+rank_data_removed = False
+for existing_user in users.values():
+    if "tier" in existing_user:
+        existing_user.pop("tier", None)
+        rank_data_removed = True
 save_json(FILES["settings"], settings)
 save_json(FILES["messages"], messages)
+if rank_data_removed:
+    save_json(FILES["users"], users)
 
 
 def api(method, data=None, files=None):
@@ -617,7 +629,6 @@ def reply_keyboard(uid=None):
             [{"text": x["withdraw"]}, {"text": x["convert"]}],
             [{"text": x["history"]}, {"text": x["security"]}],
             [{"text": x["favorites"]}, {"text": x["support"]}],
-            [{"text": x["language"]}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
@@ -694,7 +705,6 @@ def get_user(chat_id, username=""):
             "withdraw_locked": False,
             "pin_hash": "",
             "pin_failed_attempts": 0,
-            "tier": "Basic",
             "language": "",
             "balances": {a: "0" for a in ASSETS},
             "pending_balances": {a: "0" for a in ASSETS},
@@ -709,7 +719,6 @@ def get_user(chat_id, username=""):
     u = users[uid]
     u.setdefault("withdraw_locked", False)
     u.setdefault("pin_failed_attempts", 0)
-    u.setdefault("tier", "Basic")
     u.setdefault("language", "")
     u.setdefault("favorites", [])
     u.setdefault("notifications", {"transactions": True, "security": True, "announcements": True})
@@ -835,7 +844,7 @@ def atomic_convert(uid, state):
         if source_rate <= 0 or target_rate <= 0:
             raise ValueError("Geçersiz kur nedeniyle işlem yapılamıyor")
 
-        fee_rate = fee_percent("convert", uid=uid)
+        fee_rate = fee_percent("convert", uid=uid, from_asset=source, to_asset=target)
         if fee_rate < 0 or fee_rate >= 100:
             raise ValueError("Geçersiz komisyon oranı")
 
@@ -1006,12 +1015,16 @@ def live_rate_note(uid):
     suffix = f" Son güncelleme: {updated}." if updated and lang_of(uid) == "tr" else (f" Last update: {updated}." if updated else "")
     return t(uid, "rate_note", updated=suffix)
 
-def fee_percent(kind, asset=None, uid=None):
+def fee_percent(kind, asset=None, uid=None, from_asset=None, to_asset=None):
     if uid is not None:
         override = str(users.get(str(uid), {}).get("custom_fee_percent", "")).strip()
         if override:
             return D(override)
-    return D(settings.get("fee_convert_percent", "0")) if kind == "convert" else D(settings.get(f"fee_{kind}_{asset}_percent", "0"))
+    if kind == "convert":
+        involves_tl = from_asset == "TL" or to_asset == "TL"
+        key = "fee_convert_tl_percent" if involves_tl else "fee_convert_crypto_percent"
+        return D(settings.get(key, "0"))
+    return D(settings.get(f"fee_{kind}_{asset}_percent", "0"))
 
 
 def fee_amount(amount, p):
@@ -1037,8 +1050,7 @@ def withdrawn_today(uid, asset):
 def wallet_text(uid):
     uid = str(uid)
     u = users[uid]
-    tier = tier_label(u.get("tier", "Basic")) if lang_of(uid) == "tr" else u.get("tier", "Basic")
-    lines = [f"{t(uid, 'wallet_title')} · {tier}", ""]
+    lines = [t(uid, "wallet_title"), ""]
     for asset in ASSETS:
         lines.append(ucoin(uid, u["balances"].get(asset, "0"), asset))
         pending = D(u.get("pending_balances", {}).get(asset, "0"))
@@ -1442,7 +1454,7 @@ def handle_text(chat_id, username, text):
             to_asset = state["to_asset"]
             source_rate, target_rate = rate(asset), rate(to_asset)
             if source_rate <= 0 or target_rate <= 0: send(chat_id, t(uid, "invalid_rate")); return
-            p = fee_percent("convert", uid=uid)
+            p = fee_percent("convert", uid=uid, from_asset=asset, to_asset=to_asset)
             if p < 0 or p >= 100: send(chat_id, t(uid, "invalid_fee")); return
             tl_value = amount * source_rate; gross = tl_value / target_rate; fee = fee_amount(gross, p); net = gross - fee
             if net <= 0: send(chat_id, t(uid, "invalid_net")); return
@@ -1579,7 +1591,7 @@ def handle_callback(chat_id, username, data, cb_id):
         if amount < min_amount("convert", source): send(chat_id, f"{t(uid, 'minimum')} · {ucoin(uid, min_amount('convert', source), source)}"); return
         source_rate, target_rate = rate(source), rate(target)
         if source_rate <= 0 or target_rate <= 0: send(chat_id, t(uid, "invalid_rate")); return
-        fee_rate = fee_percent("convert", uid=uid)
+        fee_rate = fee_percent("convert", uid=uid, from_asset=source, to_asset=target)
         if fee_rate < 0 or fee_rate >= 100: send(chat_id, t(uid, "invalid_fee")); return
         tl_value = amount * source_rate; gross = tl_value / target_rate; fee = fee_amount(gross, fee_rate); net = gross - fee
         if net <= 0: send(chat_id, t(uid, "invalid_net")); return
@@ -1665,7 +1677,79 @@ def bot_loop():
             print("BOT LOOP ERROR:", exc); time.sleep(5)
 
 
-def logged_in(): return session.get("login") is True
+PANEL_PERMISSION_LABELS = {
+    "dashboard": "Genel bakış",
+    "requests": "İşlem talepleri",
+    "users": "Kullanıcı yönetimi",
+    "broadcast": "Duyuru gönderme",
+    "settings": "Ayar yönetimi",
+    "logs": "Yönetim kayıtları",
+    "admins": "Panel yetkilileri",
+}
+
+VIEW_PERMISSIONS = dict(PANEL_PERMISSION_LABELS)
+ACTION_PERMISSIONS = {
+    "settings": "settings",
+    "process_request": "requests",
+    "approve_request": "requests",
+    "reject_request": "requests",
+    "adjust_balance": "users",
+    "update_user_profile": "users",
+    "freeze_user": "users",
+    "unfreeze_user": "users",
+    "lock_withdraw": "users",
+    "unlock_withdraw": "users",
+    "broadcast": "broadcast",
+    "create_panel_user": "admins",
+    "update_panel_user": "admins",
+    "delete_panel_user": "admins",
+}
+
+
+def current_panel_username():
+    return str(session.get("panel_username", ""))
+
+
+def panel_is_root():
+    return session.get("panel_root") is True and secrets.compare_digest(current_panel_username(), PANEL_USERNAME)
+
+
+def logged_in():
+    if session.get("login") is not True:
+        return False
+    if panel_is_root():
+        return True
+    account = panel_users.get(current_panel_username().lower())
+    return bool(account and account.get("active", True))
+
+
+def has_panel_permission(permission):
+    if not logged_in():
+        return False
+    if panel_is_root():
+        return True
+    account = panel_users.get(current_panel_username().lower(), {})
+    return permission in set(account.get("permissions", []))
+
+
+def panel_permissions_from_form():
+    return sorted({value for value in request.form.getlist("permissions") if value in PANEL_PERMISSION_LABELS})
+
+
+def authenticate_panel_account(username, password):
+    username = str(username or "").strip()
+    password = str(password or "")
+    if secrets.compare_digest(username, PANEL_USERNAME) and secrets.compare_digest(password, PANEL_PASSWORD):
+        return username, True
+    account = panel_users.get(username.lower())
+    if not account or not account.get("active", True):
+        return "", False
+    try:
+        if check_password_hash(account.get("password_hash", ""), password):
+            return username.lower(), False
+    except (ValueError, TypeError):
+        pass
+    return "", False
 
 @app.after_request
 def security_headers(response):
@@ -1690,8 +1774,16 @@ def login():
     while attempts and attempts[0] < cutoff: attempts.popleft()
     if request.method == "POST":
         if len(attempts) >= LOGIN_MAX_ATTEMPTS: return "Çok fazla başarısız giriş denemesi", 429
-        if secrets.compare_digest(request.form.get("username", ""), PANEL_USERNAME) and secrets.compare_digest(request.form.get("password", ""), PANEL_PASSWORD):
-            attempts.clear(); session.clear(); session["login"] = True; session.permanent = True; csrf_token(); return redirect("/admin")
+        panel_username, is_root = authenticate_panel_account(request.form.get("username", ""), request.form.get("password", ""))
+        if panel_username:
+            attempts.clear()
+            session.clear()
+            session["login"] = True
+            session["panel_username"] = panel_username
+            session["panel_root"] = is_root
+            session.permanent = True
+            csrf_token()
+            return redirect("/admin")
         attempts.append(time.time()); time.sleep(min(2 ** len(attempts), 8) / 10); error = "Kullanıcı adı veya şifre hatalı"
     return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='color-scheme' content='dark'><title>Nerlo Wallet Yönetim</title><style>
     :root{{--bg:#070a10;--panel:#0f141d;--panel2:#141b26;--line:#242d3a;--text:#f5f7fb;--muted:#8f9bab;--accent:#6ee7d8;--accent2:#7dd3fc;--danger:#fb7185}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px;background:radial-gradient(circle at 15% 10%,rgba(110,231,216,.12),transparent 30%),radial-gradient(circle at 90% 90%,rgba(125,211,252,.1),transparent 28%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}.login{{width:min(420px,100%);background:rgba(15,20,29,.94);border:1px solid var(--line);border-radius:24px;padding:28px;box-shadow:0 30px 90px rgba(0,0,0,.42);backdrop-filter:blur(18px)}}.brand{{display:flex;align-items:center;gap:12px;margin-bottom:26px}}.mark{{width:42px;height:42px;display:grid;place-items:center;border-radius:14px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#051116;font-weight:900;font-size:20px}}h1{{font-size:22px;margin:0}}p{{margin:5px 0 0;color:var(--muted);font-size:14px}}label{{display:block;font-size:12px;font-weight:700;color:#b8c2cf;margin:16px 0 7px}}input,button{{width:100%;height:46px;border-radius:13px;border:1px solid var(--line);font:inherit}}input{{background:#0a0f16;color:var(--text);padding:0 14px;outline:none}}input:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,231,216,.1)}}button{{margin-top:18px;border:0;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#061116;font-weight:850;cursor:pointer}}.error{{min-height:20px;color:var(--danger);font-size:13px;margin-top:12px}}</style></head><body><form class='login' method='post'><div class='brand'><div class='mark'>N</div><div><h1>Nerlo Wallet</h1><p>Yönetim paneli</p></div></div><label>Kullanıcı adı</label><input name='username' autocomplete='username' required><label>Şifre</label><input type='password' autocomplete='current-password' name='password' required><button>Giriş Yap</button><div class='error'>{h(error)}</div></form></body></html>"""
@@ -1703,7 +1795,7 @@ def logout(): session.clear(); return redirect("/login")
 REQUEST_TYPE_LABELS = {
     "deposit": "Bakiye yükleme",
     "withdraw": "Para çekme",
-    "convert": "Kripto para dönüştürme",
+    "convert": "Bakiye dönüştürme",
 }
 
 STATUS_LABELS = {
@@ -1716,12 +1808,6 @@ STATUS_LABELS = {
 ACCOUNT_STATUS_LABELS = {
     "active": "Açık",
     "frozen": "Dondurulmuş",
-}
-
-TIER_LABELS = {
-    "Basic": "Temel",
-    "Plus": "Artı",
-    "Prime": "Öncelikli",
 }
 
 TRANSACTION_KIND_LABELS = {
@@ -1756,6 +1842,9 @@ ADMIN_ACTION_LABELS = {
     "lock_withdraw": "Çekimi kilitleme",
     "unlock_withdraw": "Çekim kilidini açma",
     "broadcast": "Duyuru gönderme",
+    "create_panel_user": "Panel yetkilisi oluşturma",
+    "update_panel_user": "Panel yetkilisi güncelleme",
+    "delete_panel_user": "Panel yetkilisi silme",
 }
 
 MESSAGE_LABELS = {
@@ -1823,10 +1912,6 @@ def username_label(value):
     return "bilinmiyor" if not text or text.lower() == "unknown" else text
 
 
-def tier_label(value):
-    return TIER_LABELS.get(value, "Temel")
-
-
 def transaction_kind_label(value):
     return TRANSACTION_KIND_LABELS.get(value, "Sistem işlemi")
 
@@ -1840,10 +1925,7 @@ def admin_action_label(value):
 
 
 def localized_admin_detail(value):
-    text = str(value or "")
-    for source, target in TIER_LABELS.items():
-        text = text.replace(source, target)
-    return text
+    return str(value or "")
 
 
 def setting_label(key):
@@ -1871,8 +1953,10 @@ def setting_label(key):
     if match:
         operation = "yükleme" if match.group(1) == "deposit" else "çekim"
         return f"{match.group(2)} {operation} komisyonu (%)"
-    if key == "fee_convert_percent":
-        return "Dönüştürme komisyonu (%)"
+    if key == "fee_convert_tl_percent":
+        return "TL içeren dönüşüm komisyonu (%)"
+    if key == "fee_convert_crypto_percent":
+        return "Kripto → kripto dönüşüm komisyonu (%)"
     match = re.fullmatch(r"min_(deposit|withdraw|convert)_(TL|USDT|LTC|TRX)", key)
     if match:
         operation = {"deposit": "yükleme", "withdraw": "çekim", "convert": "dönüştürme"}[match.group(1)]
@@ -2055,7 +2139,7 @@ def render_user_management(uid):
     return f"""
     <div class='user-profile-head'>
       <div><span class='eyebrow'>KULLANICI</span><h2>@{h(username_label(u.get('username')))}</h2><p>{h(uid)} · Son görülme {h(u.get('last_seen') or '-')}</p></div>
-      <div class='profile-badges'><span class='pill'>{h(tier_label(u.get('tier', 'Basic')))}</span><span class='pill {'danger-pill' if u.get('status') == 'frozen' else ''}'>{h(account_status_label(u.get('status')))}</span></div>
+      <div class='profile-badges'><span class='pill {'danger-pill' if u.get('status') == 'frozen' else ''}'>{h(account_status_label(u.get('status')))}</span></div>
     </div>
     <div class='mini-balance-grid'>{user_balance_cards(uid, u)}</div>
     <div class='user-workspace'>
@@ -2074,7 +2158,6 @@ def render_user_management(uid):
         <div class='section-head'><div><span class='eyebrow'>PROFİL</span><h3>Kullanıcı Ayarları</h3></div></div>
         <form method='post' class='form-grid'>
           <input type='hidden' name='action' value='update_user_profile'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='{return_to}'>
-          <div><label>Hesap seviyesi</label><select name='tier'><option value='Basic' {'selected' if u.get('tier') == 'Basic' else ''}>Temel</option><option value='Plus' {'selected' if u.get('tier') == 'Plus' else ''}>Artı</option><option value='Prime' {'selected' if u.get('tier') == 'Prime' else ''}>Öncelikli</option></select></div>
           <div><label>Özel komisyon %</label><input name='custom_fee_percent' value='{h(u.get('custom_fee_percent', ''))}' placeholder='Genel oran'></div>
           <div><label>Özel TL günlük limit</label><input name='custom_daily_limit_TL' value='{h(u.get('custom_daily_limit_TL', ''))}' placeholder='Genel limit'></div>
           <div class='wide'><label>Yönetici notu</label><input name='note' value='{h(u.get('note', ''))}' placeholder='İç not'></div>
@@ -2093,10 +2176,62 @@ def render_user_management(uid):
     """
 
 
+def permission_options(selected_permissions):
+    selected = set(selected_permissions or [])
+    return "".join(
+        f"<label class='permission-option'><input type='checkbox' name='permissions' value='{h(key)}' {'checked' if key in selected else ''}><span>{h(label)}</span></label>"
+        for key, label in PANEL_PERMISSION_LABELS.items()
+    )
+
+
+def render_panel_user_management():
+    root_card = f"""
+    <div class='admin-account root-account'>
+      <div><span class='eyebrow'>ANA YÖNETİCİ</span><h3>{h(PANEL_USERNAME)}</h3><p>Railway ortam değişkenleriyle yönetilir ve tüm yetkilere sahiptir.</p></div>
+      <span class='pill'>Tam yetki</span>
+    </div>
+    """
+    account_cards = []
+    for username, account in sorted(panel_users.items()):
+        permissions = account.get("permissions", [])
+        active = account.get("active", True)
+        account_cards.append(f"""
+        <form method='post' class='admin-account admin-account-form'>
+          <input type='hidden' name='target_username' value='{h(username)}'>
+          <input type='hidden' name='return_to' value='/admin?view=admins'>
+          <div class='admin-account-head'>
+            <div><span class='eyebrow'>PANEL YETKİLİSİ</span><h3>{h(username)}</h3><p>Oluşturulma: {h(account.get('created_at') or '-')} · Oluşturan: {h(account.get('created_by') or '-')}</p></div>
+            <span class='pill {'danger-pill' if not active else ''}'>{'Pasif' if not active else 'Aktif'}</span>
+          </div>
+          <div class='admin-account-grid'>
+            <div><label>Hesap durumu</label><select name='active'><option value='on' {'selected' if active else ''}>Aktif</option><option value='off' {'selected' if not active else ''}>Pasif</option></select></div>
+            <div><label>Yeni şifre (değişmeyecekse boş bırakın)</label><input type='password' name='new_password' autocomplete='new-password' minlength='12' placeholder='En az 12 karakter'></div>
+          </div>
+          <label class='permission-title'>Yetkiler</label><div class='permission-grid'>{permission_options(permissions)}</div>
+          <div class='admin-account-actions'><button class='btn primary' name='action' value='update_panel_user'>Yetkileri Kaydet</button><button class='btn danger' name='action' value='delete_panel_user'>Yetkiliyi Sil</button></div>
+        </form>
+        """)
+    accounts_html = "".join(account_cards) or "<div class='empty-state'><b>Ek panel yetkilisi yok</b><span>Yeni yetkiliyi üstteki formdan oluşturabilirsiniz.</span></div>"
+    return f"""
+    <section class='panel-card compact-card'>
+      <div class='section-head'><div><span class='eyebrow'>YENİ HESAP</span><h3>Panel Yetkilisi Ekle</h3></div><p>Şifre en az 12 karakter olmalıdır.</p></div>
+      <form method='post'>
+        <input type='hidden' name='action' value='create_panel_user'><input type='hidden' name='return_to' value='/admin?view=admins'>
+        <div class='admin-account-grid'><div><label>Kullanıcı adı</label><input name='panel_username' minlength='3' maxlength='32' pattern='[a-z0-9_.-]{{3,32}}' placeholder='ornek.yonetici' required></div><div><label>Şifre</label><input type='password' name='panel_password' autocomplete='new-password' minlength='12' placeholder='En az 12 karakter' required></div></div>
+        <label class='permission-title'>Yetkiler</label><div class='permission-grid'>{permission_options(PANEL_PERMISSION_LABELS.keys())}</div>
+        <div class='save-bar'><button class='btn primary'>Yetkiliyi Oluştur</button></div>
+      </form>
+    </section>
+    <div class='admin-account-list'>{root_card}{accounts_html}</div>
+    """
+
+
 @app.route("/admin/requests-fragment")
 def admin_requests_fragment():
     if not logged_in():
         return "", 401
+    if not has_panel_permission("requests"):
+        return "", 403
     return render_request_list(
         request.args.get("rq", "").strip(),
         request.args.get("status", "all"),
@@ -2108,6 +2243,8 @@ def admin_requests_fragment():
 def admin_user_fragment():
     if not logged_in():
         return "", 401
+    if not has_panel_permission("users"):
+        return "", 403
     return render_user_management(request.args.get("uid", ""))
 
 
@@ -2130,6 +2267,11 @@ def admin():
     if not logged_in(): return redirect("/login")
     if request.method == "POST":
         action = request.form.get("action", "")
+        required_permission = ACTION_PERMISSIONS.get(action)
+        if not required_permission:
+            abort(400)
+        if not has_panel_permission(required_permission):
+            abort(403)
         if action == "settings":
             for key in EDITABLE_SETTING_KEYS:
                 settings[key] = request.form.get(key, settings.get(key, ""))
@@ -2193,15 +2335,11 @@ def admin():
         elif action == "update_user_profile":
             uid = request.form.get("user_id", "")
             if uid in users:
-                tier = request.form.get("tier", "Basic")
-                if tier not in ("Basic", "Plus", "Prime"):
-                    tier = "Basic"
-                users[uid]["tier"] = tier
                 users[uid]["custom_fee_percent"] = request.form.get("custom_fee_percent", "").strip()
                 users[uid]["custom_daily_limit_TL"] = request.form.get("custom_daily_limit_TL", "").strip()
                 users[uid]["note"] = request.form.get("note", "").strip()
                 save_json(FILES["users"], users)
-                add_admin_log("update_user_profile", f"Seviye: {tier_label(tier)}", uid)
+                add_admin_log("update_user_profile", "Kullanıcı ayarları güncellendi", uid)
                 set_admin_notice("Kullanıcı profili kaydedildi.")
             else:
                 set_admin_notice("Kullanıcı bulunamadı.", "error")
@@ -2227,12 +2365,75 @@ def admin():
                 set_admin_notice(f"Duyuru {count} kullanıcıya gönderildi.")
             else:
                 set_admin_notice("Duyuru metni boş olamaz.", "error")
+        elif action == "create_panel_user":
+            username = request.form.get("panel_username", "").strip().lower()
+            password = request.form.get("panel_password", "")
+            permissions = panel_permissions_from_form()
+            if not re.fullmatch(r"[a-z0-9_.-]{3,32}", username):
+                set_admin_notice("Kullanıcı adı 3-32 karakter olmalı; yalnızca küçük harf, rakam, nokta, alt çizgi ve tire kullanılabilir.", "error")
+            elif username == PANEL_USERNAME.lower() or username in panel_users:
+                set_admin_notice("Bu panel kullanıcı adı zaten kullanılıyor.", "error")
+            elif len(password) < 12:
+                set_admin_notice("Panel şifresi en az 12 karakter olmalıdır.", "error")
+            elif not permissions:
+                set_admin_notice("En az bir yetki seçmelisiniz.", "error")
+            else:
+                panel_users[username] = {
+                    "username": username,
+                    "password_hash": generate_password_hash(password, method="scrypt"),
+                    "permissions": permissions,
+                    "active": True,
+                    "created_at": now(),
+                    "created_by": current_panel_username(),
+                    "updated_at": now(),
+                }
+                save_json(FILES["panel_users"], panel_users)
+                add_admin_log("create_panel_user", f"Panel yetkilisi: {username}; yetkiler: {', '.join(permissions)}")
+                set_admin_notice(f"{username} panel yetkilisi oluşturuldu.")
+        elif action == "update_panel_user":
+            target = request.form.get("target_username", "").strip().lower()
+            account = panel_users.get(target)
+            permissions = panel_permissions_from_form()
+            active = request.form.get("active", "on") == "on"
+            new_password = request.form.get("new_password", "")
+            if not account:
+                set_admin_notice("Panel yetkilisi bulunamadı.", "error")
+            elif not permissions:
+                set_admin_notice("En az bir yetki seçmelisiniz.", "error")
+            elif target == current_panel_username().lower() and not active:
+                set_admin_notice("Kendi panel hesabınızı pasif duruma getiremezsiniz.", "error")
+            elif new_password and len(new_password) < 12:
+                set_admin_notice("Yeni şifre en az 12 karakter olmalıdır.", "error")
+            else:
+                account["permissions"] = permissions
+                account["active"] = active
+                account["updated_at"] = now()
+                account["updated_by"] = current_panel_username()
+                if new_password:
+                    account["password_hash"] = generate_password_hash(new_password, method="scrypt")
+                    account["password_changed_at"] = now()
+                save_json(FILES["panel_users"], panel_users)
+                add_admin_log("update_panel_user", f"Panel yetkilisi: {target}; yetkiler: {', '.join(permissions)}; durum: {'aktif' if active else 'pasif'}")
+                set_admin_notice(f"{target} yetkileri güncellendi.")
+        elif action == "delete_panel_user":
+            target = request.form.get("target_username", "").strip().lower()
+            if target == current_panel_username().lower():
+                set_admin_notice("Kendi panel hesabınızı silemezsiniz.", "error")
+            elif target not in panel_users:
+                set_admin_notice("Panel yetkilisi bulunamadı.", "error")
+            else:
+                panel_users.pop(target, None)
+                save_json(FILES["panel_users"], panel_users)
+                add_admin_log("delete_panel_user", f"Panel yetkilisi silindi: {target}")
+                set_admin_notice(f"{target} panel yetkilisi silindi.")
         return redirect(safe_admin_return())
 
-    allowed_views = {"dashboard", "requests", "users", "broadcast", "settings", "logs"}
-    active_view = request.args.get("view", "dashboard")
+    allowed_views = [key for key in PANEL_PERMISSION_LABELS if has_panel_permission(key)]
+    if not allowed_views:
+        return "Bu panel hesabına herhangi bir yetki tanımlanmamış.", 403
+    active_view = request.args.get("view", allowed_views[0])
     if active_view not in allowed_views:
-        active_view = "dashboard"
+        active_view = allowed_views[0]
     manage_user_id = request.args.get("manage_user_id", "").strip()
     request_query = request.args.get("rq", "").strip()
     status_filter = request.args.get("status", "all")
@@ -2284,27 +2485,38 @@ def admin():
         ("broadcast", "Duyurular", "04"),
         ("settings", "Ayarlar", "05"),
         ("logs", "Yönetim Kayıtları", "06"),
+        ("admins", "Panel Yetkilileri", "07"),
     ]
     nav_html = "".join(
         f"<button class='nav-item {'active' if slug == active_view else ''}' data-view-target='{slug}'><span>{number}</span>{label}</button>"
-        for slug, label, number in nav_items
+        for slug, label, number in nav_items if slug in allowed_views
     )
 
+    dashboard_section = f"""<section class='page-view {'active' if active_view == 'dashboard' else ''}' data-view='dashboard'><div class='section-head'><div><span class='eyebrow'>GENEL BAKIŞ</span><h2>Cüzdan Özeti</h2><p>Tüm kullanıcı bakiyelerinin kompakt görünümü</p></div></div><div class='dashboard-grid'>{asset_metrics}</div><div class='summary-grid'><div class='summary-card'><span>Toplam kullanıcı</span><strong>{len(users)}</strong></div><div class='summary-card'><span>Bekleyen / işlenen talep</span><strong>{pending_count}</strong></div><div class='summary-card'><span>Bugün tamamlanan</span><strong>{completed_today}</strong></div></div></section>""" if "dashboard" in allowed_views else ""
+    requests_section = f"""<section class='page-view {'active' if active_view == 'requests' else ''}' data-view='requests'><div class='section-head'><div><span class='eyebrow'>OPERASYON</span><h2>İşlem Talepleri</h2><p>Yükleme, çekim ve dönüşüm taleplerini tek ekrandan yönetin</p></div></div><div class='panel-card'><form id='request-filter' class='toolbar'><input name='rq' value='{h(request_query)}' placeholder='İşlem no, kullanıcı ID veya kullanıcı adı'><select name='status'><option value='all'>Tüm durumlar</option>{''.join(f"<option value='{s}' {'selected' if status_filter == s else ''}>{status_label(s)}</option>" for s in ['pending','processing','completed','rejected'])}</select><select name='type'><option value='all'>Tüm işlem türleri</option>{''.join(f"<option value='{t}' {'selected' if type_filter == t else ''}>{request_type_label(t)}</option>" for t in ['deposit','withdraw','convert'])}</select><button class='btn primary'>Filtrele</button></form><div id='request-list' class='request-list'>{render_request_list(request_query, status_filter, type_filter)}</div></div></section>""" if "requests" in allowed_views else ""
+    users_section = f"""<section class='page-view {'active' if active_view == 'users' else ''}' data-view='users'><div class='section-head'><div><span class='eyebrow'>KULLANICI YÖNETİMİ</span><h2>ID ile Kullanıcı Aç</h2><p>Kullanıcı satırlarına tıklamadan doğrudan kimlik ile yönetin</p></div></div><div class='panel-card'><form id='user-lookup' class='lookup-bar'><input id='manage-user-id' name='uid' value='{h(manage_user_id)}' inputmode='numeric' placeholder='Telegram kullanıcı ID'><button class='btn primary'>Kullanıcıyı Getir</button></form><div id='user-management-result'>{render_user_management(manage_user_id)}</div></div><div class='panel-card' style='margin-top:10px'><div class='section-head'><div><span class='eyebrow'>SON KULLANICILAR</span><h3>Hızlı Referans</h3></div><p>ID değerleri bağlantı değildir</p></div><div class='table-wrap'><table><thead><tr><th>Kullanıcı ID</th><th>Kullanıcı adı</th><th>TL</th><th>USDT</th><th>LTC</th><th>TRX</th><th>Hesap</th><th>Son görülme</th></tr></thead><tbody>{user_rows}</tbody></table></div></div></section>""" if "users" in allowed_views else ""
+    broadcast_section = f"""<section class='page-view {'active' if active_view == 'broadcast' else ''}' data-view='broadcast'><div class='section-head'><div><span class='eyebrow'>İLETİŞİM</span><h2>Duyuru Gönder</h2><p>Bildirimleri açık kullanıcılara toplu mesaj gönderin</p></div></div><div class='broadcast-grid'><form method='post' class='panel-card'><input type='hidden' name='action' value='broadcast'><input type='hidden' name='return_to' value='/admin?view=broadcast'><label>Duyuru metni</label><textarea name='announcement_text' placeholder='Kullanıcılara gönderilecek mesajı yazın' required></textarea><button class='btn primary' style='width:100%;margin-top:10px'>Duyuruyu Gönder</button></form><div class='broadcast-note'><b style='color:#dce5ef'>Gönderim bilgisi</b><br><br>Duyuru yalnızca duyuru bildirimleri açık olan kullanıcılara iletilir. Gönderim sonucu yönetim kayıtlarına eklenir.</div></div></section>""" if "broadcast" in allowed_views else ""
+    settings_section = f"""<section class='page-view {'active' if active_view == 'settings' else ''}' data-view='settings'><div class='section-head'><div><span class='eyebrow'>SİSTEM</span><h2>Ayar Yönetimi</h2><p>Kur, limit, cüzdan, sistem ve bot mesajlarını yönetin</p></div></div><form method='post' class='panel-card'><input type='hidden' name='action' value='settings'><input type='hidden' name='return_to' value='/admin?view=settings'><div class='settings-nav'>{settings_tabs}</div>{''.join(settings_panes)}<div class='save-bar'><button class='btn primary'>Tüm Ayarları Kaydet</button></div></form></section>""" if "settings" in allowed_views else ""
+    logs_section = f"""<section class='page-view {'active' if active_view == 'logs' else ''}' data-view='logs'><div class='section-head'><div><span class='eyebrow'>DENETİM</span><h2>Yönetim Kayıtları</h2><p>Son 120 yönetici işlemi</p></div></div><div class='panel-card'><div class='table-wrap'><table><thead><tr><th>Tarih</th><th>İşlem</th><th>Kullanıcı</th><th>Detay</th></tr></thead><tbody>{logs}</tbody></table></div></div></section>""" if "logs" in allowed_views else ""
+    admins_section = f"""<section class='page-view {'active' if active_view == 'admins' else ''}' data-view='admins'><div class='section-head'><div><span class='eyebrow'>ERİŞİM YÖNETİMİ</span><h2>Panel Yetkilileri</h2><p>Yeni panel kullanıcısı oluşturun ve bölüm bazlı yetkilerini düzenleyin</p></div></div>{render_panel_user_management()}</section>""" if "admins" in allowed_views else ""
+
     return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='color-scheme' content='dark'><title>Nerlo Wallet Yönetim</title><style>
-    :root{{--bg:#090c12;--sidebar:#0b0f16;--surface:#10151e;--surface-2:#141b25;--surface-3:#0c1118;--line:#222b38;--line-soft:#1a2230;--text:#f4f7fb;--muted:#8c98a8;--muted-2:#667386;--accent:#68e0d2;--accent-2:#7cc7ff;--success:#59d99b;--warning:#f6c96b;--danger:#ff7489;--radius:18px}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:radial-gradient(circle at 85% -10%,rgba(104,224,210,.08),transparent 32%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px}}button,input,select,textarea{{font:inherit}}button{{cursor:pointer}}.app-shell{{min-height:100vh;display:grid;grid-template-columns:238px minmax(0,1fr)}}.sidebar{{position:sticky;top:0;height:100vh;background:rgba(11,15,22,.96);border-right:1px solid var(--line-soft);padding:20px 14px;display:flex;flex-direction:column;backdrop-filter:blur(18px)}}.brand{{display:flex;align-items:center;gap:11px;padding:6px 8px 22px}}.brand-mark{{width:38px;height:38px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#061116;font-weight:950;font-size:18px;box-shadow:0 10px 30px rgba(104,224,210,.14)}}.brand strong{{display:block;font-size:15px}}.brand small{{display:block;color:var(--muted);margin-top:2px;font-size:11px}}.nav{{display:grid;gap:4px}}.nav-item{{width:100%;border:0;background:transparent;color:#aeb8c6;display:flex;align-items:center;gap:10px;padding:10px 11px;border-radius:11px;text-align:left;font-weight:680}}.nav-item span{{width:24px;height:24px;border-radius:8px;display:grid;place-items:center;background:#111923;color:#66778c;font-size:10px}}.nav-item:hover{{background:#111822;color:#fff}}.nav-item.active{{background:#151e29;color:#fff}}.nav-item.active span{{background:rgba(104,224,210,.13);color:var(--accent)}}.sidebar-foot{{margin-top:auto;padding:14px 8px 2px;border-top:1px solid var(--line-soft)}}.version{{display:block;color:var(--muted-2);font-size:10px;margin-bottom:10px;letter-spacing:.06em}}.logout{{color:#aeb8c6;text-decoration:none;font-size:12px}}.main{{min-width:0;padding:22px clamp(16px,3vw,36px) 40px}}.topbar{{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px}}.topbar h1{{font-size:22px;margin:0;letter-spacing:-.03em}}.topbar p{{margin:5px 0 0;color:var(--muted);font-size:12px}}.top-pill{{padding:8px 11px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--surface-3);font-size:11px}}.page-view{{display:none}}.page-view.active{{display:block}}.section-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:14px}}.section-head h2,.section-head h3{{margin:2px 0 0;letter-spacing:-.025em}}.section-head h2{{font-size:18px}}.section-head h3{{font-size:15px}}.section-head p{{margin:3px 0 0;color:var(--muted);font-size:12px}}.eyebrow{{display:block;color:var(--muted-2);font-size:9px;font-weight:850;letter-spacing:.13em}}.panel-card{{background:rgba(16,21,30,.92);border:1px solid var(--line);border-radius:var(--radius);padding:17px;box-shadow:0 16px 50px rgba(0,0,0,.14)}}.compact-card{{padding:15px}}.dashboard-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}}.wallet-metric{{min-height:108px;background:linear-gradient(145deg,#111823,#0d131c);border:1px solid var(--line);border-radius:16px;padding:14px;display:flex;gap:11px;align-items:flex-start}}.asset-dot{{width:30px;height:30px;flex:0 0 auto;border-radius:10px;background:rgba(104,224,210,.1);color:var(--accent);display:grid;place-items:center;font-size:11px;font-weight:900}}.wallet-metric span{{display:block;color:var(--muted);font-size:10px}}.wallet-metric strong{{display:block;font-size:18px;margin:5px 0 3px;letter-spacing:-.03em;white-space:nowrap}}.wallet-metric small{{color:var(--muted-2);font-size:10px}}.summary-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:10px}}.summary-card{{padding:13px 14px;border:1px solid var(--line);border-radius:14px;background:var(--surface-3)}}.summary-card span{{color:var(--muted);font-size:10px}}.summary-card strong{{display:block;font-size:20px;margin-top:4px}}.toolbar{{display:grid;grid-template-columns:minmax(220px,2fr) repeat(2,minmax(150px,1fr)) auto;gap:9px;margin-bottom:13px}}input,select,textarea{{width:100%;border:1px solid var(--line);background:#0b1017;color:var(--text);border-radius:11px;min-height:41px;padding:9px 11px;outline:none}}input:focus,select:focus,textarea:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(104,224,210,.08)}}textarea{{min-height:110px;resize:vertical}}label{{display:block;color:#aab5c4;font-size:10px;font-weight:760;margin:0 0 6px}}.btn{{border:1px solid transparent;min-height:38px;border-radius:10px;padding:8px 12px;font-weight:800;background:#192431;color:#dfe8f3}}.btn.primary{{background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#061116}}.btn.ghost{{background:#111923;border-color:var(--line);color:#c9d3df}}.btn.success{{background:rgba(89,217,155,.13);border-color:rgba(89,217,155,.23);color:#88ebba}}.btn.danger{{background:rgba(255,116,137,.12);border-color:rgba(255,116,137,.22);color:#ff96a6}}.request-list{{display:grid;gap:9px}}.request-item{{background:var(--surface-3);border:1px solid var(--line);border-radius:15px;padding:13px}}.request-title{{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}}.request-title h3{{font-size:14px;margin:3px 0 0}}.request-details{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin-top:11px}}.request-detail{{min-width:0;background:#101721;border:1px solid var(--line-soft);border-radius:10px;padding:8px 9px}}.request-detail span{{display:block;color:var(--muted-2);font-size:9px;margin-bottom:4px}}.request-detail b{{display:block;font-size:11px;overflow-wrap:anywhere}}.request-actions{{display:flex;justify-content:flex-end;gap:7px;margin-top:10px}}.request-actions .btn{{width:auto;min-height:34px;font-size:11px}}.status{{display:inline-flex;align-items:center;justify-content:center;min-height:25px;padding:4px 8px;border-radius:999px;font-size:9px;font-weight:850;white-space:nowrap}}.status.waiting{{background:rgba(246,201,107,.12);color:var(--warning)}}.status.working{{background:rgba(124,199,255,.12);color:var(--accent-2)}}.status.done{{background:rgba(89,217,155,.12);color:var(--success)}}.status.declined{{background:rgba(255,116,137,.12);color:var(--danger)}}.empty-state{{min-height:140px;border:1px dashed #2a3442;border-radius:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--muted);gap:5px;padding:20px}}.empty-state b{{color:#dbe4ee}}.error-state{{border-color:rgba(255,116,137,.3)}}.lookup-bar{{display:grid;grid-template-columns:minmax(220px,1fr) auto;gap:9px;margin-bottom:12px}}.lookup-bar .btn{{min-width:130px}}.user-profile-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin:2px 0 13px}}.user-profile-head h2{{font-size:19px;margin:3px 0}}.user-profile-head p{{margin:0;color:var(--muted);font-size:11px}}.profile-badges{{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}}.pill{{padding:6px 9px;border-radius:999px;background:#151e29;border:1px solid var(--line);color:#cbd5e1;font-size:9px;font-weight:800}}.danger-pill{{color:var(--danger);background:rgba(255,116,137,.08)}}.mini-balance-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px}}.mini-balance{{background:#0d141d;border:1px solid var(--line);border-radius:13px;padding:11px}}.mini-balance div{{display:flex;align-items:center;justify-content:space-between;gap:8px}}.mini-balance span{{font-size:10px;color:var(--muted)}}.mini-balance strong{{font-size:13px;white-space:nowrap}}.mini-balance small{{display:block;color:var(--muted-2);font-size:9px;margin-top:7px}}.user-workspace{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}}.history-grid{{align-items:start}}.form-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:end}}.form-grid .wide{{grid-column:span 2}}.submit-cell{{display:flex;align-items:flex-end}}.submit-cell .btn{{width:100%}}.balance-form{{grid-template-columns:repeat(3,minmax(0,1fr))}}.security-actions{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}}.security-actions .btn{{width:100%}}.table-wrap{{overflow:auto;border:1px solid var(--line-soft);border-radius:12px}}table{{width:100%;border-collapse:collapse;min-width:720px}}th,td{{padding:9px 10px;text-align:left;border-bottom:1px solid var(--line-soft);font-size:10px;white-space:nowrap}}th{{color:var(--muted-2);font-size:9px;letter-spacing:.04em;background:#0c121a}}td{{color:#cbd5df}}tbody tr:last-child td{{border-bottom:0}}code{{color:#c8d5e4;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px}}.muted-cell{{text-align:center;color:var(--muted)}}.broadcast-grid{{display:grid;grid-template-columns:1.25fr .75fr;gap:10px}}.broadcast-note{{padding:16px;border:1px solid var(--line);border-radius:14px;background:var(--surface-3);color:var(--muted);font-size:12px;line-height:1.55}}.settings-nav{{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}}.setting-tab{{border:1px solid var(--line);background:#0c1219;color:#95a2b2;padding:8px 10px;border-radius:9px;font-size:10px;font-weight:800}}.setting-tab.active{{background:#17222d;color:var(--accent);border-color:#29404a}}.setting-pane{{display:none}}.setting-pane.active{{display:block}}.settings-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px}}.field{{min-width:0}}.settings-grid textarea{{min-height:90px}}.save-bar{{display:flex;justify-content:flex-end;margin-top:13px}}.save-bar .btn{{min-width:180px}}.toast{{position:fixed;right:22px;top:18px;z-index:20;max-width:min(360px,calc(100vw - 32px));padding:11px 14px;border:1px solid rgba(89,217,155,.25);background:#10231c;color:#9aebc0;border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.35);font-size:12px}}.toast-error{{background:#28131a;color:#ff9bad;border-color:rgba(255,116,137,.28)}}@media(max-width:1180px){{.dashboard-grid,.mini-balance-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.request-details{{grid-template-columns:repeat(2,minmax(0,1fr))}}.settings-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:880px){{.app-shell{{grid-template-columns:1fr}}.sidebar{{position:static;height:auto;padding:12px}}.brand{{padding-bottom:12px}}.nav{{grid-template-columns:repeat(3,minmax(0,1fr))}}.nav-item{{justify-content:center;font-size:11px}}.sidebar-foot{{display:none}}.main{{padding-top:14px}}.user-workspace,.broadcast-grid{{grid-template-columns:1fr}}.toolbar{{grid-template-columns:1fr 1fr}}.toolbar input{{grid-column:1/-1}}.security-actions{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:620px){{.topbar{{align-items:flex-start}}.top-pill{{display:none}}.dashboard-grid,.summary-grid,.mini-balance-grid{{grid-template-columns:1fr}}.nav{{grid-template-columns:repeat(2,minmax(0,1fr))}}.nav-item span{{display:none}}.toolbar,.lookup-bar,.settings-grid,.form-grid,.balance-form{{grid-template-columns:1fr}}.form-grid .wide{{grid-column:auto}}.request-details{{grid-template-columns:1fr}}.request-actions{{display:grid;grid-template-columns:1fr}}.request-actions .btn{{width:100%}}.user-profile-head{{display:block}}.profile-badges{{justify-content:flex-start;margin-top:10px}}.security-actions{{grid-template-columns:1fr}}}}
-    </style></head><body>{notice_html}<div class='app-shell'><aside class='sidebar'><div class='brand'><div class='brand-mark'>N</div><div><strong>Nerlo Wallet</strong><small>Yönetim Merkezi</small></div></div><nav class='nav'>{nav_html}</nav><div class='sidebar-foot'><span class='version'>NERLO-PANEL-2026.06.24-R1</span><a class='logout' href='/logout'>Güvenli çıkış</a></div></aside><main class='main'><header class='topbar'><div><h1>Kontrol Merkezi</h1><p>Kullanıcı, bakiye ve işlem operasyonları</p></div><span class='top-pill'>{h(now())}</span></header>
+    :root{{--bg:#090c12;--sidebar:#0b0f16;--surface:#10151e;--surface-2:#141b25;--surface-3:#0c1118;--line:#222b38;--line-soft:#1a2230;--text:#f4f7fb;--muted:#8c98a8;--muted-2:#667386;--accent:#68e0d2;--accent-2:#7cc7ff;--success:#59d99b;--warning:#f6c96b;--danger:#ff7489;--radius:18px}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:radial-gradient(circle at 85% -10%,rgba(104,224,210,.08),transparent 32%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px}}button,input,select,textarea{{font:inherit}}button{{cursor:pointer}}.app-shell{{min-height:100vh;display:grid;grid-template-columns:238px minmax(0,1fr)}}.sidebar{{position:sticky;top:0;height:100vh;background:rgba(11,15,22,.96);border-right:1px solid var(--line-soft);padding:20px 14px;display:flex;flex-direction:column;backdrop-filter:blur(18px)}}.brand{{display:flex;align-items:center;gap:11px;padding:6px 8px 22px}}.brand-mark{{width:38px;height:38px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#061116;font-weight:950;font-size:18px;box-shadow:0 10px 30px rgba(104,224,210,.14)}}.brand strong{{display:block;font-size:15px}}.brand small{{display:block;color:var(--muted);margin-top:2px;font-size:11px}}.nav{{display:grid;gap:4px}}.nav-item{{width:100%;border:0;background:transparent;color:#aeb8c6;display:flex;align-items:center;gap:10px;padding:10px 11px;border-radius:11px;text-align:left;font-weight:680}}.nav-item span{{width:24px;height:24px;border-radius:8px;display:grid;place-items:center;background:#111923;color:#66778c;font-size:10px}}.nav-item:hover{{background:#111822;color:#fff}}.nav-item.active{{background:#151e29;color:#fff}}.nav-item.active span{{background:rgba(104,224,210,.13);color:var(--accent)}}.sidebar-foot{{margin-top:auto;padding:14px 8px 2px;border-top:1px solid var(--line-soft)}}.version{{display:block;color:var(--muted-2);font-size:10px;margin-bottom:10px;letter-spacing:.06em}}.logout{{color:#aeb8c6;text-decoration:none;font-size:12px}}.main{{min-width:0;padding:22px clamp(16px,3vw,36px) 40px}}.topbar{{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px}}.topbar h1{{font-size:22px;margin:0;letter-spacing:-.03em}}.topbar p{{margin:5px 0 0;color:var(--muted);font-size:12px}}.top-pill{{padding:8px 11px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--surface-3);font-size:11px}}.page-view{{display:none}}.page-view.active{{display:block}}.section-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:14px}}.section-head h2,.section-head h3{{margin:2px 0 0;letter-spacing:-.025em}}.section-head h2{{font-size:18px}}.section-head h3{{font-size:15px}}.section-head p{{margin:3px 0 0;color:var(--muted);font-size:12px}}.eyebrow{{display:block;color:var(--muted-2);font-size:9px;font-weight:850;letter-spacing:.13em}}.panel-card{{background:rgba(16,21,30,.92);border:1px solid var(--line);border-radius:var(--radius);padding:17px;box-shadow:0 16px 50px rgba(0,0,0,.14)}}.compact-card{{padding:15px}}.dashboard-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}}.wallet-metric{{min-height:108px;background:linear-gradient(145deg,#111823,#0d131c);border:1px solid var(--line);border-radius:16px;padding:14px;display:flex;gap:11px;align-items:flex-start}}.asset-dot{{width:30px;height:30px;flex:0 0 auto;border-radius:10px;background:rgba(104,224,210,.1);color:var(--accent);display:grid;place-items:center;font-size:11px;font-weight:900}}.wallet-metric span{{display:block;color:var(--muted);font-size:10px}}.wallet-metric strong{{display:block;font-size:18px;margin:5px 0 3px;letter-spacing:-.03em;white-space:nowrap}}.wallet-metric small{{color:var(--muted-2);font-size:10px}}.summary-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:10px}}.summary-card{{padding:13px 14px;border:1px solid var(--line);border-radius:14px;background:var(--surface-3)}}.summary-card span{{color:var(--muted);font-size:10px}}.summary-card strong{{display:block;font-size:20px;margin-top:4px}}.toolbar{{display:grid;grid-template-columns:minmax(220px,2fr) repeat(2,minmax(150px,1fr)) auto;gap:9px;margin-bottom:13px}}input,select,textarea{{width:100%;border:1px solid var(--line);background:#0b1017;color:var(--text);border-radius:11px;min-height:41px;padding:9px 11px;outline:none}}input:focus,select:focus,textarea:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(104,224,210,.08)}}textarea{{min-height:110px;resize:vertical}}label{{display:block;color:#aab5c4;font-size:10px;font-weight:760;margin:0 0 6px}}.btn{{border:1px solid transparent;min-height:38px;border-radius:10px;padding:8px 12px;font-weight:800;background:#192431;color:#dfe8f3}}.btn.primary{{background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#061116}}.btn.ghost{{background:#111923;border-color:var(--line);color:#c9d3df}}.btn.success{{background:rgba(89,217,155,.13);border-color:rgba(89,217,155,.23);color:#88ebba}}.btn.danger{{background:rgba(255,116,137,.12);border-color:rgba(255,116,137,.22);color:#ff96a6}}.request-list{{display:grid;gap:9px}}.request-item{{background:var(--surface-3);border:1px solid var(--line);border-radius:15px;padding:13px}}.request-title{{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}}.request-title h3{{font-size:14px;margin:3px 0 0}}.request-details{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin-top:11px}}.request-detail{{min-width:0;background:#101721;border:1px solid var(--line-soft);border-radius:10px;padding:8px 9px}}.request-detail span{{display:block;color:var(--muted-2);font-size:9px;margin-bottom:4px}}.request-detail b{{display:block;font-size:11px;overflow-wrap:anywhere}}.request-actions{{display:flex;justify-content:flex-end;gap:7px;margin-top:10px}}.request-actions .btn{{width:auto;min-height:34px;font-size:11px}}.status{{display:inline-flex;align-items:center;justify-content:center;min-height:25px;padding:4px 8px;border-radius:999px;font-size:9px;font-weight:850;white-space:nowrap}}.status.waiting{{background:rgba(246,201,107,.12);color:var(--warning)}}.status.working{{background:rgba(124,199,255,.12);color:var(--accent-2)}}.status.done{{background:rgba(89,217,155,.12);color:var(--success)}}.status.declined{{background:rgba(255,116,137,.12);color:var(--danger)}}.empty-state{{min-height:140px;border:1px dashed #2a3442;border-radius:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--muted);gap:5px;padding:20px}}.empty-state b{{color:#dbe4ee}}.error-state{{border-color:rgba(255,116,137,.3)}}.lookup-bar{{display:grid;grid-template-columns:minmax(220px,1fr) auto;gap:9px;margin-bottom:12px}}.lookup-bar .btn{{min-width:130px}}.user-profile-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin:2px 0 13px}}.user-profile-head h2{{font-size:19px;margin:3px 0}}.user-profile-head p{{margin:0;color:var(--muted);font-size:11px}}.profile-badges{{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}}.pill{{padding:6px 9px;border-radius:999px;background:#151e29;border:1px solid var(--line);color:#cbd5e1;font-size:9px;font-weight:800}}.danger-pill{{color:var(--danger);background:rgba(255,116,137,.08)}}.mini-balance-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px}}.mini-balance{{background:#0d141d;border:1px solid var(--line);border-radius:13px;padding:11px}}.mini-balance div{{display:flex;align-items:center;justify-content:space-between;gap:8px}}.mini-balance span{{font-size:10px;color:var(--muted)}}.mini-balance strong{{font-size:13px;white-space:nowrap}}.mini-balance small{{display:block;color:var(--muted-2);font-size:9px;margin-top:7px}}.user-workspace{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}}.history-grid{{align-items:start}}.form-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:end}}.form-grid .wide{{grid-column:span 2}}.submit-cell{{display:flex;align-items:flex-end}}.submit-cell .btn{{width:100%}}.balance-form{{grid-template-columns:repeat(3,minmax(0,1fr))}}.security-actions{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}}.security-actions .btn{{width:100%}}.table-wrap{{overflow:auto;border:1px solid var(--line-soft);border-radius:12px}}table{{width:100%;border-collapse:collapse;min-width:720px}}th,td{{padding:9px 10px;text-align:left;border-bottom:1px solid var(--line-soft);font-size:10px;white-space:nowrap}}th{{color:var(--muted-2);font-size:9px;letter-spacing:.04em;background:#0c121a}}td{{color:#cbd5df}}tbody tr:last-child td{{border-bottom:0}}code{{color:#c8d5e4;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px}}.muted-cell{{text-align:center;color:var(--muted)}}.broadcast-grid{{display:grid;grid-template-columns:1.25fr .75fr;gap:10px}}.broadcast-note{{padding:16px;border:1px solid var(--line);border-radius:14px;background:var(--surface-3);color:var(--muted);font-size:12px;line-height:1.55}}.settings-nav{{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}}.setting-tab{{border:1px solid var(--line);background:#0c1219;color:#95a2b2;padding:8px 10px;border-radius:9px;font-size:10px;font-weight:800}}.setting-tab.active{{background:#17222d;color:var(--accent);border-color:#29404a}}.setting-pane{{display:none}}.setting-pane.active{{display:block}}.settings-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px}}.field{{min-width:0}}.settings-grid textarea{{min-height:90px}}.save-bar{{display:flex;justify-content:flex-end;margin-top:13px}}.save-bar .btn{{min-width:180px}}.admin-account-list{{display:grid;gap:10px;margin-top:10px}}.admin-account{{background:var(--surface-3);border:1px solid var(--line);border-radius:15px;padding:15px}}.root-account{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}}.admin-account h3{{margin:3px 0;font-size:15px}}.admin-account p{{margin:0;color:var(--muted);font-size:10px}}.admin-account-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}}.admin-account-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}.permission-title{{margin-top:13px}}.permission-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}}.permission-option{{display:flex;align-items:center;gap:8px;margin:0;padding:9px 10px;border:1px solid var(--line-soft);border-radius:10px;background:#0d141d;color:#c4cfdb;font-size:10px;cursor:pointer}}.permission-option input{{width:auto;min-height:0;margin:0;accent-color:var(--accent)}}.admin-account-actions{{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}}.toast{{position:fixed;right:22px;top:18px;z-index:20;max-width:min(360px,calc(100vw - 32px));padding:11px 14px;border:1px solid rgba(89,217,155,.25);background:#10231c;color:#9aebc0;border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.35);font-size:12px}}.toast-error{{background:#28131a;color:#ff9bad;border-color:rgba(255,116,137,.28)}}@media(max-width:1180px){{.permission-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.dashboard-grid,.mini-balance-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.request-details{{grid-template-columns:repeat(2,minmax(0,1fr))}}.settings-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:880px){{.app-shell{{grid-template-columns:1fr}}.sidebar{{position:static;height:auto;padding:12px}}.brand{{padding-bottom:12px}}.nav{{grid-template-columns:repeat(3,minmax(0,1fr))}}.nav-item{{justify-content:center;font-size:11px}}.sidebar-foot{{display:none}}.main{{padding-top:14px}}.user-workspace,.broadcast-grid{{grid-template-columns:1fr}}.toolbar{{grid-template-columns:1fr 1fr}}.toolbar input{{grid-column:1/-1}}.security-actions{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:620px){{.admin-account-grid,.permission-grid{{grid-template-columns:1fr}}.admin-account-actions{{display:grid}}.root-account,.admin-account-head{{display:block}}.root-account .pill,.admin-account-head .pill{{display:inline-flex;margin-top:9px}}.topbar{{align-items:flex-start}}.top-pill{{display:none}}.dashboard-grid,.summary-grid,.mini-balance-grid{{grid-template-columns:1fr}}.nav{{grid-template-columns:repeat(2,minmax(0,1fr))}}.nav-item span{{display:none}}.toolbar,.lookup-bar,.settings-grid,.form-grid,.balance-form{{grid-template-columns:1fr}}.form-grid .wide{{grid-column:auto}}.request-details{{grid-template-columns:1fr}}.request-actions{{display:grid;grid-template-columns:1fr}}.request-actions .btn{{width:100%}}.user-profile-head{{display:block}}.profile-badges{{justify-content:flex-start;margin-top:10px}}.security-actions{{grid-template-columns:1fr}}}}
+    </style></head><body>{notice_html}<div class='app-shell'><aside class='sidebar'><div class='brand'><div class='brand-mark'>N</div><div><strong>Nerlo Wallet</strong><small>Yönetim Merkezi</small></div></div><nav class='nav'>{nav_html}</nav><div class='sidebar-foot'><span class='version'>NERLO-PANEL-2026.06.24-R2</span><a class='logout' href='/logout'>Güvenli çıkış</a></div></aside><main class='main'><header class='topbar'><div><h1>Kontrol Merkezi</h1><p>Kullanıcı, bakiye ve işlem operasyonları</p></div><span class='top-pill'>{h(current_panel_username())} · {h(now())}</span></header>
 
-    <section class='page-view {'active' if active_view == 'dashboard' else ''}' data-view='dashboard'><div class='section-head'><div><span class='eyebrow'>GENEL BAKIŞ</span><h2>Cüzdan Özeti</h2><p>Tüm kullanıcı bakiyelerinin kompakt görünümü</p></div></div><div class='dashboard-grid'>{asset_metrics}</div><div class='summary-grid'><div class='summary-card'><span>Toplam kullanıcı</span><strong>{len(users)}</strong></div><div class='summary-card'><span>Bekleyen / işlenen talep</span><strong>{pending_count}</strong></div><div class='summary-card'><span>Bugün tamamlanan</span><strong>{completed_today}</strong></div></div></section>
+    {dashboard_section}
 
-    <section class='page-view {'active' if active_view == 'requests' else ''}' data-view='requests'><div class='section-head'><div><span class='eyebrow'>OPERASYON</span><h2>İşlem Talepleri</h2><p>Yükleme, çekim ve dönüşüm taleplerini tek ekrandan yönetin</p></div></div><div class='panel-card'><form id='request-filter' class='toolbar'><input name='rq' value='{h(request_query)}' placeholder='İşlem no, kullanıcı ID veya kullanıcı adı'><select name='status'><option value='all'>Tüm durumlar</option>{''.join(f"<option value='{s}' {'selected' if status_filter == s else ''}>{status_label(s)}</option>" for s in ['pending','processing','completed','rejected'])}</select><select name='type'><option value='all'>Tüm işlem türleri</option>{''.join(f"<option value='{t}' {'selected' if type_filter == t else ''}>{request_type_label(t)}</option>" for t in ['deposit','withdraw','convert'])}</select><button class='btn primary'>Filtrele</button></form><div id='request-list' class='request-list'>{render_request_list(request_query, status_filter, type_filter)}</div></div></section>
+    {requests_section}
 
-    <section class='page-view {'active' if active_view == 'users' else ''}' data-view='users'><div class='section-head'><div><span class='eyebrow'>KULLANICI YÖNETİMİ</span><h2>ID ile Kullanıcı Aç</h2><p>Kullanıcı satırlarına tıklamadan doğrudan kimlik ile yönetin</p></div></div><div class='panel-card'><form id='user-lookup' class='lookup-bar'><input id='manage-user-id' name='uid' value='{h(manage_user_id)}' inputmode='numeric' placeholder='Telegram kullanıcı ID'><button class='btn primary'>Kullanıcıyı Getir</button></form><div id='user-management-result'>{render_user_management(manage_user_id)}</div></div><div class='panel-card' style='margin-top:10px'><div class='section-head'><div><span class='eyebrow'>SON KULLANICILAR</span><h3>Hızlı Referans</h3></div><p>ID değerleri bağlantı değildir</p></div><div class='table-wrap'><table><thead><tr><th>Kullanıcı ID</th><th>Kullanıcı adı</th><th>TL</th><th>USDT</th><th>LTC</th><th>TRX</th><th>Hesap</th><th>Son görülme</th></tr></thead><tbody>{user_rows}</tbody></table></div></div></section>
+    {users_section}
 
-    <section class='page-view {'active' if active_view == 'broadcast' else ''}' data-view='broadcast'><div class='section-head'><div><span class='eyebrow'>İLETİŞİM</span><h2>Duyuru Gönder</h2><p>Bildirimleri açık kullanıcılara toplu mesaj gönderin</p></div></div><div class='broadcast-grid'><form method='post' class='panel-card'><input type='hidden' name='action' value='broadcast'><input type='hidden' name='return_to' value='/admin?view=broadcast'><label>Duyuru metni</label><textarea name='announcement_text' placeholder='Kullanıcılara gönderilecek mesajı yazın' required></textarea><button class='btn primary' style='width:100%;margin-top:10px'>Duyuruyu Gönder</button></form><div class='broadcast-note'><b style='color:#dce5ef'>Gönderim bilgisi</b><br><br>Duyuru yalnızca duyuru bildirimleri açık olan kullanıcılara iletilir. Gönderim sonucu yönetim kayıtlarına eklenir.</div></div></section>
+    {broadcast_section}
 
-    <section class='page-view {'active' if active_view == 'settings' else ''}' data-view='settings'><div class='section-head'><div><span class='eyebrow'>SİSTEM</span><h2>Ayar Yönetimi</h2><p>Kur, limit, cüzdan, sistem ve bot mesajlarını yönetin</p></div></div><form method='post' class='panel-card'><input type='hidden' name='action' value='settings'><input type='hidden' name='return_to' value='/admin?view=settings'><div class='settings-nav'>{settings_tabs}</div>{''.join(settings_panes)}<div class='save-bar'><button class='btn primary'>Tüm Ayarları Kaydet</button></div></form></section>
+    {settings_section}
 
-    <section class='page-view {'active' if active_view == 'logs' else ''}' data-view='logs'><div class='section-head'><div><span class='eyebrow'>DENETİM</span><h2>Yönetim Kayıtları</h2><p>Son 120 yönetici işlemi</p></div></div><div class='panel-card'><div class='table-wrap'><table><thead><tr><th>Tarih</th><th>İşlem</th><th>Kullanıcı</th><th>Detay</th></tr></thead><tbody>{logs}</tbody></table></div></div></section>
+    {logs_section}
+
+    {admins_section}
     </main></div><script>
     const views=[...document.querySelectorAll('[data-view]')];
     const navItems=[...document.querySelectorAll('[data-view-target]')];
@@ -2323,8 +2535,9 @@ def admin():
       try{{const response=await fetch('/admin/requests-fragment?'+params.toString(),{{cache:'no-store'}});if(response.ok)document.getElementById('request-list').innerHTML=await response.text();}}catch(error){{console.log('Talep yenileme hatası',error);}}
     }}
     if(filterForm)filterForm.addEventListener('submit',event=>{{event.preventDefault();refreshRequests();}});
-    setInterval(()=>{{if(document.querySelector('[data-view="requests"]').classList.contains('active'))refreshRequests();}},20000);
-    document.addEventListener('visibilitychange',()=>{{if(!document.hidden&&document.querySelector('[data-view="requests"]').classList.contains('active'))refreshRequests();}});
+    const requestView=document.querySelector('[data-view="requests"]');
+    setInterval(()=>{{if(requestView&&requestView.classList.contains('active'))refreshRequests();}},20000);
+    document.addEventListener('visibilitychange',()=>{{if(!document.hidden&&requestView&&requestView.classList.contains('active'))refreshRequests();}});
 
     const userLookup=document.getElementById('user-lookup');
     if(userLookup)userLookup.addEventListener('submit',async event=>{{
@@ -2349,6 +2562,7 @@ def admin():
 @app.route("/admin/user/<uid>")
 def admin_user(uid):
     if not logged_in(): return redirect("/login")
+    if not has_panel_permission("users"): abort(403)
     return redirect(f"/admin?view=users&manage_user_id={uid}")
 
 
