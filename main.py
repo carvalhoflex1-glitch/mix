@@ -44,7 +44,16 @@ RATE_UPDATE_SECONDS = max(60, int(os.getenv("RATE_UPDATE_SECONDS", "900")))
 RATE_API_BASES = [base.strip().rstrip("/") for base in os.getenv("RATE_API_BASES", "https://api.binance.com,https://data-api.binance.vision").split(",") if base.strip()]
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "").strip()
 PLISIO_SECRET_KEY = os.getenv("PLISIO_SECRET_KEY", "").strip()
-PLISIO_API_BASE = "https://plisio.net/api/v1"
+PLISIO_API_BASE = "https://api.plisio.net/api/v1"
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+if not PUBLIC_BASE_URL:
+    railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
+    if railway_domain:
+        PUBLIC_BASE_URL = f"https://{railway_domain}"
+PLISIO_CALLBACK_URL = os.getenv(
+    "PLISIO_CALLBACK_URL",
+    f"{PUBLIC_BASE_URL}/plisio/status?json=true" if PUBLIC_BASE_URL else "",
+).strip()
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "")
@@ -164,7 +173,7 @@ def save_json(path, data):
 
 
 def validate_runtime_config():
-    required = {"BOT_TOKEN": TOKEN, "ADMIN_CHAT_ID": ADMIN_CHAT_ID, "PANEL_USERNAME": PANEL_USERNAME, "PANEL_PASSWORD": PANEL_PASSWORD, "FLASK_SECRET_KEY": app.secret_key, "PLISIO_SECRET_KEY": PLISIO_SECRET_KEY}
+    required = {"BOT_TOKEN": TOKEN, "ADMIN_CHAT_ID": ADMIN_CHAT_ID, "PANEL_USERNAME": PANEL_USERNAME, "PANEL_PASSWORD": PANEL_PASSWORD, "FLASK_SECRET_KEY": app.secret_key, "PLISIO_SECRET_KEY": PLISIO_SECRET_KEY, "PLISIO_CALLBACK_URL": PLISIO_CALLBACK_URL}
     missing = [k for k, v in required.items() if not str(v).strip()]
     if missing: raise RuntimeError("Eksik zorunlu ortam değişkenleri: " + ", ".join(missing))
     if len(app.secret_key) < 32: raise RuntimeError("FLASK_SECRET_KEY en az 32 karakter olmalıdır")
@@ -1396,44 +1405,88 @@ def finalize_withdraw(uid, state):
 
 def _plisio_error_message(payload):
     data = payload.get("data", {}) if isinstance(payload, dict) else {}
-    return str(data.get("message") or data.get("name") or "Plisio API hatası") if isinstance(data, dict) else "Plisio API hatası"
+    if isinstance(data, dict):
+        return str(data.get("message") or data.get("name") or "Plisio API hatası")
+    return "Plisio API hatası"
 
 
-def get_plisio_deposit_address(uid, asset):
-    uid, asset = str(uid), str(asset).upper()
+def create_plisio_invoice(uid, asset, amount):
+    uid = str(uid)
+    asset = str(asset).upper()
+    amount = D(amount)
+
     if asset not in PLISIO_CURRENCY_IDS:
         raise ValueError("Bu varlık otomatik yatırıma uygun değil")
-    if not PLISIO_SECRET_KEY:
-        raise RuntimeError("PLISIO_SECRET_KEY tanımlı değil")
+    if amount <= 0:
+        raise ValueError("Geçersiz yatırım tutarı")
+    if not PLISIO_SECRET_KEY or not PLISIO_CALLBACK_URL:
+        raise RuntimeError("Plisio ortam değişkenleri eksik")
 
-    addresses = users[uid].setdefault("deposit_addresses", {})
-    if str(addresses.get(asset, "")).strip():
-        return str(addresses[asset]).strip()
+    app_fee = fee_amount(amount, fee_percent("deposit", asset, uid))
+    net = amount - app_fee
+    if net <= 0:
+        raise ValueError("Komisyon sonrası geçerli tutar oluşmadı")
 
-    response = requests.get(
-        f"{PLISIO_API_BASE}/shops/deposit/new",
-        params={"api_key": PLISIO_SECRET_KEY, "psys_cid": PLISIO_CURRENCY_IDS[asset], "uid": uid},
-        timeout=20,
-        headers={"User-Agent": "Nerlo-Wallet/1.0"},
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if payload.get("status") != "success":
-        raise RuntimeError(_plisio_error_message(payload))
+    rid = new_request(uid, "deposit", {
+        "asset": asset,
+        "amount": str(amount),
+        "fee": str(app_fee),
+        "net_amount": str(net),
+        "network": settings.get(f"network_{asset}", asset),
+        "automatic": True,
+        "provider": "plisio",
+        "idempotency_key": f"plisio-order:{secrets.token_urlsafe(18)}",
+    })
 
-    data = payload.get("data", {})
-    if isinstance(data, list):
-        data = next((x for x in data if x.get("psys_cid") == PLISIO_CURRENCY_IDS[asset]), {})
-    address = str(data.get("hash", "")).strip()
-    if not address:
-        raise RuntimeError("Plisio yatırma adresi döndürmedi")
-    addresses[asset] = address
-    save_json(FILES["users"], users)
-    return address
+    params = {
+        "api_key": PLISIO_SECRET_KEY,
+        "currency": PLISIO_CURRENCY_IDS[asset],
+        "allowed_psys_cids": PLISIO_CURRENCY_IDS[asset],
+        "amount": format(amount, "f"),
+        "order_number": rid,
+        "order_name": f"Nerlo Wallet {asset} deposit",
+        "description": f"Telegram user {uid}",
+        "callback_url": PLISIO_CALLBACK_URL,
+        "expire_min": "30",
+        "return_existing": "1",
+    }
+
+    try:
+        response = requests.get(
+            f"{PLISIO_API_BASE}/invoices/new",
+            params=params,
+            timeout=25,
+            headers={"User-Agent": "Nerlo-Wallet/1.0"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("status") != "success":
+            raise RuntimeError(_plisio_error_message(payload))
+
+        data = payload.get("data", {})
+        txn_id = str(data.get("txn_id", "")).strip()
+        invoice_url = str(data.get("invoice_url", "")).strip()
+        if not txn_id or not invoice_url:
+            raise RuntimeError("Plisio fatura bilgisi döndürmedi")
+
+        requests_db[rid].update({
+            "plisio_txn_id": txn_id,
+            "invoice_url": invoice_url,
+            "status": "pending",
+            "updated_at": now(),
+        })
+        save_json(FILES["requests"], requests_db)
+        return rid, invoice_url
+    except Exception:
+        requests_db.pop(rid, None)
+        save_json(FILES["requests"], requests_db)
+        raise
 
 
 def _plisio_callback_payload():
-    return request.get_json(silent=True) or {} if request.is_json else request.form.to_dict(flat=True)
+    if request.is_json:
+        return request.get_json(silent=True) or {}
+    return request.form.to_dict(flat=True)
 
 
 def _verify_plisio_callback(payload):
@@ -1442,6 +1495,7 @@ def _verify_plisio_callback(payload):
     supplied = str(payload.get("verify_hash", "")).strip()
     if not supplied:
         return False
+
     signed = dict(payload)
     signed.pop("verify_hash", None)
     canonical = json.dumps(signed, ensure_ascii=False, separators=(",", ":"))
@@ -1458,46 +1512,66 @@ def plisio_status():
     payload = _plisio_callback_payload()
     if not _verify_plisio_callback(payload):
         return {"status": "error", "message": "invalid signature"}, 422
-    if str(payload.get("ipn_type", "")).lower() != "pay_in":
+
+    if str(payload.get("ipn_type", "")).lower() != "invoice":
         return {"status": "ignored"}, 200
-    if str(payload.get("status", "")).lower() != "completed":
+
+    callback_status = str(payload.get("status", "")).lower()
+    rid = str(payload.get("order_number", "")).strip()
+    txn_id = str(payload.get("txn_id", "")).strip()
+    item = requests_db.get(rid)
+
+    if not item or item.get("provider") != "plisio":
+        return {"status": "error", "message": "unknown order"}, 404
+    if item.get("plisio_txn_id") and item.get("plisio_txn_id") != txn_id:
+        return {"status": "error", "message": "transaction mismatch"}, 409
+
+    if callback_status != "completed":
+        if callback_status in ("pending", "pending internal", "new"):
+            item["status"] = "processing" if callback_status != "new" else "pending"
+            item["updated_at"] = now()
+            save_json(FILES["requests"], requests_db)
         return {"status": "pending"}, 200
 
-    uid = str(payload.get("deposit_uid", "")).strip()
-    currency_id = str(payload.get("psys_cid") or payload.get("currency") or "").upper()
-    asset = PLISIO_ASSET_BY_ID.get(currency_id, "")
-    amount = D(payload.get("amount", "0"))
-    txn_id = str(payload.get("txn_id", "")).strip()
+    uid = str(item.get("user_id", ""))
+    asset = str(item.get("asset", "")).upper()
+    received = D(payload.get("amount", "0"))
 
-    if not uid or uid not in users or asset not in CRYPTO_ASSETS or amount <= 0 or not txn_id:
+    if uid not in users or asset not in CRYPTO_ASSETS or received <= 0 or not txn_id:
         return {"status": "error", "message": "invalid callback data"}, 400
 
-    idem = f"plisio:{txn_id}:{asset}"
     with data_lock:
-        if any(r.get("idempotency_key") == idem for r in requests_db.values()):
+        if item.get("status") == "completed":
             return {"status": "ok", "duplicate": True}, 200
 
-        app_fee = fee_amount(amount, fee_percent("deposit", asset, uid))
-        net = amount - app_fee
+        app_fee = fee_amount(received, fee_percent("deposit", asset, uid))
+        net = received - app_fee
         if net <= 0:
             return {"status": "error", "message": "invalid net amount"}, 400
 
-        rid = new_request(uid, "deposit", {
-            "asset": asset, "amount": str(amount), "fee": str(app_fee), "net_amount": str(net),
-            "network": settings.get(f"network_{asset}", asset),
-            "idempotency_key": idem, "plisio_txn_id": txn_id,
-            "plisio_wallet_hash": str(payload.get("wallet_hash", "")),
+        item.update({
+            "amount": str(received),
+            "fee": str(app_fee),
+            "net_amount": str(net),
             "plisio_confirmations": str(payload.get("confirmations", "")),
-            "automatic": True,
+            "plisio_currency": str(payload.get("currency", "")),
+            "plisio_psys_cid": str(payload.get("psys_cid", "")),
         })
-        try:
-            change_balance(uid, asset, net, "deposit_approved", rid, f"Plisio otomatik yatırım · {txn_id}")
-            requests_db[rid].update({"status": "completed", "completed_at": now(), "updated_at": now()})
-            save_json(FILES["requests"], requests_db)
-        except Exception:
-            requests_db.pop(rid, None)
-            save_json(FILES["requests"], requests_db)
-            raise
+
+        change_balance(
+            uid,
+            asset,
+            net,
+            "deposit_approved",
+            rid,
+            f"Plisio otomatik yatırım · {txn_id}",
+        )
+        item.update({
+            "status": "completed",
+            "completed_at": now(),
+            "updated_at": now(),
+        })
+        save_json(FILES["requests"], requests_db)
 
     send(uid, receipt_text(rid, uid), reply_keyboard(uid))
     if ADMIN_CHAT_ID:
@@ -1666,27 +1740,29 @@ def handle_text(chat_id, username, text):
                 buttons += [[inline_button(t(uid, "payment_sent"), "deposit_sent")], [inline_button(t(uid, "cancel"), "cancel")]]
                 send(chat_id, summary, {"inline_keyboard": buttons})
             else:
-                address = str(settings.get(f"wallet_{asset}", "")).strip()
-                if not address:
+                try:
+                    rid, invoice_url = create_plisio_invoice(uid, asset, amount)
                     user_state.pop(uid, None)
-                    send(chat_id, t(uid, "bank_unavailable"), reply_keyboard(uid)); return
-                network = settings.get(f"network_{asset}", asset)
-                state.update({"network": network, "qr_content": address, "qr_caption": f"{asset} {t(uid, 'qr_caption')} · {network}"})
-                card = order_summary(
-                    t(uid, "deposit_summary", asset=asset),
-                    [
-                        (t(uid, "network"), network),
-                        (t(uid, "to_deposit"), ucoin(uid, amount, asset)),
-                        (t(uid, "credited"), ucoin(uid, net, asset)),
-                        (t(uid, "deposit_address"), address),
-                    ],
-                    msg(uid, "deposit_crypto_intro"),
-                )
-                send(chat_id, card, {"inline_keyboard": [
-                    [inline_button(t(uid, "show_qr"), "show_deposit_qr")],
-                    [inline_button(t(uid, "notify_transfer"), "deposit_sent")],
-                    [inline_button(t(uid, "cancel"), "cancel")],
-                ]})
+                    card = order_summary(
+                        t(uid, "deposit_summary", asset=asset),
+                        [
+                            ("İşlem No" if lang_of(uid) == "tr" else "Transaction ID", f"#{rid}"),
+                            (t(uid, "network"), settings.get(f"network_{asset}", asset)),
+                            (t(uid, "to_deposit"), ucoin(uid, amount, asset)),
+                            (t(uid, "credited"), ucoin(uid, net, asset)),
+                        ],
+                        "Ödeme sayfasını açın. Ağ onayından sonra bakiye otomatik eklenir."
+                        if lang_of(uid) == "tr"
+                        else "Open the payment page. The balance is credited automatically after network confirmation.",
+                    )
+                    send(chat_id, card, {"inline_keyboard": [
+                        [{"text": "Ödeme Sayfasını Aç" if lang_of(uid) == "tr" else "Open Payment Page", "url": invoice_url}],
+                    ]})
+                except Exception as exc:
+                    print("PLISIO INVOICE ERROR:", exc)
+                    user_state.pop(uid, None)
+                    send(chat_id, t(uid, "operation_failed"), reply_keyboard(uid))
+                return
             state["step"] = "waiting_sent"
             return
 
@@ -1799,39 +1875,22 @@ def handle_callback(chat_id, username, data, cb_id):
         return
     if data.startswith("deposit_asset:"):
         asset = data.split(":", 1)[1]
-        if asset == "TL":
-            current = user_state.get(uid, {})
-            idem = current.get("idempotency_key", secrets.token_urlsafe(24))
-            user_state[uid] = {"flow": "deposit", "step": "amount", "asset": asset, "idempotency_key": idem}
-            send(chat_id, f"{asset}: {msg(uid, 'amount_question')}\n{t(uid, 'minimum')}: {ucoin(uid, min_amount('deposit', asset), asset)}")
-            return
-        try:
-            address = get_plisio_deposit_address(uid, asset)
-            network = settings.get(f"network_{asset}", asset)
-            user_state[uid] = {
-                "flow": "deposit_auto", "step": "waiting_payment", "asset": asset,
-                "network": network, "qr_content": address,
-                "qr_caption": f"{asset} {t(uid, 'qr_caption')} · {network}",
-            }
-            note = ("Gönderdiğiniz gerçek tutar, ağ onayından sonra otomatik olarak bakiyenize eklenir."
-                    if lang_of(uid) == "tr" else
-                    "The actual amount sent will be credited automatically after network confirmation.")
-            card = order_summary(
-                t(uid, "deposit_summary", asset=asset),
-                [(t(uid, "network"), network), (t(uid, "deposit_address"), address)],
-                note,
-            )
-            buttons = []
-            copy = copy_button(t(uid, "deposit_address"), address)
-            if copy:
-                buttons.append([copy])
-            buttons.extend([[inline_button(t(uid, "show_qr"), "show_deposit_qr")],
-                            [inline_button(t(uid, "cancel"), "cancel")]])
-            send(chat_id, card, {"inline_keyboard": buttons})
-        except Exception as exc:
-            print("PLISIO ADDRESS ERROR:", exc)
-            user_state.pop(uid, None)
+        if asset not in ASSETS:
             send(chat_id, t(uid, "operation_failed"), reply_keyboard(uid))
+            return
+        current = user_state.get(uid, {})
+        idem = current.get("idempotency_key", secrets.token_urlsafe(24))
+        user_state[uid] = {
+            "flow": "deposit",
+            "step": "amount",
+            "asset": asset,
+            "idempotency_key": idem,
+        }
+        send(
+            chat_id,
+            f"{asset}: {msg(uid, 'amount_question')}\n"
+            f"{t(uid, 'minimum')}: {ucoin(uid, min_amount('deposit', asset), asset)}",
+        )
         return
     if data == "deposit_sent":
         state = user_state.get(uid, {})
@@ -2355,7 +2414,7 @@ def panel_request_card(rid, r):
         for label, value in detail_items
     )
     actions = ""
-    if status in ("pending", "processing"):
+    if status in ("pending", "processing") and not r.get("automatic"):
         process_button = "" if status == "processing" else "<button class='btn ghost' name='action' value='process_request'>İşleme Al</button>"
         actions = (
             f"<form method='post' class='request-actions'>"
@@ -2603,7 +2662,9 @@ def admin():
             rid = request.form.get("rid", ""); r = requests_db.get(rid)
             if r:
                 uid = r["user_id"]
-                if action == "process_request" and r.get("status") == "pending":
+                if r.get("automatic"):
+                    set_admin_notice("Otomatik Plisio yatırımları panelden değiştirilemez.", "error")
+                elif action == "process_request" and r.get("status") == "pending":
                     r["status"] = "processing"
                     set_admin_notice(f"#{rid} işleme alındı.")
                 elif action == "approve_request" and r.get("status") in ("pending", "processing"):
