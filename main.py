@@ -85,6 +85,7 @@ WITHDRAW_SIGNER_TOKEN = os.getenv("WITHDRAW_SIGNER_TOKEN", "").strip()
 WITHDRAW_STATUS_URL = os.getenv("WITHDRAW_STATUS_URL", "").strip()
 EXCHANGE_INTERNAL_TOKEN = os.getenv("EXCHANGE_INTERNAL_TOKEN", "").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+BUILD_VERSION = "NERLO-2026-06-25-WITHDRAW-GUARD-V3-FRESH"
 
 CONFIRMATION_THRESHOLDS = {
     "BTC": max(1, int(os.getenv("BTC_CONFIRMATIONS", "3"))),
@@ -95,6 +96,7 @@ CONFIRMATION_THRESHOLDS = {
     "XMR": max(1, int(os.getenv("XMR_CONFIRMATIONS", "10"))),
 }
 AUTO_DEPOSIT_ASSETS = {"BTC", "LTC", "ETH", "TRX", "USDT", "XMR"}
+AUTO_WITHDRAW_ASSETS = {"BTC", "LTC", "ETH", "TRX", "USDT"}
 CHAIN_BY_ASSET = {"BTC": "BTC", "LTC": "LTC", "ETH": "ETH", "TRX": "TRON", "USDT": "TRON", "XMR": "XMR"}
 
 app = Flask(__name__)
@@ -1982,11 +1984,20 @@ def exchange_finalize_withdrawal(rid, txid=""):
     if record.get("status") == "rejected":
         raise ValueError("Reddedilmiş çekim tamamlanamaz")
     amount = D(record.get("amount"))
-    exchange_apply_ledger([{
+    fee = D(record.get("fee"))
+    entries = [{
         "user_id": record["user_id"], "asset": record["asset"], "bucket": "pending", "amount": -amount,
         "entry_type": "withdrawal_broadcast_settled", "reference_type": "request", "reference_id": rid,
         "idempotency_key": f"withdraw:{rid}:settled", "metadata": {"txid": txid or record.get("broadcast_txid", "")},
-    }])
+    }]
+    if fee > 0:
+        entries.append({
+            "user_id": "__platform__", "asset": record["asset"], "bucket": "available", "amount": fee,
+            "entry_type": "withdraw_fee_revenue", "reference_type": "request", "reference_id": rid,
+            "idempotency_key": f"withdraw:{rid}:fee",
+            "metadata": {"user_id": record["user_id"], "txid": txid or record.get("broadcast_txid", "")},
+        })
+    exchange_apply_ledger(entries)
     changes = {"status": "completed", "completed_at": now(), "broadcast_locked": False, "signer_status": "confirmed"}
     if txid:
         changes["broadcast_txid"] = txid
@@ -2020,9 +2031,24 @@ def exchange_refund_withdrawal(rid, reason=""):
     return requests_db.get(rid, record)
 
 
+def _is_crypto_withdraw_record(record):
+    """Kripto çekimlerini eski/yeni kayıt biçimlerinde güvenli şekilde tanır."""
+    record = dict(record or {})
+    request_type = str(record.get("type") or record.get("request_type") or "").strip().lower()
+    asset = str(record.get("asset") or "").strip().upper()
+    if asset not in CRYPTO_ASSETS:
+        return False
+    if request_type in ("withdraw", "withdrawal", "crypto_withdraw"):
+        return True
+    # Eski kayıtlarda type alanı eksik kalmış olabilir. Hedef adres veya
+    # çekim onayı işareti varsa bunu da kripto çekimi kabul ederek güvenli tarafta kal.
+    return bool(record.get("address") or record.get("approval_required") or record.get("funds_reserved"))
+
+
 def exchange_admin_request_transition(rid, action):
     """Serialize admin transitions and make all money entries idempotent."""
     rid = str(rid)
+    should_enqueue_broadcast = False
     lock_conn = _db_connect()
     try:
         with lock_conn.cursor() as cur:
@@ -2034,18 +2060,33 @@ def exchange_admin_request_transition(rid, action):
             record = dict(row[0] or {})
             record["status"] = row[1]
             record["automatic"] = bool(row[2])
-            if record.get("automatic"):
-                raise ValueError("Otomatik işlemler panelden değiştirilemez")
-            if record.get("broadcast_locked") and action in ("approve_request", "reject_request"):
-                raise ValueError("Çekim signer tarafından işleniyor; zincir sonucu gelmeden bakiye değiştirilemez")
+            if record.get("broadcast_locked") and action in ("approve_request", "reject_request", "process_request"):
+                raise ValueError("Çekim gönderim sistemi tarafından işleniyor; zincir sonucu bekleniyor")
             status = record.get("status")
             if action == "process_request":
                 if status != "pending":
                     raise ValueError("İşlem durumu değiştirilemedi")
-                record["status"] = "processing"
+                is_crypto_withdraw = _is_crypto_withdraw_record(record)
+                if is_crypto_withdraw:
+                    asset = str(record.get("asset") or "").upper()
+                    if asset not in AUTO_WITHDRAW_ASSETS:
+                        raise ValueError(f"{asset} otomatik çekim henüz desteklenmiyor")
+                    if not record.get("signer_enabled") or not WITHDRAW_SIGNER_URL:
+                        raise ValueError("Otomatik gönderim servisi bağlı değil")
+                    record.update({
+                        "status": "processing",
+                        "broadcast_locked": True,
+                        "signer_status": "queued",
+                        "broadcast_queued_at": now(),
+                    })
+                    should_enqueue_broadcast = True
+                else:
+                    record["status"] = "processing"
             elif action == "approve_request":
                 if status not in ("pending", "processing"):
                     raise ValueError("İşlem durumu değiştirilemedi")
+                if _is_crypto_withdraw_record(record):
+                    raise ValueError("Kripto çekimleri otomatik gönderim veya doğrulanmış zincir TXID'si olmadan tamamlanamaz")
                 entries = []
                 if record.get("type") == "deposit":
                     net = D(record.get("net_amount"))
@@ -2109,7 +2150,44 @@ def exchange_admin_request_transition(rid, action):
         lock_conn.close()
     requests_db[rid] = record
     save_json(FILES["requests"], requests_db)
-    return record
+    if should_enqueue_broadcast:
+        try:
+            exchange_enqueue("broadcast_withdrawal", {"request_id": rid}, f"withdraw-broadcast:{rid}", "withdrawals")
+        except Exception:
+            exchange_update_request(rid, {
+                "status": "pending",
+                "broadcast_locked": False,
+                "signer_status": "queue_failed",
+                "signer_error": "Gönderim kuyruğu oluşturulamadı",
+            })
+            raise
+    return requests_db.get(rid, record)
+
+def _notify_withdrawal_broadcast(rid, record, txid):
+    uid = str(record.get("user_id") or "")
+    if not uid or not txid:
+        return
+    asset = str(record.get("asset") or "")
+    amount = record.get("net_amount") or record.get("amount") or "0"
+    if lang_of(uid) == "en":
+        text = (
+            "Your withdrawal was sent to the blockchain.\n\n"
+            f"Transaction: #{rid}\n"
+            f"Asset: {asset}\n"
+            f"Amount: {ucoin(uid, amount, asset)}\n"
+            f"TXID: {txid}\n"
+            "Status: Waiting for network confirmation"
+        )
+    else:
+        text = (
+            "Çekim işleminiz blockchain ağına gönderildi.\n\n"
+            f"İşlem No: #{rid}\n"
+            f"Coin: {asset}\n"
+            f"Tutar: {ucoin(uid, amount, asset)}\n"
+            f"TXID: {txid}\n"
+            "Durum: Ağ onayı bekleniyor"
+        )
+    send(uid, text, reply_keyboard(uid))
 
 
 def _process_withdraw_broadcast(job):
@@ -2150,8 +2228,12 @@ def _process_withdraw_broadcast(job):
     txid = str(payload.get("txid") or payload.get("transaction_id") or "")
     if not txid:
         raise RuntimeError("Signer txid döndürmedi")
-    changes = {"status": "processing", "broadcast_txid": txid, "broadcast_at": now(), "signer_response": payload}
+    changes = {"status": "processing", "broadcast_txid": txid, "broadcast_at": now(), "signer_response": payload, "signer_status": "broadcast"}
     exchange_update_request(rid, changes)
+    current = requests_db.get(rid, record)
+    if not current.get("txid_notified_at") or str(current.get("txid_notified")) != txid:
+        _notify_withdrawal_broadcast(rid, current, txid)
+        exchange_update_request(rid, {"txid_notified_at": now(), "txid_notified": txid})
     if payload.get("confirmed") is True or str(payload.get("status", "")).lower() == "confirmed":
         exchange_finalize_withdrawal(rid, txid)
 
@@ -2286,6 +2368,7 @@ def exchange_health_snapshot():
             reconciliation_row = cur.fetchone()
             reconciliation = reconciliation_row[0] if reconciliation_row else {}
     return {
+        "build_version": BUILD_VERSION,
         "mode": EXCHANGE_MODE,
         "worker_id": EXCHANGE_WORKER_ID,
         "providers": {
@@ -2300,6 +2383,11 @@ def exchange_health_snapshot():
         "events": events,
         "jobs": jobs,
         "reconciliation": reconciliation,
+        "withdraw_guard": {
+            "enabled": True,
+            "crypto_manual_complete_blocked": True,
+            "txid_required": True,
+        },
     }
 
 
@@ -3165,12 +3253,13 @@ def atomic_withdraw(uid, state):
         raise ValueError("Geçersiz çekim tutarı")
     if balance(uid, asset) < amount:
         raise ValueError("Yetersiz bakiye")
-    signer_enabled = bool(WITHDRAW_SIGNER_URL and asset != "TL")
+    signer_enabled = bool(WITHDRAW_SIGNER_URL and asset in AUTO_WITHDRAW_ASSETS)
     rid = new_request(uid, "withdraw", {
         "asset": asset, "amount": state["amount"], "fee": state["fee"], "net_amount": state["net_amount"],
         "bank_name": state.get("bank_name", ""), "iban": state.get("iban", ""), "name": state.get("name", ""),
         "address": state.get("address", ""), "second_confirmation": True,
-        "idempotency_key": state.get("confirm_token", ""), "automatic": signer_enabled, "signer_enabled": signer_enabled,
+        "idempotency_key": state.get("confirm_token", ""), "automatic": False,
+        "signer_enabled": signer_enabled, "approval_required": asset != "TL",
     })
     try:
         exchange_apply_ledger([
@@ -3192,8 +3281,6 @@ def atomic_withdraw(uid, state):
     requests_db[rid]["updated_at"] = now()
     exchange_upsert_request(requests_db[rid])
     save_json(FILES["requests"], requests_db)
-    if signer_enabled:
-        exchange_enqueue("broadcast_withdrawal", {"request_id": rid}, f"withdraw-broadcast:{rid}", "withdrawals")
     return rid
 
 
@@ -4271,7 +4358,16 @@ def security_headers(response):
     return response
 
 @app.route("/")
-def home(): return "Nerlo Wallet aktif ✅"
+def home(): return f"Nerlo Wallet aktif ✅ · {BUILD_VERSION}"
+
+
+@app.route("/version")
+def version_info():
+    return {
+        "build_version": BUILD_VERSION,
+        "withdraw_guard": True,
+        "crypto_manual_complete_blocked": True,
+    }
 
 
 @app.route("/health/exchange")
@@ -4285,6 +4381,10 @@ def exchange_health():
 
 @app.route("/internal/exchange/withdrawal", methods=["POST"])
 def exchange_withdrawal_callback():
+    auth_header = str(request.headers.get("Authorization") or "")
+    supplied = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else str(request.headers.get("X-Exchange-Token") or "").strip()
+    if not EXCHANGE_INTERNAL_TOKEN or not supplied or not secrets.compare_digest(supplied, EXCHANGE_INTERNAL_TOKEN):
+        return {"ok": False, "error": "unauthorized"}, 401
     payload = request.get_json(silent=True) or {}
     rid = str(payload.get("request_id") or "").strip()
     status = str(payload.get("status") or "").strip().lower()
@@ -4636,6 +4736,8 @@ def panel_request_card(rid, r):
             ("Net", fmt(r.get("net_amount"), asset)),
             ("Hedef", r.get("iban") or r.get("address", "-")),
         ]
+        if r.get("broadcast_txid"):
+            detail_items.append(("TXID", r.get("broadcast_txid")))
     elif r.get("type") == "convert":
         detail_items += [
             ("Gönderilen", fmt(r.get("from_amount"), r.get("from_asset"))),
@@ -4648,16 +4750,29 @@ def panel_request_card(rid, r):
     )
     actions = ""
     if status in ("pending", "processing") and not r.get("automatic"):
-        process_button = "" if status == "processing" else "<button class='btn ghost' name='action' value='process_request'>İşleme Al</button>"
-        actions = (
-            f"<form method='post' class='request-actions'>"
-            f"<input type='hidden' name='rid' value='{h(rid)}'>"
-            f"<input type='hidden' name='return_to' value='/admin?view=requests'>"
-            f"{process_button}"
-            f"<button class='btn success' name='action' value='approve_request'>Tamamla</button>"
-            f"<button class='btn danger' name='action' value='reject_request'>Reddet</button>"
-            f"</form>"
-        )
+        is_crypto_withdraw = _is_crypto_withdraw_record(r)
+        if is_crypto_withdraw and r.get("broadcast_locked"):
+            signer_state = h(r.get("signer_status") or "işleniyor")
+            actions = f"<div class='request-warning'>Otomatik gönderim başlatıldı. Durum: {signer_state}. Zincir sonucu bekleniyor.</div>"
+        else:
+            process_button = "" if status == "processing" else "<button class='btn ghost' name='action' value='process_request'>İşleme Al</button>"
+            approve_button = "" if is_crypto_withdraw else "<button class='btn success' name='action' value='approve_request'>Tamamla</button>"
+            if is_crypto_withdraw and r.get("signer_enabled"):
+                warning = "<div class='request-warning'>İşleme Al düğmesine basınca para otomatik gönderilir.</div>"
+            elif is_crypto_withdraw:
+                warning = "<div class='request-warning'>Otomatik gönderim servisi bağlı değil. Bu çekim başlatılamaz.</div>"
+            else:
+                warning = ""
+            actions = (
+                f"{warning}"
+                f"<form method='post' class='request-actions'>"
+                f"<input type='hidden' name='rid' value='{h(rid)}'>"
+                f"<input type='hidden' name='return_to' value='/admin?view=requests'>"
+                f"{process_button}"
+                f"{approve_button}"
+                f"<button class='btn danger' name='action' value='reject_request'>Reddet</button>"
+                f"</form>"
+            )
     return (
         f"<article class='request-item'>"
         f"<div class='request-title'><div><span class='eyebrow'>#{h(rid)}</span><h3>{h(request_type_label(r.get('type')))}</h3></div>"
@@ -4896,6 +5011,14 @@ def admin():
     refresh_runtime_state(_db_key(FILES["messages"]), messages, min_interval=0, force=True)
     if request.method == "POST":
         action = request.form.get("action", "")
+        # Savunma katmanı: eski panel HTML'i veya elle hazırlanmış POST isteği bile
+        # kripto çekimini TXID olmadan tamamlayamaz.
+        if action == "approve_request":
+            requested_rid = str(request.form.get("rid", "")).strip()
+            requested_record = exchange_get_request(requested_rid) or requests_db.get(requested_rid, {})
+            if _is_crypto_withdraw_record(requested_record):
+                set_admin_notice("GÜVENLİK ENGELİ: Kripto çekimi gerçek TXID olmadan tamamlanamaz.", "error")
+                return redirect(safe_admin_return())
         required_permission = ACTION_PERMISSIONS.get(action)
         if not required_permission:
             abort(400)
@@ -4927,10 +5050,16 @@ def admin():
         elif action in ("process_request", "approve_request", "reject_request"):
             rid = request.form.get("rid", "")
             try:
+                current_record = exchange_get_request(rid) or requests_db.get(str(rid), {})
+                if action == "approve_request" and _is_crypto_withdraw_record(current_record):
+                    raise ValueError("GÜVENLİK ENGELİ: Kripto çekimi TXID olmadan tamamlanamaz")
                 updated = exchange_admin_request_transition(rid, action)
                 uid = updated["user_id"]
                 if action == "process_request":
-                    set_admin_notice(f"#{rid} işleme alındı.")
+                    if updated.get("signer_status") == "queued":
+                        set_admin_notice(f"#{rid} otomatik gönderim sırasına alındı.")
+                    else:
+                        set_admin_notice(f"#{rid} işleme alındı.")
                 elif action == "approve_request":
                     send(uid, receipt_text(rid, uid), reply_keyboard(uid))
                     set_admin_notice(f"#{rid} tamamlandı.")
@@ -5134,7 +5263,7 @@ def admin():
     admins_section = f"""<section class='page-view {'active' if active_view == 'admins' else ''}' data-view='admins'><div class='section-head'><div><span class='eyebrow'>ERİŞİM YÖNETİMİ</span><h2>Panel Yetkilileri</h2><p>Yeni panel kullanıcısı oluşturun ve bölüm bazlı yetkilerini düzenleyin</p></div></div>{render_panel_user_management()}</section>""" if "admins" in allowed_views else ""
 
     return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='color-scheme' content='dark'><title>Nerlo Wallet Yönetim</title><style>
-    :root{{--bg:#090c12;--sidebar:#0b0f16;--surface:#10151e;--surface-2:#141b25;--surface-3:#0c1118;--line:#222b38;--line-soft:#1a2230;--text:#f4f7fb;--muted:#8c98a8;--muted-2:#667386;--accent:#68e0d2;--accent-2:#7cc7ff;--success:#59d99b;--warning:#f6c96b;--danger:#ff7489;--radius:18px}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:radial-gradient(circle at 85% -10%,rgba(104,224,210,.08),transparent 32%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px}}button,input,select,textarea{{font:inherit}}button{{cursor:pointer}}.app-shell{{min-height:100vh;display:grid;grid-template-columns:238px minmax(0,1fr)}}.sidebar{{position:sticky;top:0;height:100vh;background:rgba(11,15,22,.96);border-right:1px solid var(--line-soft);padding:20px 14px;display:flex;flex-direction:column;backdrop-filter:blur(18px)}}.brand{{display:flex;align-items:center;gap:11px;padding:6px 8px 22px}}.brand-mark{{width:38px;height:38px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#061116;font-weight:950;font-size:18px;box-shadow:0 10px 30px rgba(104,224,210,.14)}}.brand strong{{display:block;font-size:15px}}.brand small{{display:block;color:var(--muted);margin-top:2px;font-size:11px}}.nav{{display:grid;gap:4px}}.nav-item{{width:100%;border:0;background:transparent;color:#aeb8c6;display:flex;align-items:center;gap:10px;padding:10px 11px;border-radius:11px;text-align:left;font-weight:680}}.nav-item span{{width:24px;height:24px;border-radius:8px;display:grid;place-items:center;background:#111923;color:#66778c;font-size:10px}}.nav-item:hover{{background:#111822;color:#fff}}.nav-item.active{{background:#151e29;color:#fff}}.nav-item.active span{{background:rgba(104,224,210,.13);color:var(--accent)}}.sidebar-foot{{margin-top:auto;padding:14px 8px 2px;border-top:1px solid var(--line-soft)}}.version{{display:block;color:var(--muted-2);font-size:10px;margin-bottom:10px;letter-spacing:.06em}}.logout{{color:#aeb8c6;text-decoration:none;font-size:12px}}.main{{min-width:0;padding:22px clamp(16px,3vw,36px) 40px}}.topbar{{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px}}.topbar h1{{font-size:22px;margin:0;letter-spacing:-.03em}}.topbar p{{margin:5px 0 0;color:var(--muted);font-size:12px}}.top-pill{{padding:8px 11px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--surface-3);font-size:11px}}.page-view{{display:none}}.page-view.active{{display:block}}.section-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:14px}}.section-head h2,.section-head h3{{margin:2px 0 0;letter-spacing:-.025em}}.section-head h2{{font-size:18px}}.section-head h3{{font-size:15px}}.section-head p{{margin:3px 0 0;color:var(--muted);font-size:12px}}.eyebrow{{display:block;color:var(--muted-2);font-size:9px;font-weight:850;letter-spacing:.13em}}.panel-card{{background:rgba(16,21,30,.92);border:1px solid var(--line);border-radius:var(--radius);padding:17px;box-shadow:0 16px 50px rgba(0,0,0,.14)}}.compact-card{{padding:15px}}.dashboard-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}}.wallet-metric{{min-height:108px;background:linear-gradient(145deg,#111823,#0d131c);border:1px solid var(--line);border-radius:16px;padding:14px;display:flex;gap:11px;align-items:flex-start}}.asset-dot{{width:30px;height:30px;flex:0 0 auto;border-radius:10px;background:rgba(104,224,210,.1);color:var(--accent);display:grid;place-items:center;font-size:11px;font-weight:900}}.wallet-metric span{{display:block;color:var(--muted);font-size:10px}}.wallet-metric strong{{display:block;font-size:18px;margin:5px 0 3px;letter-spacing:-.03em;white-space:nowrap}}.wallet-metric small{{color:var(--muted-2);font-size:10px}}.summary-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:10px}}.summary-card{{padding:13px 14px;border:1px solid var(--line);border-radius:14px;background:var(--surface-3)}}.summary-card span{{color:var(--muted);font-size:10px}}.summary-card strong{{display:block;font-size:20px;margin-top:4px}}.toolbar{{display:grid;grid-template-columns:minmax(220px,2fr) repeat(2,minmax(150px,1fr)) auto;gap:9px;margin-bottom:13px}}input,select,textarea{{width:100%;border:1px solid var(--line);background:#0b1017;color:var(--text);border-radius:11px;min-height:41px;padding:9px 11px;outline:none}}input:focus,select:focus,textarea:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(104,224,210,.08)}}textarea{{min-height:110px;resize:vertical}}label{{display:block;color:#aab5c4;font-size:10px;font-weight:760;margin:0 0 6px}}.btn{{border:1px solid transparent;min-height:38px;border-radius:10px;padding:8px 12px;font-weight:800;background:#192431;color:#dfe8f3}}.btn.primary{{background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#061116}}.btn.ghost{{background:#111923;border-color:var(--line);color:#c9d3df}}.btn.success{{background:rgba(89,217,155,.13);border-color:rgba(89,217,155,.23);color:#88ebba}}.btn.danger{{background:rgba(255,116,137,.12);border-color:rgba(255,116,137,.22);color:#ff96a6}}.request-list{{display:grid;gap:9px}}.request-item{{background:var(--surface-3);border:1px solid var(--line);border-radius:15px;padding:13px}}.request-title{{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}}.request-title h3{{font-size:14px;margin:3px 0 0}}.request-details{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin-top:11px}}.request-detail{{min-width:0;background:#101721;border:1px solid var(--line-soft);border-radius:10px;padding:8px 9px}}.request-detail span{{display:block;color:var(--muted-2);font-size:9px;margin-bottom:4px}}.request-detail b{{display:block;font-size:11px;overflow-wrap:anywhere}}.request-actions{{display:flex;justify-content:flex-end;gap:7px;margin-top:10px}}.request-actions .btn{{width:auto;min-height:34px;font-size:11px}}.status{{display:inline-flex;align-items:center;justify-content:center;min-height:25px;padding:4px 8px;border-radius:999px;font-size:9px;font-weight:850;white-space:nowrap}}.status.waiting{{background:rgba(246,201,107,.12);color:var(--warning)}}.status.working{{background:rgba(124,199,255,.12);color:var(--accent-2)}}.status.done{{background:rgba(89,217,155,.12);color:var(--success)}}.status.declined{{background:rgba(255,116,137,.12);color:var(--danger)}}.empty-state{{min-height:140px;border:1px dashed #2a3442;border-radius:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--muted);gap:5px;padding:20px}}.empty-state b{{color:#dbe4ee}}.error-state{{border-color:rgba(255,116,137,.3)}}.lookup-bar{{display:grid;grid-template-columns:minmax(220px,1fr) auto;gap:9px;margin-bottom:12px}}.lookup-bar .btn{{min-width:130px}}.user-profile-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin:2px 0 13px}}.user-profile-head h2{{font-size:19px;margin:3px 0}}.user-profile-head p{{margin:0;color:var(--muted);font-size:11px}}.profile-badges{{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}}.pill{{padding:6px 9px;border-radius:999px;background:#151e29;border:1px solid var(--line);color:#cbd5e1;font-size:9px;font-weight:800}}.danger-pill{{color:var(--danger);background:rgba(255,116,137,.08)}}.mini-balance-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px}}.mini-balance{{background:#0d141d;border:1px solid var(--line);border-radius:13px;padding:11px}}.mini-balance div{{display:flex;align-items:center;justify-content:space-between;gap:8px}}.mini-balance span{{font-size:10px;color:var(--muted)}}.mini-balance strong{{font-size:13px;white-space:nowrap}}.mini-balance small{{display:block;color:var(--muted-2);font-size:9px;margin-top:7px}}.user-workspace{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}}.history-grid{{align-items:start}}.form-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:end}}.form-grid .wide{{grid-column:span 2}}.submit-cell{{display:flex;align-items:flex-end}}.submit-cell .btn{{width:100%}}.balance-form{{grid-template-columns:repeat(3,minmax(0,1fr))}}.security-actions{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}}.security-actions .btn{{width:100%}}.table-wrap{{overflow:auto;border:1px solid var(--line-soft);border-radius:12px}}table{{width:100%;border-collapse:collapse;min-width:720px}}th,td{{padding:9px 10px;text-align:left;border-bottom:1px solid var(--line-soft);font-size:10px;white-space:nowrap}}th{{color:var(--muted-2);font-size:9px;letter-spacing:.04em;background:#0c121a}}td{{color:#cbd5df}}tbody tr:last-child td{{border-bottom:0}}code{{color:#c8d5e4;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px}}.muted-cell{{text-align:center;color:var(--muted)}}.broadcast-grid{{display:grid;grid-template-columns:1.25fr .75fr;gap:10px}}.broadcast-note{{padding:16px;border:1px solid var(--line);border-radius:14px;background:var(--surface-3);color:var(--muted);font-size:12px;line-height:1.55}}.settings-nav{{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}}.setting-tab{{border:1px solid var(--line);background:#0c1219;color:#95a2b2;padding:8px 10px;border-radius:9px;font-size:10px;font-weight:800}}.setting-tab.active{{background:#17222d;color:var(--accent);border-color:#29404a}}.setting-pane{{display:none}}.setting-pane.active{{display:block}}.settings-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px}}.field{{min-width:0}}.settings-grid textarea{{min-height:90px}}.save-bar{{display:flex;justify-content:flex-end;margin-top:13px}}.save-bar .btn{{min-width:180px}}.admin-account-list{{display:grid;gap:10px;margin-top:10px}}.admin-account{{background:var(--surface-3);border:1px solid var(--line);border-radius:15px;padding:15px}}.root-account{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}}.admin-account h3{{margin:3px 0;font-size:15px}}.admin-account p{{margin:0;color:var(--muted);font-size:10px}}.admin-account-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}}.admin-account-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}.permission-title{{margin-top:13px}}.permission-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}}.permission-option{{display:flex;align-items:center;gap:8px;margin:0;padding:9px 10px;border:1px solid var(--line-soft);border-radius:10px;background:#0d141d;color:#c4cfdb;font-size:10px;cursor:pointer}}.permission-option input{{width:auto;min-height:0;margin:0;accent-color:var(--accent)}}.admin-account-actions{{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}}.toast{{position:fixed;right:22px;top:18px;z-index:20;max-width:min(360px,calc(100vw - 32px));padding:11px 14px;border:1px solid rgba(89,217,155,.25);background:#10231c;color:#9aebc0;border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.35);font-size:12px}}.toast-error{{background:#28131a;color:#ff9bad;border-color:rgba(255,116,137,.28)}}@media(max-width:1180px){{.permission-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.dashboard-grid,.mini-balance-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.request-details{{grid-template-columns:repeat(2,minmax(0,1fr))}}.settings-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:880px){{.app-shell{{grid-template-columns:1fr}}.sidebar{{position:static;height:auto;padding:12px}}.brand{{padding-bottom:12px}}.nav{{grid-template-columns:repeat(3,minmax(0,1fr))}}.nav-item{{justify-content:center;font-size:11px}}.sidebar-foot{{display:none}}.main{{padding-top:14px}}.user-workspace,.broadcast-grid{{grid-template-columns:1fr}}.toolbar{{grid-template-columns:1fr 1fr}}.toolbar input{{grid-column:1/-1}}.security-actions{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:620px){{.admin-account-grid,.permission-grid{{grid-template-columns:1fr}}.admin-account-actions{{display:grid}}.root-account,.admin-account-head{{display:block}}.root-account .pill,.admin-account-head .pill{{display:inline-flex;margin-top:9px}}.topbar{{align-items:flex-start}}.top-pill{{display:none}}.dashboard-grid,.summary-grid,.mini-balance-grid{{grid-template-columns:1fr}}.nav{{grid-template-columns:repeat(2,minmax(0,1fr))}}.nav-item span{{display:none}}.toolbar,.lookup-bar,.settings-grid,.form-grid,.balance-form{{grid-template-columns:1fr}}.form-grid .wide{{grid-column:auto}}.request-details{{grid-template-columns:1fr}}.request-actions{{display:grid;grid-template-columns:1fr}}.request-actions .btn{{width:100%}}.user-profile-head{{display:block}}.profile-badges{{justify-content:flex-start;margin-top:10px}}.security-actions{{grid-template-columns:1fr}}}}
+    :root{{--bg:#090c12;--sidebar:#0b0f16;--surface:#10151e;--surface-2:#141b25;--surface-3:#0c1118;--line:#222b38;--line-soft:#1a2230;--text:#f4f7fb;--muted:#8c98a8;--muted-2:#667386;--accent:#68e0d2;--accent-2:#7cc7ff;--success:#59d99b;--warning:#f6c96b;--danger:#ff7489;--radius:18px}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:radial-gradient(circle at 85% -10%,rgba(104,224,210,.08),transparent 32%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px}}button,input,select,textarea{{font:inherit}}button{{cursor:pointer}}.app-shell{{min-height:100vh;display:grid;grid-template-columns:238px minmax(0,1fr)}}.sidebar{{position:sticky;top:0;height:100vh;background:rgba(11,15,22,.96);border-right:1px solid var(--line-soft);padding:20px 14px;display:flex;flex-direction:column;backdrop-filter:blur(18px)}}.brand{{display:flex;align-items:center;gap:11px;padding:6px 8px 22px}}.brand-mark{{width:38px;height:38px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#061116;font-weight:950;font-size:18px;box-shadow:0 10px 30px rgba(104,224,210,.14)}}.brand strong{{display:block;font-size:15px}}.brand small{{display:block;color:var(--muted);margin-top:2px;font-size:11px}}.nav{{display:grid;gap:4px}}.nav-item{{width:100%;border:0;background:transparent;color:#aeb8c6;display:flex;align-items:center;gap:10px;padding:10px 11px;border-radius:11px;text-align:left;font-weight:680}}.nav-item span{{width:24px;height:24px;border-radius:8px;display:grid;place-items:center;background:#111923;color:#66778c;font-size:10px}}.nav-item:hover{{background:#111822;color:#fff}}.nav-item.active{{background:#151e29;color:#fff}}.nav-item.active span{{background:rgba(104,224,210,.13);color:var(--accent)}}.sidebar-foot{{margin-top:auto;padding:14px 8px 2px;border-top:1px solid var(--line-soft)}}.version{{display:block;color:var(--muted-2);font-size:10px;margin-bottom:10px;letter-spacing:.06em}}.logout{{color:#aeb8c6;text-decoration:none;font-size:12px}}.main{{min-width:0;padding:22px clamp(16px,3vw,36px) 40px}}.topbar{{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px}}.topbar h1{{font-size:22px;margin:0;letter-spacing:-.03em}}.topbar p{{margin:5px 0 0;color:var(--muted);font-size:12px}}.top-pill{{padding:8px 11px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--surface-3);font-size:11px}}.page-view{{display:none}}.page-view.active{{display:block}}.section-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:14px}}.section-head h2,.section-head h3{{margin:2px 0 0;letter-spacing:-.025em}}.section-head h2{{font-size:18px}}.section-head h3{{font-size:15px}}.section-head p{{margin:3px 0 0;color:var(--muted);font-size:12px}}.eyebrow{{display:block;color:var(--muted-2);font-size:9px;font-weight:850;letter-spacing:.13em}}.panel-card{{background:rgba(16,21,30,.92);border:1px solid var(--line);border-radius:var(--radius);padding:17px;box-shadow:0 16px 50px rgba(0,0,0,.14)}}.compact-card{{padding:15px}}.dashboard-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}}.wallet-metric{{min-height:108px;background:linear-gradient(145deg,#111823,#0d131c);border:1px solid var(--line);border-radius:16px;padding:14px;display:flex;gap:11px;align-items:flex-start}}.asset-dot{{width:30px;height:30px;flex:0 0 auto;border-radius:10px;background:rgba(104,224,210,.1);color:var(--accent);display:grid;place-items:center;font-size:11px;font-weight:900}}.wallet-metric span{{display:block;color:var(--muted);font-size:10px}}.wallet-metric strong{{display:block;font-size:18px;margin:5px 0 3px;letter-spacing:-.03em;white-space:nowrap}}.wallet-metric small{{color:var(--muted-2);font-size:10px}}.summary-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:10px}}.summary-card{{padding:13px 14px;border:1px solid var(--line);border-radius:14px;background:var(--surface-3)}}.summary-card span{{color:var(--muted);font-size:10px}}.summary-card strong{{display:block;font-size:20px;margin-top:4px}}.toolbar{{display:grid;grid-template-columns:minmax(220px,2fr) repeat(2,minmax(150px,1fr)) auto;gap:9px;margin-bottom:13px}}input,select,textarea{{width:100%;border:1px solid var(--line);background:#0b1017;color:var(--text);border-radius:11px;min-height:41px;padding:9px 11px;outline:none}}input:focus,select:focus,textarea:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(104,224,210,.08)}}textarea{{min-height:110px;resize:vertical}}label{{display:block;color:#aab5c4;font-size:10px;font-weight:760;margin:0 0 6px}}.btn{{border:1px solid transparent;min-height:38px;border-radius:10px;padding:8px 12px;font-weight:800;background:#192431;color:#dfe8f3}}.btn.primary{{background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#061116}}.btn.ghost{{background:#111923;border-color:var(--line);color:#c9d3df}}.btn.success{{background:rgba(89,217,155,.13);border-color:rgba(89,217,155,.23);color:#88ebba}}.btn.danger{{background:rgba(255,116,137,.12);border-color:rgba(255,116,137,.22);color:#ff96a6}}.request-list{{display:grid;gap:9px}}.request-item{{background:var(--surface-3);border:1px solid var(--line);border-radius:15px;padding:13px}}.request-title{{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}}.request-title h3{{font-size:14px;margin:3px 0 0}}.request-details{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin-top:11px}}.request-detail{{min-width:0;background:#101721;border:1px solid var(--line-soft);border-radius:10px;padding:8px 9px}}.request-detail span{{display:block;color:var(--muted-2);font-size:9px;margin-bottom:4px}}.request-detail b{{display:block;font-size:11px;overflow-wrap:anywhere}}.request-warning{{margin-top:10px;padding:9px 10px;border:1px solid rgba(246,201,107,.25);border-radius:10px;background:rgba(246,201,107,.08);color:var(--warning);font-size:10px;line-height:1.45}}.request-actions{{display:flex;justify-content:flex-end;gap:7px;margin-top:10px}}.request-actions .btn{{width:auto;min-height:34px;font-size:11px}}.status{{display:inline-flex;align-items:center;justify-content:center;min-height:25px;padding:4px 8px;border-radius:999px;font-size:9px;font-weight:850;white-space:nowrap}}.status.waiting{{background:rgba(246,201,107,.12);color:var(--warning)}}.status.working{{background:rgba(124,199,255,.12);color:var(--accent-2)}}.status.done{{background:rgba(89,217,155,.12);color:var(--success)}}.status.declined{{background:rgba(255,116,137,.12);color:var(--danger)}}.empty-state{{min-height:140px;border:1px dashed #2a3442;border-radius:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--muted);gap:5px;padding:20px}}.empty-state b{{color:#dbe4ee}}.error-state{{border-color:rgba(255,116,137,.3)}}.lookup-bar{{display:grid;grid-template-columns:minmax(220px,1fr) auto;gap:9px;margin-bottom:12px}}.lookup-bar .btn{{min-width:130px}}.user-profile-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin:2px 0 13px}}.user-profile-head h2{{font-size:19px;margin:3px 0}}.user-profile-head p{{margin:0;color:var(--muted);font-size:11px}}.profile-badges{{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}}.pill{{padding:6px 9px;border-radius:999px;background:#151e29;border:1px solid var(--line);color:#cbd5e1;font-size:9px;font-weight:800}}.danger-pill{{color:var(--danger);background:rgba(255,116,137,.08)}}.mini-balance-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px}}.mini-balance{{background:#0d141d;border:1px solid var(--line);border-radius:13px;padding:11px}}.mini-balance div{{display:flex;align-items:center;justify-content:space-between;gap:8px}}.mini-balance span{{font-size:10px;color:var(--muted)}}.mini-balance strong{{font-size:13px;white-space:nowrap}}.mini-balance small{{display:block;color:var(--muted-2);font-size:9px;margin-top:7px}}.user-workspace{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}}.history-grid{{align-items:start}}.form-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:end}}.form-grid .wide{{grid-column:span 2}}.submit-cell{{display:flex;align-items:flex-end}}.submit-cell .btn{{width:100%}}.balance-form{{grid-template-columns:repeat(3,minmax(0,1fr))}}.security-actions{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}}.security-actions .btn{{width:100%}}.table-wrap{{overflow:auto;border:1px solid var(--line-soft);border-radius:12px}}table{{width:100%;border-collapse:collapse;min-width:720px}}th,td{{padding:9px 10px;text-align:left;border-bottom:1px solid var(--line-soft);font-size:10px;white-space:nowrap}}th{{color:var(--muted-2);font-size:9px;letter-spacing:.04em;background:#0c121a}}td{{color:#cbd5df}}tbody tr:last-child td{{border-bottom:0}}code{{color:#c8d5e4;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px}}.muted-cell{{text-align:center;color:var(--muted)}}.broadcast-grid{{display:grid;grid-template-columns:1.25fr .75fr;gap:10px}}.broadcast-note{{padding:16px;border:1px solid var(--line);border-radius:14px;background:var(--surface-3);color:var(--muted);font-size:12px;line-height:1.55}}.settings-nav{{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}}.setting-tab{{border:1px solid var(--line);background:#0c1219;color:#95a2b2;padding:8px 10px;border-radius:9px;font-size:10px;font-weight:800}}.setting-tab.active{{background:#17222d;color:var(--accent);border-color:#29404a}}.setting-pane{{display:none}}.setting-pane.active{{display:block}}.settings-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px}}.field{{min-width:0}}.settings-grid textarea{{min-height:90px}}.save-bar{{display:flex;justify-content:flex-end;margin-top:13px}}.save-bar .btn{{min-width:180px}}.admin-account-list{{display:grid;gap:10px;margin-top:10px}}.admin-account{{background:var(--surface-3);border:1px solid var(--line);border-radius:15px;padding:15px}}.root-account{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}}.admin-account h3{{margin:3px 0;font-size:15px}}.admin-account p{{margin:0;color:var(--muted);font-size:10px}}.admin-account-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}}.admin-account-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}.permission-title{{margin-top:13px}}.permission-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}}.permission-option{{display:flex;align-items:center;gap:8px;margin:0;padding:9px 10px;border:1px solid var(--line-soft);border-radius:10px;background:#0d141d;color:#c4cfdb;font-size:10px;cursor:pointer}}.permission-option input{{width:auto;min-height:0;margin:0;accent-color:var(--accent)}}.admin-account-actions{{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}}.toast{{position:fixed;right:22px;top:18px;z-index:20;max-width:min(360px,calc(100vw - 32px));padding:11px 14px;border:1px solid rgba(89,217,155,.25);background:#10231c;color:#9aebc0;border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.35);font-size:12px}}.toast-error{{background:#28131a;color:#ff9bad;border-color:rgba(255,116,137,.28)}}@media(max-width:1180px){{.permission-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.dashboard-grid,.mini-balance-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.request-details{{grid-template-columns:repeat(2,minmax(0,1fr))}}.settings-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:880px){{.app-shell{{grid-template-columns:1fr}}.sidebar{{position:static;height:auto;padding:12px}}.brand{{padding-bottom:12px}}.nav{{grid-template-columns:repeat(3,minmax(0,1fr))}}.nav-item{{justify-content:center;font-size:11px}}.sidebar-foot{{display:none}}.main{{padding-top:14px}}.user-workspace,.broadcast-grid{{grid-template-columns:1fr}}.toolbar{{grid-template-columns:1fr 1fr}}.toolbar input{{grid-column:1/-1}}.security-actions{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:620px){{.admin-account-grid,.permission-grid{{grid-template-columns:1fr}}.admin-account-actions{{display:grid}}.root-account,.admin-account-head{{display:block}}.root-account .pill,.admin-account-head .pill{{display:inline-flex;margin-top:9px}}.topbar{{align-items:flex-start}}.top-pill{{display:none}}.dashboard-grid,.summary-grid,.mini-balance-grid{{grid-template-columns:1fr}}.nav{{grid-template-columns:repeat(2,minmax(0,1fr))}}.nav-item span{{display:none}}.toolbar,.lookup-bar,.settings-grid,.form-grid,.balance-form{{grid-template-columns:1fr}}.form-grid .wide{{grid-column:auto}}.request-details{{grid-template-columns:1fr}}.request-actions{{display:grid;grid-template-columns:1fr}}.request-actions .btn{{width:100%}}.user-profile-head{{display:block}}.profile-badges{{justify-content:flex-start;margin-top:10px}}.security-actions{{grid-template-columns:1fr}}}}
     </style></head><body>{notice_html}<div class='app-shell'><aside class='sidebar'><div class='brand'><div class='brand-mark'>N</div><div><strong>Nerlo Wallet</strong><small>Yönetim Merkezi</small></div></div><nav class='nav'>{nav_html}</nav><div class='sidebar-foot'><span class='version'>NERLO-FULL-EXCHANGE-2026.06.24-R1</span><a class='logout' href='/logout'>Güvenli çıkış</a></div></aside><main class='main'><header class='topbar'><div><h1>Kontrol Merkezi</h1><p>Kullanıcı, bakiye ve işlem operasyonları</p></div><span class='top-pill'>{h(current_panel_username())} · {h(now())}</span></header>
 
     {dashboard_section}
@@ -5225,6 +5354,7 @@ def start_background_services_once():
         ).start()
         start_exchange_threads()
         _background_services_started = True
+        print("BUILD VERSION:", BUILD_VERSION)
         print("EXCHANGE HEALTH:", exchange_health_snapshot())
         print("WALLET MODE: PostgreSQL ledger + durable queue + watch-only HD addresses + blockchain indexers")
 
