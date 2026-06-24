@@ -385,7 +385,7 @@ DEFAULT_SETTINGS = {
     "rate_USDT_TL": "46.40",
     "rate_LTC_TL": "2065.00",
     "rate_TRX_TL": "15.50",
-    "rate_XMR_TL": "0", "15.50",
+    "rate_XMR_TL": "0",
     "auto_rate_enabled": "on",
     "rates_source": "Binance Spot",
     "rates_last_updated": "",
@@ -440,7 +440,7 @@ DEFAULT_SETTINGS = {
     "icon_USDT": "5895571353746021767",
     "icon_LTC": "5895441495409828662",
     "icon_TRX": settings.get("icon_TRX", ""),
-    "icon_XMR": "5900147027219587568", "5895440778150288520",
+    "icon_XMR": "5900147027219587568",
     "icon_TL": "5897961936837943618",
 }
 
