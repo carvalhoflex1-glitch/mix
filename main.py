@@ -47,8 +47,8 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "")
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict", SESSION_COOKIE_SECURE=os.getenv("COOKIE_SECURE", "1") == "1", PERMANENT_SESSION_LIFETIME=1800)
 
-ASSETS = ["TL", "USDT", "LTC", "TRX", "XMR"]
-CRYPTO_ASSETS = ["USDT", "LTC", "TRX", "XMR"]
+ASSETS = ["TL", "USDT", "LTC", "TRX"]
+CRYPTO_ASSETS = ["USDT", "LTC", "TRX"]
 data_lock = threading.RLock()
 user_state = {}
 
@@ -380,6 +380,7 @@ DEFAULT_SETTINGS = {
     "iban_owner": os.getenv("DEFAULT_IBAN_OWNER", ""),
     "wallet_USDT": os.getenv("DEFAULT_WALLET_USDT", ""),
     "wallet_TRX": os.getenv("DEFAULT_WALLET_TRX", ""),
+    "wallet_XMR": os.getenv("DEFAULT_WALLET_XMR", ""),
     "wallet_LTC": os.getenv("DEFAULT_WALLET_LTC", ""),
     "rate_USDT_TL": "46.40",
     "rate_LTC_TL": "2065.00",
@@ -439,15 +440,7 @@ DEFAULT_SETTINGS = {
     "icon_LTC": "5895441495409828662",
     "icon_TRX": "5895440778150288520",
     "icon_TL": "5897961936837943618",
-
-    "icon_XMR": "",
-    "wallet_XMR": "",
-    "rate_XMR_TL": "0",
-    "network_XMR": "Monero",
-    "min_deposit_XMR": "0.01",
-    "min_withdraw_XMR": "0.01",
-    "min_convert_XMR": "0.01",
-    "daily_withdraw_limit_XMR": "1000",
+    "icon_XMR": "5900147027219587568",
 }
 
 init_database()
@@ -502,7 +495,7 @@ def _render_asset_icons(value):
     entities = []
     cursor = 0
     offset = 0
-    pattern = re.compile(r"\{\{(TL|USDT|LTC|TRX)\}\}")
+    pattern = re.compile(r"\{\{(TL|USDT|LTC|TRX|XMR)\}\}")
 
     for match in pattern.finditer(source):
         before = source[cursor:match.start()]
@@ -535,7 +528,7 @@ def _render_asset_icons(value):
 
 def _plain_asset_icons(value):
     return re.sub(
-        r"\{\{(TL|USDT|LTC|TRX)\}\}",
+        r"\{\{(TL|USDT|LTC|TRX|XMR)\}\}",
         lambda m: "₺" if m.group(1) == "TL" else m.group(1),
         str(value),
     )
@@ -956,7 +949,7 @@ def _fetch_coingecko_rates():
     response = requests.get(
         "https://api.coingecko.com/api/v3/simple/price",
         params={
-            "ids": "tether,litecoin,tron,monero",
+            "ids": "tether,litecoin,tron",
             "vs_currencies": "try",
             "include_last_updated_at": "true",
         },
@@ -1958,7 +1951,7 @@ def setting_label(key):
     match = re.fullmatch(r"rate_(USDT|LTC|TRX)_TL", key)
     if match:
         return f"{match.group(1)} / TL kuru"
-    match = re.fullmatch(r"fee_(deposit|withdraw)_(TL|USDT|LTC|TRX)_percent", key)
+    match = re.fullmatch(r"fee_(deposit|withdraw)_(TL|USDT|LTC|TRX|XMR)_percent", key)
     if match:
         operation = "yükleme" if match.group(1) == "deposit" else "çekim"
         return f"{match.group(2)} {operation} komisyonu (%)"
@@ -1966,11 +1959,11 @@ def setting_label(key):
         return "TL içeren dönüşüm komisyonu (%)"
     if key == "fee_convert_crypto_percent":
         return "Kripto → kripto dönüşüm komisyonu (%)"
-    match = re.fullmatch(r"min_(deposit|withdraw|convert)_(TL|USDT|LTC|TRX)", key)
+    match = re.fullmatch(r"min_(deposit|withdraw|convert)_(TL|USDT|LTC|TRX|XMR)", key)
     if match:
         operation = {"deposit": "yükleme", "withdraw": "çekim", "convert": "dönüştürme"}[match.group(1)]
         return f"{match.group(2)} en düşük {operation} tutarı"
-    match = re.fullmatch(r"daily_withdraw_limit_(TL|USDT|LTC|TRX)", key)
+    match = re.fullmatch(r"daily_withdraw_limit_(TL|USDT|LTC|TRX|XMR)", key)
     if match:
         return f"{match.group(1)} günlük çekim sınırı"
     match = re.fullmatch(r"icon_(.+)", key)
@@ -2582,33 +2575,29 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
 
 
-def validate_xmr_address(addr: str) -> bool:
-    addr = str(addr or "").strip()
-    if len(addr) < 90 or len(addr) > 110:
-        return False
-    if not addr[0] in ("4", "8"):
-        return False
-    return True
+@app.route("/panel/custom-id", methods=["GET","POST"])
+def custom_id_panel():
+    if request.method == "POST":
+        for k in ["icon_TL","icon_USDT","icon_TRX","icon_LTC","icon_XMR"]:
+            if k in request.form:
+                settings[k] = request.form.get(k,"")
+        save_json(FILES["settings"], settings)
+        return redirect("/panel/custom-id")
 
-
-
-ICON_MAP = {
-    "TL": "icon_TL",
-    "USDT": "icon_USDT",
-    "LTC": "icon_LTC",
-    "TRX": "icon_TRX",
-    "XMR": "icon_XMR",
-}
-
-# upgraded inline_button (XMR compatible)
-def inline_button(text, data, icon_key=None, asset=None):
-    b = {"text": text, "callback_data": data}
-    try:
-        if asset:
-            icon_key = ICON_MAP.get(asset, icon_key)
-        emoji_id = str(settings.get(icon_key or "", "")).strip()
-        if emoji_id:
-            b["icon_custom_emoji_id"] = emoji_id
-    except Exception:
-        pass
-    return b
+    return '''
+    <h3>Custom Emoji ID Panel</h3>
+    <form method="post">
+        TL: <input name="icon_TL" value="{TL}"><br>
+        USDT: <input name="icon_USDT" value="{USDT}"><br>
+        TRX: <input name="icon_TRX" value="{TRX}"><br>
+        LTC: <input name="icon_LTC" value="{LTC}"><br>
+        XMR: <input name="icon_XMR" value="{XMR}"><br>
+        <button type="submit">Save</button>
+    </form>
+    '''.format(
+        TL=settings.get("icon_TL",""),
+        USDT=settings.get("icon_USDT",""),
+        TRX=settings.get("icon_TRX",""),
+        LTC=settings.get("icon_LTC",""),
+        XMR=settings.get("icon_XMR","")
+    )
