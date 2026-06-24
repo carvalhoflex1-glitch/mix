@@ -3,7 +3,7 @@ import io
 import base64
 import time
 import json
-import random
+import randomtam sen güncel
 import hashlib
 import threading
 import secrets
@@ -390,35 +390,35 @@ DEFAULT_SETTINGS = {
     "rates_source": "Binance Spot",
     "rates_last_updated": "",
     "rates_last_error": "",
-    "fee_deposit_TL_percent": "0",
-    "fee_deposit_USDT_percent": "0",
-    "fee_deposit_LTC_percent": "0",
-    "fee_deposit_TRX_percent": "0",
-    "fee_deposit_XMR_percent": "0",
-    "fee_withdraw_TL_percent": "1",
-    "fee_withdraw_USDT_percent": "1",
-    "fee_withdraw_LTC_percent": "1",
-    "fee_withdraw_TRX_percent": "1",
-    "fee_withdraw_XMR_percent": "1",
+    "fee_deposit_TL_percent": "6",
+    "fee_deposit_USDT_percent": "1",
+    "fee_deposit_LTC_percent": "1",
+    "fee_deposit_TRX_percent": "1",
+    "fee_deposit_XMR_percent": "1",
+    "fee_withdraw_TL_percent": "7",
+    "fee_withdraw_USDT_percent": "2",
+    "fee_withdraw_LTC_percent": "2",
+    "fee_withdraw_TRX_percent": "2",
+    "fee_withdraw_XMR_percent": "2.5",
     # Legacy fallback oranları
     "fee_convert_tl_percent": "2",
     "fee_convert_crypto_percent": "2",
     # Yön ve parite bazında dönüşüm komisyonları
-    "fee_convert_TL_USDT_percent": "11",
+    "fee_convert_TL_USDT_percent": "10",
     "fee_convert_TL_LTC_percent": "11",
     "fee_convert_TL_TRX_percent": "11",
-    "fee_convert_TL_XMR_percent": "11",
-    "fee_convert_USDT_TL_percent": "3",
-    "fee_convert_USDT_LTC_percent": "5",
-    "fee_convert_USDT_TRX_percent": "5",
+    "fee_convert_TL_XMR_percent": "12",
+    "fee_convert_USDT_TL_percent": "2",
+    "fee_convert_USDT_LTC_percent": "4",
+    "fee_convert_USDT_TRX_percent": "4",
     "fee_convert_USDT_XMR_percent": "5",
-    "fee_convert_LTC_TL_percent": "3",
-    "fee_convert_LTC_USDT_percent": "5",
-    "fee_convert_LTC_TRX_percent": "5",
+    "fee_convert_LTC_TL_percent": "2.5",
+    "fee_convert_LTC_USDT_percent": "4",
+    "fee_convert_LTC_TRX_percent": "4.5",
     "fee_convert_LTC_XMR_percent": "5",
-    "fee_convert_TRX_TL_percent": "3",
-    "fee_convert_TRX_USDT_percent": "5",
-    "fee_convert_TRX_LTC_percent": "5",
+    "fee_convert_TRX_TL_percent": "2.5",
+    "fee_convert_TRX_USDT_percent": "4",
+    "fee_convert_TRX_LTC_percent": "4.5",
     "fee_convert_TRX_XMR_percent": "5",
     "fee_convert_XMR_TL_percent": "3",
     "fee_convert_XMR_USDT_percent": "5",
@@ -496,6 +496,43 @@ for k, v in DEFAULT_SETTINGS.items():
             continue
     settings.setdefault(k, legacy_convert_fee if k in ("fee_convert_tl_percent", "fee_convert_crypto_percent") else v)
 settings.pop("fee_convert_percent", None)
+
+COMMISSION_PRESET_VERSION = "2026-06-24-balanced-v1"
+COMMISSION_PRESET = {
+    "fee_deposit_TL_percent": "6",
+    "fee_deposit_USDT_percent": "1",
+    "fee_deposit_LTC_percent": "1",
+    "fee_deposit_TRX_percent": "1",
+    "fee_deposit_XMR_percent": "1",
+    "fee_withdraw_TL_percent": "7",
+    "fee_withdraw_USDT_percent": "2",
+    "fee_withdraw_LTC_percent": "2",
+    "fee_withdraw_TRX_percent": "2",
+    "fee_withdraw_XMR_percent": "2.5",
+    "fee_convert_TL_USDT_percent": "10",
+    "fee_convert_TL_LTC_percent": "11",
+    "fee_convert_TL_TRX_percent": "11",
+    "fee_convert_TL_XMR_percent": "12",
+    "fee_convert_USDT_TL_percent": "2",
+    "fee_convert_LTC_TL_percent": "2.5",
+    "fee_convert_TRX_TL_percent": "2.5",
+    "fee_convert_XMR_TL_percent": "3",
+    "fee_convert_USDT_LTC_percent": "4",
+    "fee_convert_LTC_USDT_percent": "4",
+    "fee_convert_USDT_TRX_percent": "4",
+    "fee_convert_TRX_USDT_percent": "4",
+    "fee_convert_LTC_TRX_percent": "4.5",
+    "fee_convert_TRX_LTC_percent": "4.5",
+    "fee_convert_USDT_XMR_percent": "5",
+    "fee_convert_XMR_USDT_percent": "5",
+    "fee_convert_LTC_XMR_percent": "5",
+    "fee_convert_XMR_LTC_percent": "5",
+    "fee_convert_TRX_XMR_percent": "5",
+    "fee_convert_XMR_TRX_percent": "5",
+}
+if settings.get("_commission_preset_version") != COMMISSION_PRESET_VERSION:
+    settings.update(COMMISSION_PRESET)
+    settings["_commission_preset_version"] = COMMISSION_PRESET_VERSION
 if not str(settings.get("icon_TL", "")).strip():
     settings["icon_TL"] = DEFAULT_SETTINGS["icon_TL"]
 if not str(settings.get("icon_XMR", "")).strip():
