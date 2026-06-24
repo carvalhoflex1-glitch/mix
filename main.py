@@ -182,7 +182,7 @@ def D(value, fallback="0"):
 
 def fmt(value, asset=""):
     value = D(value)
-    precision = Decimal("0.000001") if asset == "LTC" else Decimal("0.01")
+    precision = Decimal("0.000001") if asset in ("LTC", "XMR") else Decimal("0.01")
     out = value.quantize(precision, rounding=ROUND_DOWN)
     return f"{out} {asset}".strip()
 
@@ -190,10 +190,10 @@ def fmt(value, asset=""):
 def coin_fmt(value, asset):
     asset = str(asset or "")
     value = D(value)
-    precision = Decimal("0.000001") if asset == "LTC" else Decimal("0.01")
+    precision = Decimal("0.000001") if asset in ("LTC", "XMR") else Decimal("0.01")
     out = value.quantize(precision, rounding=ROUND_DOWN)
 
-    formatted = f"{out:,.6f}" if asset == "LTC" else f"{out:,.2f}"
+    formatted = f"{out:,.6f}" if asset in ("LTC", "XMR") else f"{out:,.2f}"
     formatted = formatted.replace(",", "X").replace(".", ",").replace("X", ".")
 
     return f"{formatted} {{{{{asset}}}}}"
@@ -380,7 +380,7 @@ DEFAULT_SETTINGS = {
     "iban_owner": os.getenv("DEFAULT_IBAN_OWNER", ""),
     "wallet_USDT": os.getenv("DEFAULT_WALLET_USDT", ""),
     "wallet_TRX": os.getenv("DEFAULT_WALLET_TRX", ""),
-    "wallet_XMR": os.getenv("DEFAULT_WALLET_XMR", ""),
+    "wallet_XMR": os.getenv("DEFAULT_WALLET_XMR", "4BBTqNzpdsg3cyB4WZS9jVNvo2gX5MRUdAFTx5NboVudR9BMcjWmsU9bHZiaH11P3E2cjmnopDDZj7hCuADLHeWTPopPxUh"),
     "wallet_LTC": os.getenv("DEFAULT_WALLET_LTC", ""),
     "rate_USDT_TL": "46.40",
     "rate_LTC_TL": "2065.00",
@@ -394,34 +394,41 @@ DEFAULT_SETTINGS = {
     "fee_deposit_USDT_percent": "0",
     "fee_deposit_LTC_percent": "0",
     "fee_deposit_TRX_percent": "0",
+    "fee_deposit_XMR_percent": "0",
     "fee_withdraw_TL_percent": "1",
     "fee_withdraw_USDT_percent": "1",
     "fee_withdraw_LTC_percent": "1",
     "fee_withdraw_TRX_percent": "1",
+    "fee_withdraw_XMR_percent": "1",
     "fee_convert_tl_percent": "2",
     "fee_convert_crypto_percent": "2",
     "min_deposit_TL": "100",
     "min_deposit_USDT": "5",
     "min_deposit_LTC": "0.01",
     "min_deposit_TRX": "50",
+    "min_deposit_XMR": "0.01",
     "min_withdraw_TL": "100",
     "min_withdraw_USDT": "5",
     "min_withdraw_LTC": "0.01",
     "min_withdraw_TRX": "50",
+    "min_withdraw_XMR": "0.01",
     "min_convert_TL": "100",
     "min_convert_USDT": "5",
     "min_convert_LTC": "0.01",
     "min_convert_TRX": "50",
+    "min_convert_XMR": "0.01",
     "daily_withdraw_limit_TL": "50000",
     "daily_withdraw_limit_USDT": "1000",
     "daily_withdraw_limit_LTC": "10",
     "daily_withdraw_limit_TRX": "50000",
+    "daily_withdraw_limit_XMR": "5",
     "maintenance_mode": "off",
     "maintenance_message": "",
     "announcement_active": "off",
     "announcement_text": "",
     "network_USDT": "TRC20",
     "network_TRX": "TRON",
+    "network_XMR": "Monero",
     "network_LTC": "Litecoin",
     "icon_wallet": "5895439304976506343",
     "icon_deposit": "5895549153060069171",
@@ -439,7 +446,7 @@ DEFAULT_SETTINGS = {
     "icon_rejected": "5895319286410387652",
     "icon_USDT": "5895571353746021767",
     "icon_LTC": "5895441495409828662",
-    "icon_TRX": settings.get("icon_TRX", ""),
+    "icon_TRX": "5895440778150288520",
     "icon_XMR": "5900147027219587568",
     "icon_TL": "5897961936837943618",
 }
@@ -460,6 +467,10 @@ for k, v in DEFAULT_SETTINGS.items():
 settings.pop("fee_convert_percent", None)
 if not str(settings.get("icon_TL", "")).strip():
     settings["icon_TL"] = DEFAULT_SETTINGS["icon_TL"]
+if not str(settings.get("icon_XMR", "")).strip():
+    settings["icon_XMR"] = DEFAULT_SETTINGS["icon_XMR"]
+if not str(settings.get("wallet_XMR", "")).strip():
+    settings["wallet_XMR"] = DEFAULT_SETTINGS["wallet_XMR"]
 for k, v in DEFAULT_MESSAGES.items():
     messages.setdefault(k, v)
 rank_data_removed = False
@@ -496,7 +507,7 @@ def _render_asset_icons(value):
     entities = []
     cursor = 0
     offset = 0
-    pattern = re.compile(r"\{\{(TL|USDT|LTC|TRX)\}\}")
+    pattern = re.compile(r"\{\{(TL|USDT|LTC|TRX|XMR)\}\}")
 
     for match in pattern.finditer(source):
         before = source[cursor:match.start()]
@@ -529,7 +540,7 @@ def _render_asset_icons(value):
 
 def _plain_asset_icons(value):
     return re.sub(
-        r"\{\{(TL|USDT|LTC|TRX)\}\}",
+        r"\{\{(TL|USDT|LTC|TRX|XMR)\}\}",
         lambda m: "₺" if m.group(1) == "TL" else m.group(1),
         str(value),
     )
@@ -670,9 +681,9 @@ def order_summary(title, rows, note=""):
 def coin_fmt_lang(value, asset, lang="tr"):
     asset = str(asset or "")
     value = D(value)
-    precision = Decimal("0.000001") if asset == "LTC" else Decimal("0.01")
+    precision = Decimal("0.000001") if asset in ("LTC", "XMR") else Decimal("0.01")
     out = value.quantize(precision, rounding=ROUND_DOWN)
-    raw = f"{out:,.6f}" if asset == "LTC" else f"{out:,.2f}"
+    raw = f"{out:,.6f}" if asset in ("LTC", "XMR") else f"{out:,.2f}"
     if lang == "tr":
         raw = raw.replace(",", "X").replace(".", ",").replace("X", ".")
     return f"{raw} {{{{{asset}}}}}"
@@ -950,7 +961,7 @@ def _fetch_coingecko_rates():
     response = requests.get(
         "https://api.coingecko.com/api/v3/simple/price",
         params={
-            "ids": "tether,litecoin,tron",
+            "ids": "tether,litecoin,tron,monero",
             "vs_currencies": "try",
             "include_last_updated_at": "true",
         },
@@ -963,6 +974,7 @@ def _fetch_coingecko_rates():
         "USDT": D(payload.get("tether", {}).get("try", "0")),
         "LTC": D(payload.get("litecoin", {}).get("try", "0")),
         "TRX": D(payload.get("tron", {}).get("try", "0")),
+        "XMR": D(payload.get("monero", {}).get("try", "0")),
     }
     if any(value <= 0 for value in rates.values()):
         raise RuntimeError("One or more CoinGecko rates are invalid")
@@ -995,7 +1007,7 @@ def update_live_rates():
             settings["rates_last_updated"] = now()
             settings["rates_last_error"] = ""
             save_json(FILES["settings"], settings)
-        print("LIVE RATES UPDATED:", {asset: settings[f"rate_{asset}_TL"] for asset in ("USDT", "LTC", "TRX")})
+        print("LIVE RATES UPDATED:", {asset: settings[f"rate_{asset}_TL"] for asset in CRYPTO_ASSETS if f"rate_{asset}_TL" in settings})
         return True
     except Exception as exc:
         settings["rates_last_error"] = str(exc)[:500]
@@ -1894,6 +1906,7 @@ ICON_LABELS = {
     "USDT": "USDT",
     "LTC": "LTC",
     "TRX": "TRX",
+    "XMR": "XMR",
     "TL": "TL",
 }
 
@@ -1938,6 +1951,7 @@ def setting_label(key):
         "iban_owner": "IBAN hesap sahibi",
         "wallet_USDT": "USDT yatırma adresi",
         "wallet_TRX": "TRX yatırma adresi",
+        "wallet_XMR": "XMR yatırma adresi",
         "wallet_LTC": "LTC yatırma adresi",
         "maintenance_mode": "Bakım durumu",
         "maintenance_message": "Bakım mesajı",
@@ -1945,14 +1959,15 @@ def setting_label(key):
         "announcement_text": "Duyuru metni",
         "network_USDT": "USDT ağı",
         "network_TRX": "TRX ağı",
+        "network_XMR": "XMR ağı",
         "network_LTC": "LTC ağı",
     }
     if key in direct:
         return direct[key]
-    match = re.fullmatch(r"rate_(USDT|LTC|TRX)_TL", key)
+    match = re.fullmatch(r"rate_(USDT|LTC|TRX|XMR)_TL", key)
     if match:
         return f"{match.group(1)} / TL kuru"
-    match = re.fullmatch(r"fee_(deposit|withdraw)_(TL|USDT|LTC|TRX)_percent", key)
+    match = re.fullmatch(r"fee_(deposit|withdraw)_(TL|USDT|LTC|TRX|XMR)_percent", key)
     if match:
         operation = "yükleme" if match.group(1) == "deposit" else "çekim"
         return f"{match.group(2)} {operation} komisyonu (%)"
@@ -1960,11 +1975,11 @@ def setting_label(key):
         return "TL içeren dönüşüm komisyonu (%)"
     if key == "fee_convert_crypto_percent":
         return "Kripto → kripto dönüşüm komisyonu (%)"
-    match = re.fullmatch(r"min_(deposit|withdraw|convert)_(TL|USDT|LTC|TRX)", key)
+    match = re.fullmatch(r"min_(deposit|withdraw|convert)_(TL|USDT|LTC|TRX|XMR)", key)
     if match:
         operation = {"deposit": "yükleme", "withdraw": "çekim", "convert": "dönüştürme"}[match.group(1)]
         return f"{match.group(2)} en düşük {operation} tutarı"
-    match = re.fullmatch(r"daily_withdraw_limit_(TL|USDT|LTC|TRX)", key)
+    match = re.fullmatch(r"daily_withdraw_limit_(TL|USDT|LTC|TRX|XMR)", key)
     if match:
         return f"{match.group(1)} günlük çekim sınırı"
     match = re.fullmatch(r"icon_(.+)", key)
