@@ -2041,8 +2041,9 @@ def setting_field(key):
             "</select></div>"
         )
     if key.startswith("fee_"):
-return f"<div class='field'><label>{label}</label><input type='number' min='0' max='99.9999' step='0.0001' name='{h(key)}' value='{h(value)}'></div>"
-return f"<div class='field'><label>{label}</label><input name='{h(key)}' value='{h(value)}'></div>"
+        return f"<div class='field'><label>{label}</label><input type='number' min='0' max='99.9999' step='0.0001' name='{h(key)}' value='{h(value)}'></div>"
+
+    return f"<div class='field'><label>{label}</label><input name='{h(key)}' value='{h(value)}'></div>"
 
 
 def message_field(key):
