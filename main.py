@@ -400,8 +400,30 @@ DEFAULT_SETTINGS = {
     "fee_withdraw_LTC_percent": "1",
     "fee_withdraw_TRX_percent": "1",
     "fee_withdraw_XMR_percent": "1",
+    # Legacy fallback oranları
     "fee_convert_tl_percent": "2",
     "fee_convert_crypto_percent": "2",
+    # Yön ve parite bazında dönüşüm komisyonları
+    "fee_convert_TL_USDT_percent": "11",
+    "fee_convert_TL_LTC_percent": "11",
+    "fee_convert_TL_TRX_percent": "11",
+    "fee_convert_TL_XMR_percent": "11",
+    "fee_convert_USDT_TL_percent": "3",
+    "fee_convert_USDT_LTC_percent": "5",
+    "fee_convert_USDT_TRX_percent": "5",
+    "fee_convert_USDT_XMR_percent": "5",
+    "fee_convert_LTC_TL_percent": "3",
+    "fee_convert_LTC_USDT_percent": "5",
+    "fee_convert_LTC_TRX_percent": "5",
+    "fee_convert_LTC_XMR_percent": "5",
+    "fee_convert_TRX_TL_percent": "3",
+    "fee_convert_TRX_USDT_percent": "5",
+    "fee_convert_TRX_LTC_percent": "5",
+    "fee_convert_TRX_XMR_percent": "5",
+    "fee_convert_XMR_TL_percent": "3",
+    "fee_convert_XMR_USDT_percent": "5",
+    "fee_convert_XMR_LTC_percent": "5",
+    "fee_convert_XMR_TRX_percent": "5",
     "min_deposit_TL": "100",
     "min_deposit_USDT": "5",
     "min_deposit_LTC": "0.01",
@@ -462,7 +484,16 @@ admin_logs = load_json(FILES["admin_logs"], [])
 security_events = load_json(FILES["security_events"], [])
 panel_users = load_json(FILES["panel_users"], {})
 legacy_convert_fee = str(settings.get("fee_convert_percent", "2"))
+legacy_tl_convert_fee = str(settings.get("fee_convert_tl_percent", legacy_convert_fee))
+legacy_crypto_convert_fee = str(settings.get("fee_convert_crypto_percent", legacy_convert_fee))
 for k, v in DEFAULT_SETTINGS.items():
+    if k.startswith("fee_convert_") and k.endswith("_percent"):
+        pair_match = re.fullmatch(r"fee_convert_(TL|USDT|LTC|TRX|XMR)_(TL|USDT|LTC|TRX|XMR)_percent", k)
+        if pair_match:
+            source_asset, target_asset = pair_match.groups()
+            fallback = legacy_tl_convert_fee if "TL" in (source_asset, target_asset) else legacy_crypto_convert_fee
+            settings.setdefault(k, fallback)
+            continue
     settings.setdefault(k, legacy_convert_fee if k in ("fee_convert_tl_percent", "fee_convert_crypto_percent") else v)
 settings.pop("fee_convert_percent", None)
 if not str(settings.get("icon_TL", "")).strip():
@@ -670,12 +701,15 @@ def copy_button(text, value):
 
 
 def order_summary(title, rows, note=""):
-    lines = [title, "━━━━━━━━━━━━"]
-    for label, value in rows:
-        lines.append(f"{label}\n{value}")
+    clean_rows = [(str(label), str(value)) for label, value in rows if value not in (None, "")]
+    lines = [f"◆ {title}", "━━━━━━━━━━━━━━━━━━"]
+    for label, value in clean_rows:
+        lines.extend([label, f"  {value}", ""])
+    if lines and lines[-1] == "":
+        lines.pop()
     if note:
-        lines.extend(["━━━━━━━━━━━━", note])
-    return "\n\n".join(lines)
+        lines.extend(["━━━━━━━━━━━━━━━━━━", f"ℹ️ {note}"])
+    return "\n".join(lines)
 
 
 def coin_fmt_lang(value, asset, lang="tr"):
@@ -1035,10 +1069,19 @@ def fee_percent(kind, asset=None, uid=None, from_asset=None, to_asset=None):
         override = str(users.get(str(uid), {}).get("custom_fee_percent", "")).strip()
         if override:
             return D(override)
+
     if kind == "convert":
-        involves_tl = from_asset == "TL" or to_asset == "TL"
-        key = "fee_convert_tl_percent" if involves_tl else "fee_convert_crypto_percent"
-        return D(settings.get(key, "0"))
+        source = str(from_asset or "").upper()
+        target = str(to_asset or "").upper()
+        if source in ASSETS and target in ASSETS and source != target:
+            pair_key = f"fee_convert_{source}_{target}_percent"
+            if pair_key in settings:
+                return D(settings.get(pair_key, "0"))
+
+        involves_tl = source == "TL" or target == "TL"
+        legacy_key = "fee_convert_tl_percent" if involves_tl else "fee_convert_crypto_percent"
+        return D(settings.get(legacy_key, "0"))
+
     return D(settings.get(f"fee_{kind}_{asset}_percent", "0"))
 
 
@@ -1094,44 +1137,43 @@ def request_summary(rid, lang_uid=None):
         "withdraw": t(uid, "withdraw_kind"),
         "convert": t(uid, "convert_kind"),
     }.get(r.get("type"), t(uid, "transaction_kind"))
-    lines = [f"{kind} · #{rid}", localized_status(uid, r.get("status"))]
+
+    rows = [
+        ("İşlem No" if lang_of(uid) == "tr" else "Transaction ID", f"#{rid}"),
+        ("Durum" if lang_of(uid) == "tr" else "Status", localized_status(uid, r.get("status"))),
+    ]
 
     if r.get("type") == "deposit":
         asset = r.get("asset")
-        lines += [
-            f"{t(uid, 'amount')} · {ucoin(uid, r.get('amount'), asset)}",
-            f"{t(uid, 'net')} · {ucoin(uid, r.get('net_amount'), asset)}",
-        ]
+        rows.append((t(uid, "credited"), ucoin(uid, r.get("net_amount"), asset)))
         if asset == "TL":
-            lines += [
-                f"{t(uid, 'sender')} · {r.get('sender_name', '-')}",
-                f"{t(uid, 'reference')} · {r.get('tx_note', '-')}",
-            ]
+            rows.extend([
+                (t(uid, "sender"), r.get("sender_name", "-")),
+                (t(uid, "reference"), r.get("tx_note", "-")),
+            ])
         else:
-            lines.append(f"{t(uid, 'network')} · {r.get('network', '-')}")
+            rows.append((t(uid, "network"), r.get("network", "-")))
+
     elif r.get("type") == "withdraw":
         asset = r.get("asset")
-        lines += [
-            f"{t(uid, 'amount')} · {ucoin(uid, r.get('amount'), asset)}",
-            f"{t(uid, 'net')} · {ucoin(uid, r.get('net_amount'), asset)}",
-            f"{t(uid, 'fee')} · {ucoin(uid, r.get('fee'), asset)}",
-        ]
+        rows.append((t(uid, "recipient_gets"), ucoin(uid, r.get("net_amount"), asset)))
         if asset == "TL":
-            lines += [
-                f"{t(uid, 'bank')} · {r.get('bank_name', '-')}",
-                f"IBAN · {r.get('iban', '-')}",
-                f"{t(uid, 'recipient')} · {r.get('name', '-')}",
-            ]
+            rows.extend([
+                (t(uid, "bank"), r.get("bank_name", "-")),
+                ("IBAN", r.get("iban", "-")),
+                (t(uid, "recipient"), r.get("name", "-")),
+            ])
         else:
-            lines.append(f"{t(uid, 'address')} · {r.get('address', '-')}")
+            rows.append((t(uid, "wallet_address"), r.get("address", "-")))
+
     elif r.get("type") == "convert":
-        lines += [
-            f"{t(uid, 'given')} · {ucoin(uid, r.get('from_amount'), r.get('from_asset'))}",
-            f"{t(uid, 'received')} · {ucoin(uid, r.get('net_to_amount'), r.get('to_asset'))}",
-            f"{t(uid, 'fee')} · {ucoin(uid, r.get('fee'), r.get('to_asset'))}",
-        ]
-    lines.append(r.get("created_at", ""))
-    return "\n".join(lines)
+        rows.extend([
+            (t(uid, "sent"), ucoin(uid, r.get("from_amount"), r.get("from_asset"))),
+            (t(uid, "to_receive"), ucoin(uid, r.get("net_to_amount"), r.get("to_asset"))),
+        ])
+
+    rows.append(("Tarih" if lang_of(uid) == "tr" else "Date", r.get("created_at", "-")))
+    return order_summary(f"{kind} · #{rid}", rows)
 
 
 def receipt_text(rid, lang_uid=None):
@@ -1139,7 +1181,8 @@ def receipt_text(rid, lang_uid=None):
     uid = str(lang_uid if lang_uid is not None else (r or {}).get("user_id", ""))
     if not r:
         return t(uid, "not_found")
-    return t(uid, "completed") + "\n\n" + request_summary(rid, uid)
+    title = "✓ İşlem Tamamlandı" if lang_of(uid) == "tr" else "✓ Transaction Completed"
+    return f"{title}\n\n{request_summary(rid, uid)}"
 
 
 def user_allowed(chat_id):
@@ -1411,7 +1454,6 @@ def handle_text(chat_id, username, text):
                         (t(uid, "recipient"), owner),
                         ("IBAN", iban),
                         (t(uid, "to_deposit"), ucoin(uid, amount, "TL")),
-                        (t(uid, "fee"), ucoin(uid, fee, "TL")),
                         (t(uid, "credited"), ucoin(uid, net, "TL")),
                     ],
                     msg(uid, "iban_warning"),
@@ -1433,7 +1475,6 @@ def handle_text(chat_id, username, text):
                     [
                         (t(uid, "network"), network),
                         (t(uid, "to_deposit"), ucoin(uid, amount, asset)),
-                        (t(uid, "fee"), ucoin(uid, fee, asset)),
                         (t(uid, "credited"), ucoin(uid, net, asset)),
                         (t(uid, "deposit_address"), address),
                     ],
@@ -1476,7 +1517,7 @@ def handle_text(chat_id, username, text):
             state.update({"tl_value": str(tl_value), "gross_to": str(gross), "fee": str(fee), "net_amount": str(net)})
             state["preview"] = order_summary(
                 t(uid, "swap_summary"),
-                [(t(uid, "sent"), ucoin(uid, amount, asset)), (t(uid, "to_receive"), ucoin(uid, net, to_asset)), (t(uid, "fee"), ucoin(uid, fee, to_asset))],
+                [(t(uid, "sent"), ucoin(uid, amount, asset)), (t(uid, "to_receive"), ucoin(uid, net, to_asset))],
                 live_rate_note(uid),
             )
             require_pin(uid, state); return
@@ -1506,7 +1547,6 @@ def handle_text(chat_id, username, text):
         state["name"] = text
         state["preview"] = order_summary(t(uid, "withdraw_summary_tl"), [
             (t(uid, "amount"), ucoin(uid, state["amount"], state["asset"])),
-            (t(uid, "fee"), ucoin(uid, state["fee"], state["asset"])),
             (t(uid, "recipient_gets"), ucoin(uid, state["net_amount"], state["asset"])),
             ("IBAN", state["iban"]), (t(uid, "recipient"), state["name"]),
         ])
@@ -1515,7 +1555,6 @@ def handle_text(chat_id, username, text):
         state["address"] = text
         state["preview"] = order_summary(t(uid, "withdraw_summary", asset=state["asset"]), [
             (t(uid, "amount"), ucoin(uid, state["amount"], state["asset"])),
-            (t(uid, "fee"), ucoin(uid, state["fee"], state["asset"])),
             (t(uid, "to_send"), ucoin(uid, state["net_amount"], state["asset"])),
             (t(uid, "wallet_address"), state["address"]),
         ])
@@ -1611,7 +1650,7 @@ def handle_callback(chat_id, username, data, cb_id):
         tl_value = amount * source_rate; gross = tl_value / target_rate; fee = fee_amount(gross, fee_rate); net = gross - fee
         if net <= 0: send(chat_id, t(uid, "invalid_net")); return
         state.update({"amount": str(amount), "tl_value": str(tl_value), "gross_to": str(gross), "fee": str(fee), "net_amount": str(net)})
-        state["preview"] = order_summary(t(uid, "swap_summary"), [(t(uid, "sent"), ucoin(uid, amount, source)), (t(uid, "to_receive"), ucoin(uid, net, target)), (t(uid, "fee"), ucoin(uid, fee, target))], t(uid, "all_balance_note") + " " + live_rate_note(uid))
+        state["preview"] = order_summary(t(uid, "swap_summary"), [(t(uid, "sent"), ucoin(uid, amount, source)), (t(uid, "to_receive"), ucoin(uid, net, target))], t(uid, "all_balance_note") + " " + live_rate_note(uid))
         require_pin(uid, state); return
     if data == "second_confirm":
         state = user_state.get(uid, {})
@@ -1639,7 +1678,7 @@ def handle_callback(chat_id, username, data, cb_id):
             try: fav = users[uid]["favorites"][int(choice)]
             except (ValueError, IndexError): send(chat_id, t(uid, "session_missing")); return
             state["address"] = fav["address"]
-            state["preview"] = order_summary(t(uid, "withdraw_summary", asset=state["asset"]), [(t(uid, "amount"), ucoin(uid, state["amount"], state["asset"])), (t(uid, "fee"), ucoin(uid, state["fee"], state["asset"])), (t(uid, "to_send"), ucoin(uid, state["net_amount"], state["asset"])), (t(uid, "wallet_address"), state["address"])])
+            state["preview"] = order_summary(t(uid, "withdraw_summary", asset=state["asset"]), [(t(uid, "amount"), ucoin(uid, state["amount"], state["asset"])), (t(uid, "to_send"), ucoin(uid, state["net_amount"], state["asset"])), (t(uid, "wallet_address"), state["address"])])
             require_pin(uid, state)
         return
     if data == "security:set_pin":
@@ -1971,10 +2010,13 @@ def setting_label(key):
     if match:
         operation = "yükleme" if match.group(1) == "deposit" else "çekim"
         return f"{match.group(2)} {operation} komisyonu (%)"
+    pair_match = re.fullmatch(r"fee_convert_(TL|USDT|LTC|TRX|XMR)_(TL|USDT|LTC|TRX|XMR)_percent", key)
+    if pair_match:
+        return f"{pair_match.group(1)} → {pair_match.group(2)} dönüşüm komisyonu (%)"
     if key == "fee_convert_tl_percent":
-        return "TL içeren dönüşüm komisyonu (%)"
+        return "Eski TL içeren dönüşüm oranı (yedek)"
     if key == "fee_convert_crypto_percent":
-        return "Kripto → kripto dönüşüm komisyonu (%)"
+        return "Eski kripto dönüşüm oranı (yedek)"
     match = re.fullmatch(r"min_(deposit|withdraw|convert)_(TL|USDT|LTC|TRX|XMR)", key)
     if match:
         operation = {"deposit": "yükleme", "withdraw": "çekim", "convert": "dönüştürme"}[match.group(1)]
@@ -1998,6 +2040,8 @@ def setting_field(key):
             f"<option value='on' {'selected' if value == 'on' else ''}>Açık</option>"
             "</select></div>"
         )
+    if key.startswith("fee_"):
+        return f"<div class='field'><label>{label}</label><input type='number' min='0' max='99.9999' step='0.0001' name='{h(key)}' value='{h(value)}'><small>Yüzde oranı; 0 komisyonsuz işlem anlamına gelir.</small></div>"
     return f"<div class='field'><label>{label}</label><input name='{h(key)}' value='{h(value)}'></div>"
 
 
@@ -2291,13 +2335,28 @@ def admin():
         if not has_panel_permission(required_permission):
             abort(403)
         if action == "settings":
+            validation_error = ""
+            pending_settings = {}
             for key in EDITABLE_SETTING_KEYS:
-                settings[key] = request.form.get(key, settings.get(key, ""))
-            for key in DEFAULT_MESSAGES:
-                messages[key] = request.form.get(key, messages.get(key, ""))
-            save_json(FILES["settings"], settings); save_json(FILES["messages"], messages)
-            add_admin_log("settings", "Ayarlar güncellendi")
-            set_admin_notice("Ayarlar kaydedildi.")
+                raw_value = request.form.get(key, settings.get(key, ""))
+                if key.startswith("fee_"):
+                    percentage = D(raw_value, "-1")
+                    if percentage < 0 or percentage >= 100:
+                        validation_error = f"{setting_label(key)} için 0 ile 100 arasında bir değer girin."
+                        break
+                    raw_value = format(percentage, "f")
+                pending_settings[key] = raw_value
+
+            if validation_error:
+                set_admin_notice(validation_error, "error")
+            else:
+                settings.update(pending_settings)
+                for key in DEFAULT_MESSAGES:
+                    messages[key] = request.form.get(key, messages.get(key, ""))
+                save_json(FILES["settings"], settings)
+                save_json(FILES["messages"], messages)
+                add_admin_log("settings", "Ayrıntılı komisyon ve sistem ayarları güncellendi")
+                set_admin_notice("Ayarlar güvenli şekilde kaydedildi.")
         elif action in ("process_request", "approve_request", "reject_request"):
             rid = request.form.get("rid", ""); r = requests_db.get(rid)
             if r:
@@ -2472,7 +2531,7 @@ def admin():
 
     settings_groups = [
         ("rates", "Kur Yönetimi", [k for k in EDITABLE_SETTING_KEYS if k.startswith("rate_")]),
-        ("fees", "Komisyonlar", [k for k in EDITABLE_SETTING_KEYS if k.startswith("fee_")]),
+        ("fees", "Komisyonlar", [k for k in EDITABLE_SETTING_KEYS if k.startswith("fee_") and k not in ("fee_convert_tl_percent", "fee_convert_crypto_percent")]),
         ("limits", "Limitler", [k for k in EDITABLE_SETTING_KEYS if k.startswith("min_") or k.startswith("daily_")]),
         ("wallets", "Cüzdan ve Ağ", [k for k in EDITABLE_SETTING_KEYS if k.startswith("wallet_") or k.startswith("network_") or k in ("bank_name", "iban", "iban_owner")]),
         ("system", "Sistem ve Duyuru", [k for k in EDITABLE_SETTING_KEYS if k.startswith("maintenance_") or k.startswith("announcement_")]),
