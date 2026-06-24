@@ -47,8 +47,8 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "")
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict", SESSION_COOKIE_SECURE=os.getenv("COOKIE_SECURE", "1") == "1", PERMANENT_SESSION_LIFETIME=1800)
 
-ASSETS = ["TL", "USDT", "LTC", "TRX"]
-CRYPTO_ASSETS = ["USDT", "LTC", "TRX"]
+ASSETS = ["TL", "USDT", "LTC", "TRX", "XMR"]
+CRYPTO_ASSETS = ["USDT", "LTC", "TRX", "XMR"]
 data_lock = threading.RLock()
 user_state = {}
 
@@ -380,7 +380,7 @@ DEFAULT_SETTINGS = {
     "iban_owner": os.getenv("DEFAULT_IBAN_OWNER", ""),
     "wallet_USDT": os.getenv("DEFAULT_WALLET_USDT", ""),
     "wallet_TRX": os.getenv("DEFAULT_WALLET_TRX", ""),
-    "wallet_XMR": os.getenv("DEFAULT_WALLET_XMR", ""),
+    "wallet_XMR": os.getenv("DEFAULT_WALLET_XMR", ""), os.getenv("DEFAULT_WALLET_TRX", ""),
     "wallet_LTC": os.getenv("DEFAULT_WALLET_LTC", ""),
     "rate_USDT_TL": "46.40",
     "rate_LTC_TL": "2065.00",
@@ -439,8 +439,8 @@ DEFAULT_SETTINGS = {
     "icon_USDT": "5895571353746021767",
     "icon_LTC": "5895441495409828662",
     "icon_TRX": "5895440778150288520",
+    "icon_XMR": "5900147027219587568", "5895440778150288520",
     "icon_TL": "5897961936837943618",
-    "icon_XMR": "",
 }
 
 init_database()
@@ -495,7 +495,7 @@ def _render_asset_icons(value):
     entities = []
     cursor = 0
     offset = 0
-    pattern = re.compile(r"\{\{(TL|USDT|LTC|TRX)\}\}")
+    pattern = re.compile(r"\{\{(TL|USDT|LTC|TRX|XMR)\}\}")
 
     for match in pattern.finditer(source):
         before = source[cursor:match.start()]
@@ -528,7 +528,7 @@ def _render_asset_icons(value):
 
 def _plain_asset_icons(value):
     return re.sub(
-        r"\{\{(TL|USDT|LTC|TRX)\}\}",
+        r"\{\{(TL|USDT|LTC|TRX|XMR)\}\}",
         lambda m: "₺" if m.group(1) == "TL" else m.group(1),
         str(value),
     )
@@ -1936,7 +1936,8 @@ def setting_label(key):
         "iban": "IBAN",
         "iban_owner": "IBAN hesap sahibi",
         "wallet_USDT": "USDT yatırma adresi",
-        "wallet_TRX": "TRX yatırma adresi",
+        "wallet_TRX": os.getenv("DEFAULT_WALLET_TRX", ""),
+    "wallet_XMR": os.getenv("DEFAULT_WALLET_XMR", ""), "TRX yatırma adresi",
         "wallet_LTC": "LTC yatırma adresi",
         "maintenance_mode": "Bakım durumu",
         "maintenance_message": "Bakım mesajı",
@@ -2573,31 +2574,3 @@ if __name__ == "__main__":
     threading.Thread(target=bot_loop, daemon=True, name="telegram-bot").start()
     threading.Thread(target=rate_update_loop, daemon=True, name="live-rates").start()
     app.run(host="0.0.0.0", port=PORT)
-
-
-@app.route("/panel/custom-id", methods=["GET","POST"])
-def custom_id_panel():
-    if request.method == "POST":
-        for k in ["icon_TL","icon_USDT","icon_TRX","icon_LTC","icon_XMR"]:
-            if k in request.form:
-                settings[k] = request.form.get(k,"")
-        save_json(FILES["settings"], settings)
-        return redirect("/panel/custom-id")
-
-    return '''
-    <h3>Custom Emoji ID Panel</h3>
-    <form method="post">
-        TL: <input name="icon_TL" value="{TL}"><br>
-        USDT: <input name="icon_USDT" value="{USDT}"><br>
-        TRX: <input name="icon_TRX" value="{TRX}"><br>
-        LTC: <input name="icon_LTC" value="{LTC}"><br>
-        XMR: <input name="icon_XMR" value="{XMR}"><br>
-        <button type="submit">Save</button>
-    </form>
-    '''.format(
-        TL=settings.get("icon_TL",""),
-        USDT=settings.get("icon_USDT",""),
-        TRX=settings.get("icon_TRX",""),
-        LTC=settings.get("icon_LTC",""),
-        XMR=settings.get("icon_XMR","")
-    )
