@@ -485,6 +485,9 @@ DEFAULT_SETTINGS = {
     "icon_LTC": "5895441495409828662",
     "icon_TRX": "5895440778150288520",
     "icon_XMR": "5900147027219587568",
+    "icon_ETH": "5900047564366945678",
+    "icon_BTC": "5899763383560838498",
+    "icon_TON": "5900174643859299618",
     "icon_TL": "5897961936837943618",
 }
 
@@ -577,6 +580,9 @@ if not str(settings.get("icon_TL", "")).strip():
     settings["icon_TL"] = DEFAULT_SETTINGS["icon_TL"]
 if not str(settings.get("icon_XMR", "")).strip():
     settings["icon_XMR"] = DEFAULT_SETTINGS["icon_XMR"]
+for _asset in ("ETH", "BTC", "TON"):
+    if not str(settings.get(f"icon_{_asset}", "")).strip():
+        settings[f"icon_{_asset}"] = DEFAULT_SETTINGS[f"icon_{_asset}"]
 if not str(settings.get("wallet_XMR", "")).strip():
     settings["wallet_XMR"] = DEFAULT_SETTINGS["wallet_XMR"]
 for k, v in DEFAULT_MESSAGES.items():
