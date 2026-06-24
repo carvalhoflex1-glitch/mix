@@ -5,6 +5,7 @@ import time
 import json
 import random
 import hashlib
+import hmac
 import threading
 import secrets
 import shutil
@@ -42,13 +43,26 @@ LOGIN_MAX_ATTEMPTS = 5
 RATE_UPDATE_SECONDS = max(60, int(os.getenv("RATE_UPDATE_SECONDS", "900")))
 RATE_API_BASES = [base.strip().rstrip("/") for base in os.getenv("RATE_API_BASES", "https://api.binance.com,https://data-api.binance.vision").split(",") if base.strip()]
 COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "").strip()
+PLISIO_SECRET_KEY = os.getenv("PLISIO_SECRET_KEY", "").strip()
+PLISIO_API_BASE = "https://plisio.net/api/v1"
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "")
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict", SESSION_COOKIE_SECURE=os.getenv("COOKIE_SECURE", "1") == "1", PERMANENT_SESSION_LIFETIME=1800)
 
-ASSETS = ["TL", "USDT", "LTC", "TRX", "XMR"]
-CRYPTO_ASSETS = ["USDT", "LTC", "TRX", "XMR"]
+ASSETS = ["TL", "USDT", "LTC", "TRX", "XMR", "BTC", "ETH", "TON"]
+CRYPTO_ASSETS = ["USDT", "LTC", "TRX", "XMR", "BTC", "ETH", "TON"]
+PLISIO_CURRENCY_IDS = {
+    "USDT": "USDT_TRX", "LTC": "LTC", "TRX": "TRX", "XMR": "XMR",
+    "BTC": "BTC", "ETH": "ETH", "TON": "TON",
+}
+PLISIO_ASSET_BY_ID = {value: key for key, value in PLISIO_CURRENCY_IDS.items()}
+ASSET_PATTERN = "|".join(map(re.escape, ASSETS))
+ASSET_PRECISIONS = {
+    "TL": Decimal("0.01"), "USDT": Decimal("0.01"), "TRX": Decimal("0.01"),
+    "LTC": Decimal("0.000001"), "XMR": Decimal("0.000001"), "TON": Decimal("0.000001"),
+    "BTC": Decimal("0.00000001"), "ETH": Decimal("0.00000001"),
+}
 data_lock = threading.RLock()
 user_state = {}
 
@@ -150,7 +164,7 @@ def save_json(path, data):
 
 
 def validate_runtime_config():
-    required = {"BOT_TOKEN": TOKEN, "ADMIN_CHAT_ID": ADMIN_CHAT_ID, "PANEL_USERNAME": PANEL_USERNAME, "PANEL_PASSWORD": PANEL_PASSWORD, "FLASK_SECRET_KEY": app.secret_key}
+    required = {"BOT_TOKEN": TOKEN, "ADMIN_CHAT_ID": ADMIN_CHAT_ID, "PANEL_USERNAME": PANEL_USERNAME, "PANEL_PASSWORD": PANEL_PASSWORD, "FLASK_SECRET_KEY": app.secret_key, "PLISIO_SECRET_KEY": PLISIO_SECRET_KEY}
     missing = [k for k, v in required.items() if not str(v).strip()]
     if missing: raise RuntimeError("Eksik zorunlu ortam değişkenleri: " + ", ".join(missing))
     if len(app.secret_key) < 32: raise RuntimeError("FLASK_SECRET_KEY en az 32 karakter olmalıdır")
@@ -166,7 +180,7 @@ def csrf_token():
 
 @app.before_request
 def enforce_csrf():
-    if request.method == "POST":
+    if request.method == "POST" and request.path != "/plisio/status":
         supplied = request.form.get("csrf_token", "") or request.headers.get("X-CSRF-Token", "")
         if not supplied or not secrets.compare_digest(supplied, session.get("csrf_token", "")):
             abort(403)
@@ -182,7 +196,7 @@ def D(value, fallback="0"):
 
 def fmt(value, asset=""):
     value = D(value)
-    precision = Decimal("0.000001") if asset in ("LTC", "XMR") else Decimal("0.01")
+    precision = ASSET_PRECISIONS.get(asset, Decimal("0.01"))
     out = value.quantize(precision, rounding=ROUND_DOWN)
     return f"{out} {asset}".strip()
 
@@ -190,10 +204,11 @@ def fmt(value, asset=""):
 def coin_fmt(value, asset):
     asset = str(asset or "")
     value = D(value)
-    precision = Decimal("0.000001") if asset in ("LTC", "XMR") else Decimal("0.01")
+    precision = ASSET_PRECISIONS.get(asset, Decimal("0.01"))
     out = value.quantize(precision, rounding=ROUND_DOWN)
 
-    formatted = f"{out:,.6f}" if asset in ("LTC", "XMR") else f"{out:,.2f}"
+    decimals = max(0, -precision.as_tuple().exponent)
+    formatted = f"{out:,.{decimals}f}"
     formatted = formatted.replace(",", "X").replace(".", ",").replace("X", ".")
 
     return f"{formatted} {{{{{asset}}}}}"
@@ -473,6 +488,31 @@ DEFAULT_SETTINGS = {
     "icon_TL": "5897961936837943618",
 }
 
+_NEW_ASSET_DEFAULTS = {
+    "BTC": {"rate": "0", "deposit_min": "0.00001", "withdraw_min": "0.0001", "convert_min": "0.00001", "daily": "1", "network": "Bitcoin"},
+    "ETH": {"rate": "0", "deposit_min": "0.0001", "withdraw_min": "0.001", "convert_min": "0.0001", "daily": "10", "network": "Ethereum"},
+    "TON": {"rate": "0", "deposit_min": "0.1", "withdraw_min": "1", "convert_min": "0.1", "daily": "10000", "network": "TON"},
+}
+for _asset, _defaults in _NEW_ASSET_DEFAULTS.items():
+    DEFAULT_SETTINGS.setdefault(f"wallet_{_asset}", os.getenv(f"DEFAULT_WALLET_{_asset}", ""))
+    DEFAULT_SETTINGS.setdefault(f"rate_{_asset}_TL", _defaults["rate"])
+    DEFAULT_SETTINGS.setdefault(f"fee_deposit_{_asset}_percent", "1")
+    DEFAULT_SETTINGS.setdefault(f"fee_withdraw_{_asset}_percent", "2")
+    DEFAULT_SETTINGS.setdefault(f"min_deposit_{_asset}", _defaults["deposit_min"])
+    DEFAULT_SETTINGS.setdefault(f"min_withdraw_{_asset}", _defaults["withdraw_min"])
+    DEFAULT_SETTINGS.setdefault(f"min_convert_{_asset}", _defaults["convert_min"])
+    DEFAULT_SETTINGS.setdefault(f"daily_withdraw_limit_{_asset}", _defaults["daily"])
+    DEFAULT_SETTINGS.setdefault(f"network_{_asset}", _defaults["network"])
+    DEFAULT_SETTINGS.setdefault(f"icon_{_asset}", "")
+
+for _source in ASSETS:
+    for _target in ASSETS:
+        if _source != _target:
+            DEFAULT_SETTINGS.setdefault(
+                f"fee_convert_{_source}_{_target}_percent",
+                "2" if "TL" in (_source, _target) else "4",
+            )
+
 init_database()
 
 users = load_json(FILES["users"], {})
@@ -488,7 +528,7 @@ legacy_tl_convert_fee = str(settings.get("fee_convert_tl_percent", legacy_conver
 legacy_crypto_convert_fee = str(settings.get("fee_convert_crypto_percent", legacy_convert_fee))
 for k, v in DEFAULT_SETTINGS.items():
     if k.startswith("fee_convert_") and k.endswith("_percent"):
-        pair_match = re.fullmatch(r"fee_convert_(TL|USDT|LTC|TRX|XMR)_(TL|USDT|LTC|TRX|XMR)_percent", k)
+        pair_match = re.fullmatch(rf"fee_convert_({ASSET_PATTERN})_({ASSET_PATTERN})_percent", k)
         if pair_match:
             source_asset, target_asset = pair_match.groups()
             fallback = legacy_tl_convert_fee if "TL" in (source_asset, target_asset) else legacy_crypto_convert_fee
@@ -575,7 +615,7 @@ def _render_asset_icons(value):
     entities = []
     cursor = 0
     offset = 0
-    pattern = re.compile(r"\{\{(TL|USDT|LTC|TRX|XMR)\}\}")
+    pattern = re.compile(rf"\{{\{{({ASSET_PATTERN})\}}\}}")
 
     for match in pattern.finditer(source):
         before = source[cursor:match.start()]
@@ -608,7 +648,7 @@ def _render_asset_icons(value):
 
 def _plain_asset_icons(value):
     return re.sub(
-        r"\{\{(TL|USDT|LTC|TRX|XMR)\}\}",
+        rf"\{{\{{({ASSET_PATTERN})\}}\}}",
         lambda m: "₺" if m.group(1) == "TL" else m.group(1),
         str(value),
     )
@@ -752,9 +792,10 @@ def order_summary(title, rows, note=""):
 def coin_fmt_lang(value, asset, lang="tr"):
     asset = str(asset or "")
     value = D(value)
-    precision = Decimal("0.000001") if asset in ("LTC", "XMR") else Decimal("0.01")
+    precision = ASSET_PRECISIONS.get(asset, Decimal("0.01"))
     out = value.quantize(precision, rounding=ROUND_DOWN)
-    raw = f"{out:,.6f}" if asset in ("LTC", "XMR") else f"{out:,.2f}"
+    decimals = max(0, -precision.as_tuple().exponent)
+    raw = f"{out:,.{decimals}f}"
     if lang == "tr":
         raw = raw.replace(",", "X").replace(".", ",").replace("X", ".")
     return f"{raw} {{{{{asset}}}}}"
@@ -1019,7 +1060,10 @@ def _fetch_binance_rates():
         except Exception:
             return _ticker_price(f"{asset}USDT") * usdt_try
 
-    rates = {"USDT": usdt_try, "LTC": try_rate("LTC"), "TRX": try_rate("TRX")}
+    rates = {
+        "USDT": usdt_try, "LTC": try_rate("LTC"), "TRX": try_rate("TRX"),
+        "BTC": try_rate("BTC"), "ETH": try_rate("ETH"), "TON": try_rate("TON"),
+    }
     if any(value <= 0 for value in rates.values()):
         raise RuntimeError("One or more Binance rates are invalid")
     return rates
@@ -1032,7 +1076,7 @@ def _fetch_coingecko_rates():
     response = requests.get(
         "https://api.coingecko.com/api/v3/simple/price",
         params={
-            "ids": "tether,litecoin,tron,monero",
+            "ids": "tether,litecoin,tron,monero,bitcoin,ethereum,the-open-network",
             "vs_currencies": "try",
             "include_last_updated_at": "true",
         },
@@ -1046,6 +1090,9 @@ def _fetch_coingecko_rates():
         "LTC": D(payload.get("litecoin", {}).get("try", "0")),
         "TRX": D(payload.get("tron", {}).get("try", "0")),
         "XMR": D(payload.get("monero", {}).get("try", "0")),
+        "BTC": D(payload.get("bitcoin", {}).get("try", "0")),
+        "ETH": D(payload.get("ethereum", {}).get("try", "0")),
+        "TON": D(payload.get("the-open-network", {}).get("try", "0")),
     }
     if any(value <= 0 for value in rates.values()):
         raise RuntimeError("One or more CoinGecko rates are invalid")
@@ -1338,6 +1385,118 @@ def finalize_withdraw(uid, state):
     send(uid, t(uid, "request_created_title") + "\n\n" + request_summary(rid, uid), reply_keyboard(uid))
     if ADMIN_CHAT_ID:
         send(ADMIN_CHAT_ID, "Yeni çekim talebi\n\n" + request_summary(rid, ""))
+
+
+
+def _plisio_error_message(payload):
+    data = payload.get("data", {}) if isinstance(payload, dict) else {}
+    return str(data.get("message") or data.get("name") or "Plisio API hatası") if isinstance(data, dict) else "Plisio API hatası"
+
+
+def get_plisio_deposit_address(uid, asset):
+    uid, asset = str(uid), str(asset).upper()
+    if asset not in PLISIO_CURRENCY_IDS:
+        raise ValueError("Bu varlık otomatik yatırıma uygun değil")
+    if not PLISIO_SECRET_KEY:
+        raise RuntimeError("PLISIO_SECRET_KEY tanımlı değil")
+
+    addresses = users[uid].setdefault("deposit_addresses", {})
+    if str(addresses.get(asset, "")).strip():
+        return str(addresses[asset]).strip()
+
+    response = requests.get(
+        f"{PLISIO_API_BASE}/shops/deposit/new",
+        params={"api_key": PLISIO_SECRET_KEY, "psys_cid": PLISIO_CURRENCY_IDS[asset], "uid": uid},
+        timeout=20,
+        headers={"User-Agent": "Nerlo-Wallet/1.0"},
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("status") != "success":
+        raise RuntimeError(_plisio_error_message(payload))
+
+    data = payload.get("data", {})
+    if isinstance(data, list):
+        data = next((x for x in data if x.get("psys_cid") == PLISIO_CURRENCY_IDS[asset]), {})
+    address = str(data.get("hash", "")).strip()
+    if not address:
+        raise RuntimeError("Plisio yatırma adresi döndürmedi")
+    addresses[asset] = address
+    save_json(FILES["users"], users)
+    return address
+
+
+def _plisio_callback_payload():
+    return request.get_json(silent=True) or {} if request.is_json else request.form.to_dict(flat=True)
+
+
+def _verify_plisio_callback(payload):
+    if not isinstance(payload, dict) or not PLISIO_SECRET_KEY:
+        return False
+    supplied = str(payload.get("verify_hash", "")).strip()
+    if not supplied:
+        return False
+    signed = dict(payload)
+    signed.pop("verify_hash", None)
+    canonical = json.dumps(signed, ensure_ascii=False, separators=(",", ":"))
+    expected = hmac.new(
+        PLISIO_SECRET_KEY.encode("utf-8"),
+        canonical.encode("utf-8"),
+        hashlib.sha1,
+    ).hexdigest()
+    return secrets.compare_digest(expected, supplied)
+
+
+@app.route("/plisio/status", methods=["POST"])
+def plisio_status():
+    payload = _plisio_callback_payload()
+    if not _verify_plisio_callback(payload):
+        return {"status": "error", "message": "invalid signature"}, 422
+    if str(payload.get("ipn_type", "")).lower() != "pay_in":
+        return {"status": "ignored"}, 200
+    if str(payload.get("status", "")).lower() != "completed":
+        return {"status": "pending"}, 200
+
+    uid = str(payload.get("deposit_uid", "")).strip()
+    currency_id = str(payload.get("psys_cid") or payload.get("currency") or "").upper()
+    asset = PLISIO_ASSET_BY_ID.get(currency_id, "")
+    amount = D(payload.get("amount", "0"))
+    txn_id = str(payload.get("txn_id", "")).strip()
+
+    if not uid or uid not in users or asset not in CRYPTO_ASSETS or amount <= 0 or not txn_id:
+        return {"status": "error", "message": "invalid callback data"}, 400
+
+    idem = f"plisio:{txn_id}:{asset}"
+    with data_lock:
+        if any(r.get("idempotency_key") == idem for r in requests_db.values()):
+            return {"status": "ok", "duplicate": True}, 200
+
+        app_fee = fee_amount(amount, fee_percent("deposit", asset, uid))
+        net = amount - app_fee
+        if net <= 0:
+            return {"status": "error", "message": "invalid net amount"}, 400
+
+        rid = new_request(uid, "deposit", {
+            "asset": asset, "amount": str(amount), "fee": str(app_fee), "net_amount": str(net),
+            "network": settings.get(f"network_{asset}", asset),
+            "idempotency_key": idem, "plisio_txn_id": txn_id,
+            "plisio_wallet_hash": str(payload.get("wallet_hash", "")),
+            "plisio_confirmations": str(payload.get("confirmations", "")),
+            "automatic": True,
+        })
+        try:
+            change_balance(uid, asset, net, "deposit_approved", rid, f"Plisio otomatik yatırım · {txn_id}")
+            requests_db[rid].update({"status": "completed", "completed_at": now(), "updated_at": now()})
+            save_json(FILES["requests"], requests_db)
+        except Exception:
+            requests_db.pop(rid, None)
+            save_json(FILES["requests"], requests_db)
+            raise
+
+    send(uid, receipt_text(rid, uid), reply_keyboard(uid))
+    if ADMIN_CHAT_ID:
+        send(ADMIN_CHAT_ID, "Otomatik kripto yatırımı tamamlandı\n\n" + request_summary(rid, ""))
+    return {"status": "ok"}, 200
 
 
 def create_deposit_notice(uid, state, extra=None):
@@ -1634,10 +1793,40 @@ def handle_callback(chat_id, username, data, cb_id):
         return
     if data.startswith("deposit_asset:"):
         asset = data.split(":", 1)[1]
-        current = user_state.get(uid, {})
-        idem = current.get("idempotency_key", secrets.token_urlsafe(24))
-        user_state[uid] = {"flow": "deposit", "step": "amount", "asset": asset, "idempotency_key": idem}
-        send(chat_id, f"{asset}: {msg(uid, 'amount_question')}\n{t(uid, 'minimum')}: {ucoin(uid, min_amount('deposit', asset), asset)}"); return
+        if asset == "TL":
+            current = user_state.get(uid, {})
+            idem = current.get("idempotency_key", secrets.token_urlsafe(24))
+            user_state[uid] = {"flow": "deposit", "step": "amount", "asset": asset, "idempotency_key": idem}
+            send(chat_id, f"{asset}: {msg(uid, 'amount_question')}\n{t(uid, 'minimum')}: {ucoin(uid, min_amount('deposit', asset), asset)}")
+            return
+        try:
+            address = get_plisio_deposit_address(uid, asset)
+            network = settings.get(f"network_{asset}", asset)
+            user_state[uid] = {
+                "flow": "deposit_auto", "step": "waiting_payment", "asset": asset,
+                "network": network, "qr_content": address,
+                "qr_caption": f"{asset} {t(uid, 'qr_caption')} · {network}",
+            }
+            note = ("Gönderdiğiniz gerçek tutar, ağ onayından sonra otomatik olarak bakiyenize eklenir."
+                    if lang_of(uid) == "tr" else
+                    "The actual amount sent will be credited automatically after network confirmation.")
+            card = order_summary(
+                t(uid, "deposit_summary", asset=asset),
+                [(t(uid, "network"), network), (t(uid, "deposit_address"), address)],
+                note,
+            )
+            buttons = []
+            copy = copy_button(t(uid, "deposit_address"), address)
+            if copy:
+                buttons.append([copy])
+            buttons.extend([[inline_button(t(uid, "show_qr"), "show_deposit_qr")],
+                            [inline_button(t(uid, "cancel"), "cancel")]])
+            send(chat_id, card, {"inline_keyboard": buttons})
+        except Exception as exc:
+            print("PLISIO ADDRESS ERROR:", exc)
+            user_state.pop(uid, None)
+            send(chat_id, t(uid, "operation_failed"), reply_keyboard(uid))
+        return
     if data == "deposit_sent":
         state = user_state.get(uid, {})
         if state.get("flow") != "deposit" or state.get("step") != "waiting_sent" or not state.get("amount"):
@@ -1855,140 +2044,7 @@ def security_headers(response):
     return response
 
 @app.route("/")
-def home():
-    return """<!doctype html>
-<html lang="tr">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Nerlo Wallet ile kripto bakiye işlemlerinizi Telegram üzerinden kolayca yönetin.">
-  <meta name="color-scheme" content="dark">
-  <title>Nerlo Wallet</title>
-  <style>
-    :root {
-      --bg: #070a10;
-      --panel: #101722;
-      --line: #243042;
-      --text: #f4f7fb;
-      --muted: #9aa7b7;
-      --accent: #68e0d2;
-      --accent2: #7cc7ff;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      padding: 24px;
-      background:
-        radial-gradient(circle at 15% 10%, rgba(104,224,210,.12), transparent 32%),
-        radial-gradient(circle at 90% 90%, rgba(124,199,255,.10), transparent 30%),
-        var(--bg);
-      color: var(--text);
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    .page { width: min(920px, 100%); }
-    .hero {
-      padding: clamp(28px, 6vw, 64px);
-      border: 1px solid var(--line);
-      border-radius: 28px;
-      background: rgba(16, 23, 34, .92);
-      box-shadow: 0 30px 100px rgba(0,0,0,.36);
-    }
-    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 34px; }
-    .mark {
-      width: 46px;
-      height: 46px;
-      display: grid;
-      place-items: center;
-      border-radius: 15px;
-      background: linear-gradient(135deg, var(--accent), var(--accent2));
-      color: #051116;
-      font-size: 21px;
-      font-weight: 950;
-    }
-    .brand strong { display: block; font-size: 18px; }
-    .brand span { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; }
-    h1 {
-      max-width: 700px;
-      margin: 0;
-      font-size: clamp(34px, 7vw, 66px);
-      line-height: 1.02;
-      letter-spacing: -.055em;
-    }
-    .lead {
-      max-width: 680px;
-      margin: 22px 0 0;
-      color: var(--muted);
-      font-size: clamp(16px, 2.2vw, 19px);
-      line-height: 1.65;
-    }
-    .actions { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 30px; }
-    .button {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 48px;
-      padding: 0 20px;
-      border-radius: 13px;
-      text-decoration: none;
-      font-weight: 850;
-      background: linear-gradient(135deg, var(--accent), var(--accent2));
-      color: #061116;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
-      margin-top: 34px;
-    }
-    .card {
-      padding: 18px;
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      background: #0c121b;
-    }
-    .card b { display: block; margin-bottom: 7px; font-size: 14px; }
-    .card p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
-    .note {
-      margin-top: 18px;
-      padding-top: 18px;
-      border-top: 1px solid var(--line);
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.55;
-    }
-    footer { padding: 18px 4px 0; color: #6f7e90; font-size: 11px; text-align: center; }
-    @media (max-width: 720px) {
-      .grid { grid-template-columns: 1fr; }
-      .button { width: 100%; }
-    }
-  </style>
-</head>
-<body>
-  <main class="page">
-    <section class="hero">
-      <div class="brand">
-        <div class="mark">N</div>
-        <div><strong>Nerlo Wallet</strong><span>Telegram tabanlı dijital cüzdan</span></div>
-      </div>
-      <h1>Kripto bakiyenizi sade ve güvenli biçimde yönetin.</h1>
-      <p class="lead">USDT (TRC20), TRX, LTC ve XMR işlemleri için Telegram botumuz üzerinden bakiye yükleme, çekim talebi, dönüşüm ve işlem takibi yapabilirsiniz.</p>
-      <div class="actions">
-        <a class="button" href="https://t.me/netrowalletbot" target="_blank" rel="noopener noreferrer">Telegram Botunu Aç</a>
-      </div>
-      <div class="grid">
-        <div class="card"><b>Kripto işlemleri</b><p>Desteklenen varlıklar için yatırım ve çekim taleplerinizi bot üzerinden yönetin.</p></div>
-        <div class="card"><b>Bakiye takibi</b><p>Kullanılabilir ve bekleyen bakiyelerinizi tek ekranda görüntüleyin.</p></div>
-        <div class="card"><b>İşlem güvenliği</b><p>PIN doğrulaması, işlem kaydı ve yönetici incelemesiyle kontrollü işlem akışı.</p></div>
-      </div>
-      <div class="note">Türk lirası yatırma ve çekme işlemleri manuel incelemeye tabidir. Kripto varlık işlemlerinde yalnızca belirtilen ağı kullanınız.</div>
-    </section>
-    <footer>© 2026 Nerlo Wallet</footer>
-  </main>
-</body>
-</html>"""
+def home(): return "Nerlo Wallet aktif ✅"
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -2116,6 +2172,9 @@ ICON_LABELS = {
     "LTC": "LTC",
     "TRX": "TRX",
     "XMR": "XMR",
+    "BTC": "BTC",
+    "ETH": "ETH",
+    "TON": "TON",
     "TL": "TL",
 }
 
@@ -2162,6 +2221,9 @@ def setting_label(key):
         "wallet_TRX": "TRX yatırma adresi",
         "wallet_XMR": "XMR yatırma adresi",
         "wallet_LTC": "LTC yatırma adresi",
+        "wallet_BTC": "BTC çekim cüzdanı",
+        "wallet_ETH": "ETH çekim cüzdanı",
+        "wallet_TON": "TON çekim cüzdanı",
         "maintenance_mode": "Bakım durumu",
         "maintenance_message": "Bakım mesajı",
         "announcement_active": "Duyuru durumu",
@@ -2170,28 +2232,31 @@ def setting_label(key):
         "network_TRX": "TRX ağı",
         "network_XMR": "XMR ağı",
         "network_LTC": "LTC ağı",
+        "network_BTC": "BTC ağı",
+        "network_ETH": "ETH ağı",
+        "network_TON": "TON ağı",
     }
     if key in direct:
         return direct[key]
-    match = re.fullmatch(r"rate_(USDT|LTC|TRX|XMR)_TL", key)
+    match = re.fullmatch(rf"rate_({'|'.join(CRYPTO_ASSETS)})_TL", key)
     if match:
         return f"{match.group(1)} / TL kuru"
-    match = re.fullmatch(r"fee_(deposit|withdraw)_(TL|USDT|LTC|TRX|XMR)_percent", key)
+    match = re.fullmatch(rf"fee_(deposit|withdraw)_({ASSET_PATTERN})_percent", key)
     if match:
         operation = "yükleme" if match.group(1) == "deposit" else "çekim"
         return f"{match.group(2)} {operation} komisyonu (%)"
-    pair_match = re.fullmatch(r"fee_convert_(TL|USDT|LTC|TRX|XMR)_(TL|USDT|LTC|TRX|XMR)_percent", key)
+    pair_match = re.fullmatch(rf"fee_convert_({ASSET_PATTERN})_({ASSET_PATTERN})_percent", key)
     if pair_match:
         return f"{pair_match.group(1)} → {pair_match.group(2)} dönüşüm komisyonu (%)"
     if key == "fee_convert_tl_percent":
         return "Eski TL içeren dönüşüm oranı (yedek)"
     if key == "fee_convert_crypto_percent":
         return "Eski kripto dönüşüm oranı (yedek)"
-    match = re.fullmatch(r"min_(deposit|withdraw|convert)_(TL|USDT|LTC|TRX|XMR)", key)
+    match = re.fullmatch(rf"min_(deposit|withdraw|convert)_({ASSET_PATTERN})", key)
     if match:
         operation = {"deposit": "yükleme", "withdraw": "çekim", "convert": "dönüştürme"}[match.group(1)]
         return f"{match.group(2)} en düşük {operation} tutarı"
-    match = re.fullmatch(r"daily_withdraw_limit_(TL|USDT|LTC|TRX|XMR)", key)
+    match = re.fullmatch(rf"daily_withdraw_limit_({ASSET_PATTERN})", key)
     if match:
         return f"{match.group(1)} günlük çekim sınırı"
     match = re.fullmatch(r"icon_(.+)", key)
