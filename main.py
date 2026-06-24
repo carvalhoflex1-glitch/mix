@@ -47,8 +47,8 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "")
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Strict", SESSION_COOKIE_SECURE=os.getenv("COOKIE_SECURE", "1") == "1", PERMANENT_SESSION_LIFETIME=1800)
 
-ASSETS = ["TL", "USDT", "LTC", "TRX"]
-CRYPTO_ASSETS = ["USDT", "LTC", "TRX"]
+ASSETS = ["TL", "USDT", "LTC", "TRX", "XMR"]
+CRYPTO_ASSETS = ["USDT", "LTC", "TRX", "XMR"]
 data_lock = threading.RLock()
 user_state = {}
 
@@ -439,6 +439,15 @@ DEFAULT_SETTINGS = {
     "icon_LTC": "5895441495409828662",
     "icon_TRX": "5895440778150288520",
     "icon_TL": "5897961936837943618",
+
+    "icon_XMR": "",
+    "wallet_XMR": "",
+    "rate_XMR_TL": "0",
+    "network_XMR": "Monero",
+    "min_deposit_XMR": "0.01",
+    "min_withdraw_XMR": "0.01",
+    "min_convert_XMR": "0.01",
+    "daily_withdraw_limit_XMR": "1000",
 }
 
 init_database()
@@ -947,7 +956,7 @@ def _fetch_coingecko_rates():
     response = requests.get(
         "https://api.coingecko.com/api/v3/simple/price",
         params={
-            "ids": "tether,litecoin,tron",
+            "ids": "tether,litecoin,tron,monero",
             "vs_currencies": "try",
             "include_last_updated_at": "true",
         },
@@ -2571,3 +2580,35 @@ if __name__ == "__main__":
     threading.Thread(target=bot_loop, daemon=True, name="telegram-bot").start()
     threading.Thread(target=rate_update_loop, daemon=True, name="live-rates").start()
     app.run(host="0.0.0.0", port=PORT)
+
+
+def validate_xmr_address(addr: str) -> bool:
+    addr = str(addr or "").strip()
+    if len(addr) < 90 or len(addr) > 110:
+        return False
+    if not addr[0] in ("4", "8"):
+        return False
+    return True
+
+
+
+ICON_MAP = {
+    "TL": "icon_TL",
+    "USDT": "icon_USDT",
+    "LTC": "icon_LTC",
+    "TRX": "icon_TRX",
+    "XMR": "icon_XMR",
+}
+
+# upgraded inline_button (XMR compatible)
+def inline_button(text, data, icon_key=None, asset=None):
+    b = {"text": text, "callback_data": data}
+    try:
+        if asset:
+            icon_key = ICON_MAP.get(asset, icon_key)
+        emoji_id = str(settings.get(icon_key or "", "")).strip()
+        if emoji_id:
+            b["icon_custom_emoji_id"] = emoji_id
+    except Exception:
+        pass
+    return b
