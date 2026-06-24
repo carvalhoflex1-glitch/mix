@@ -440,7 +440,7 @@ DEFAULT_SETTINGS = {
     "icon_LTC": "5895441495409828662",
     "icon_TRX": "5895440778150288520",
     "icon_TL": "5897961936837943618",
-    "icon_XMR": "5900147027219587568",
+    "icon_XMR": "",
 }
 
 init_database()
@@ -495,7 +495,7 @@ def _render_asset_icons(value):
     entities = []
     cursor = 0
     offset = 0
-    pattern = re.compile(r"\{\{(TL|USDT|LTC|TRX|XMR)\}\}")
+    pattern = re.compile(r"\{\{(TL|USDT|LTC|TRX)\}\}")
 
     for match in pattern.finditer(source):
         before = source[cursor:match.start()]
@@ -528,7 +528,7 @@ def _render_asset_icons(value):
 
 def _plain_asset_icons(value):
     return re.sub(
-        r"\{\{(TL|USDT|LTC|TRX|XMR)\}\}",
+        r"\{\{(TL|USDT|LTC|TRX)\}\}",
         lambda m: "₺" if m.group(1) == "TL" else m.group(1),
         str(value),
     )
@@ -1951,7 +1951,7 @@ def setting_label(key):
     match = re.fullmatch(r"rate_(USDT|LTC|TRX)_TL", key)
     if match:
         return f"{match.group(1)} / TL kuru"
-    match = re.fullmatch(r"fee_(deposit|withdraw)_(TL|USDT|LTC|TRX|XMR)_percent", key)
+    match = re.fullmatch(r"fee_(deposit|withdraw)_(TL|USDT|LTC|TRX)_percent", key)
     if match:
         operation = "yükleme" if match.group(1) == "deposit" else "çekim"
         return f"{match.group(2)} {operation} komisyonu (%)"
@@ -1959,11 +1959,11 @@ def setting_label(key):
         return "TL içeren dönüşüm komisyonu (%)"
     if key == "fee_convert_crypto_percent":
         return "Kripto → kripto dönüşüm komisyonu (%)"
-    match = re.fullmatch(r"min_(deposit|withdraw|convert)_(TL|USDT|LTC|TRX|XMR)", key)
+    match = re.fullmatch(r"min_(deposit|withdraw|convert)_(TL|USDT|LTC|TRX)", key)
     if match:
         operation = {"deposit": "yükleme", "withdraw": "çekim", "convert": "dönüştürme"}[match.group(1)]
         return f"{match.group(2)} en düşük {operation} tutarı"
-    match = re.fullmatch(r"daily_withdraw_limit_(TL|USDT|LTC|TRX|XMR)", key)
+    match = re.fullmatch(r"daily_withdraw_limit_(TL|USDT|LTC|TRX)", key)
     if match:
         return f"{match.group(1)} günlük çekim sınırı"
     match = re.fullmatch(r"icon_(.+)", key)
