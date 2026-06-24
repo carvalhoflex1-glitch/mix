@@ -3,7 +3,7 @@ import io
 import base64
 import time
 import json
-import randomtam sen güncel
+import random
 import hashlib
 import threading
 import secrets
