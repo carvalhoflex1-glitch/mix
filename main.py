@@ -39,6 +39,9 @@ OFFSET = None
 LOGIN_ATTEMPTS = defaultdict(deque)
 LOGIN_WINDOW_SECONDS = 900
 LOGIN_MAX_ATTEMPTS = 5
+RATE_UPDATE_SECONDS = max(60, int(os.getenv("RATE_UPDATE_SECONDS", "900")))
+RATE_API_BASES = [base.strip().rstrip("/") for base in os.getenv("RATE_API_BASES", "https://api.binance.com,https://data-api.binance.vision").split(",") if base.strip()]
+COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "").strip()
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "")
@@ -225,6 +228,151 @@ DEFAULT_MESSAGES = {
     "deposit_received": "Yatırım bildiriminiz alındı. Kontrol ve onay sonrasında bakiyenize yansıtılacaktır.",
 }
 
+
+EN_MESSAGES = {
+    "welcome": "Welcome to Nerlo Wallet.\n\nUse the menu below to manage your wallet simply and securely.",
+    "wallet_title": "Your Wallet Balances",
+    "deposit_menu": "Select the balance type you want to deposit.",
+    "withdraw_menu": "Select the balance type you want to withdraw.",
+    "convert_menu": "Select the balance you want to convert.",
+    "amount_question": "Enter the transaction amount.",
+    "pin_question": "Enter your transaction PIN.",
+    "pin_set_question": "For your security, create a 4–6 digit transaction PIN.",
+    "pin_wrong": "The PIN could not be verified. Please try again.",
+    "pin_saved": "Your transaction PIN has been saved securely.",
+    "pin_changed": "Your transaction PIN has been changed. All other sessions were closed for your security.",
+    "insufficient_balance": "You do not have enough balance for this transaction.",
+    "no_balance": "You do not have an available balance.",
+    "request_created": "Your request has been created and submitted for review.",
+    "request_cancelled": "The transaction was cancelled.",
+    "support": "Please contact the administrator for support.",
+    "history_empty": "You do not have any transaction history yet.",
+    "iban_warning": "The sender's Turkish ID number must be included in the payment description. Payments without this information may not be processed.",
+    "maintenance": "The system is currently under short maintenance. Please try again later.",
+    "frozen": "Your account is temporarily restricted. Please contact support.",
+    "withdraw_locked": "Your withdrawals are temporarily locked.",
+    "deposit_crypto_intro": "Send only through the specified network. Transfers made through a different network may be lost.",
+    "deposit_received": "Your deposit notification has been received. It will be credited after review and approval.",
+}
+
+BOT_TEXTS = {
+    "tr": {
+        "choose_language": "Lütfen kullanmak istediğiniz dili seçin.\n\nPlease select your preferred language.",
+        "language_saved": "Dil tercihiniz Türkçe olarak kaydedildi.",
+        "wallet": "Cüzdanım", "deposit": "Bakiye Yükle", "withdraw": "Para Çek", "convert": "Dönüştür",
+        "history": "İşlem Geçmişi", "security": "Güvenlik", "favorites": "Kayıtlı Adresler", "support": "Destek",
+        "language": "Dil / Language", "cancel": "İptal", "confirm": "Onayla", "main_menu": "Ana Menü",
+        "menu_prompt": "Menüden bir işlem seçiniz.", "wallet_title": "Cüzdan", "pending": "Bekleyen",
+        "last_10": "Son 10 İşlem", "not_found": "İşlem bulunamadı.", "completed": "İşlem tamamlandı",
+        "deposit_kind": "Yükleme", "withdraw_kind": "Çekim", "convert_kind": "Dönüşüm", "transaction_kind": "İşlem",
+        "status_pending": "Bekliyor", "status_processing": "İşleniyor", "status_completed": "Tamamlandı", "status_rejected": "Reddedildi",
+        "amount": "Tutar", "net": "Net", "sender": "Gönderen", "reference": "Referans", "network": "Ağ",
+        "fee": "Komisyon", "bank": "Banka", "recipient": "Alıcı", "address": "Adres", "given": "Verilen", "received": "Alınan",
+        "security_center": "Güvenlik Merkezi", "transaction_pin": "İşlem PIN'i", "withdraw_status": "Çekim durumu",
+        "active_session": "Aktif oturum", "last_activity": "Son etkinlik", "active": "Aktif", "not_set": "Ayarlanmamış",
+        "locked": "Kilitli", "open": "Açık", "change_pin": "PIN Değiştir", "notification_preferences": "Bildirim Tercihleri",
+        "logout_sessions": "Tüm Oturumları Kapat", "confirm_question": "İşlemi onaylıyor musunuz?",
+        "request_created_title": "Talep oluşturuldu", "new_withdraw_admin": "Yeni çekim talebi",
+        "no_saved_address": "Kayıtlı adresiniz bulunmuyor.", "new_address": "Yeni Adres Ekle", "saved_wallets": "Kayıtlı Cüzdan Adresleri",
+        "pin_digits": "PIN 4-6 haneli rakamlardan oluşmalıdır.", "repeat_pin": "Yeni PIN'inizi tekrar giriniz.",
+        "pin_mismatch": "PIN'ler eşleşmedi. İşlemi yeniden başlatınız.", "new_pin": "Yeni işlem PIN'inizi giriniz.",
+        "pin_locked": "Üç hatalı PIN denemesi nedeniyle çekimleriniz geçici olarak kilitlendi.",
+        "valid_amount": "Geçerli bir tutar giriniz.", "insufficient": "Yetersiz bakiye", "minimum": "Minimum",
+        "daily_limit": "Günlük çekim limitiniz aşılıyor. Kalan limit: {amount}",
+        "deposit_summary_tl": "TL Yükleme Özeti", "deposit_summary": "{asset} Yükleme Özeti", "to_deposit": "Yüklenecek",
+        "credited": "Bakiyeye Geçecek", "iban_copy": "IBAN Kopyala", "payment_sent": "Ödemeyi Yaptım",
+        "show_qr": "QR Göster", "notify_transfer": "Gönderimi Bildir", "deposit_address": "Yatırma Adresi",
+        "bank_unavailable": "TL yükleme bilgileri şu anda eksik. Lütfen daha sonra tekrar deneyin veya destek ile iletişime geçin.",
+        "bank_name_question": "Banka adını giriniz.", "iban_question": "IBAN bilginizi giriniz.", "account_name_question": "Hesap sahibinin ad ve soyadını giriniz.",
+        "wallet_address_question": "Alıcı cüzdan adresini giriniz.", "withdraw_address_select": "Çekim adresini seçiniz.", "enter_new_address": "Yeni adres gir",
+        "swap_summary": "Takas Özeti", "sent": "Gönderilen", "to_receive": "Alınacak", "all_balance_note": "Tüm kullanılabilir bakiye dönüştürülecektir.",
+        "rate_note": "Kur son onayda yeniden hesaplanır. Canlı kurlar 15 dakikada bir yenilenir.{updated}",
+        "sender_name_question": "Ödemeyi gönderen kişinin ad ve soyadını giriniz.",
+        "sender_name_invalid": "Lütfen ödemeyi gönderen kişinin ad ve soyadını doğru giriniz.",
+        "reference_question": "Ödeme açıklamasını veya dekont referansını giriniz. Yoksa YOK yazabilirsiniz.",
+        "deposit_session_missing": "Yükleme oturumu bulunamadı. İşlemi yeniden başlatınız.", "session_missing": "İşlem oturumu bulunamadı.",
+        "qr_missing": "QR bilgisi bulunamadı.", "qr_caption": "Yatırma QR Kodu", "new_deposit_admin": "Yeni bakiye yükleme bildirimi",
+        "available_balance": "Çekilebilir bakiye", "min_withdraw": "Minimum çekim", "convert_available": "Dönüştürülecek: {amount} kullanılabilir.",
+        "balance": "Bakiye", "enter_or_all": "Tutarı girin veya tüm bakiyeyi dönüştürün.", "convert_all": "Tüm Bakiyeyi Dönüştür",
+        "convert_session_missing": "Dönüşüm oturumu bulunamadı.", "invalid_rate": "Geçersiz kur nedeniyle dönüşüm yapılamıyor.",
+        "invalid_fee": "Geçersiz komisyon oranı.", "invalid_net": "Komisyon sonrası geçerli tutar oluşmadı.",
+        "already_confirmed": "Bu onay daha önce kullanıldı.", "missing_convert": "Dönüşüm bilgileri eksik. İşlemi yeniden başlatınız.",
+        "nothing_to_confirm": "Onaylanacak işlem bulunamadı. İşlemi yeniden başlatınız.",
+        "operation_failed": "İşlem tamamlanamadı. Lütfen işlemi yeniden başlatınız.",
+        "favorite_asset": "Kayıtlı adresin para birimini seçiniz.", "favorite_label": "Bu adres için bir isim giriniz.",
+        "favorite_address": "Cüzdan adresini giriniz.", "favorite_saved": "Adres kaydedildi.",
+        "current_pin": "Mevcut işlem PIN'inizi giriniz.", "notifications_edit": "Bildirim tercihlerinizi düzenleyiniz.",
+        "transactions": "İşlemler", "announcements": "Duyurular", "notification_updated": "Bildirim tercihi güncellendi.",
+        "sessions_closed": "Diğer oturum kayıtları kapatıldı.", "on": "Açık", "off": "Kapalı",
+        "withdraw_summary_tl": "TL Çekim Özeti", "withdraw_summary": "{asset} Çekim Özeti", "recipient_gets": "Alıcıya Geçecek", "to_send": "Gönderilecek",
+        "wallet_address": "Cüzdan Adresi", "deposit_pending_title": "Yükleme bildiriminiz alındı", "request_rejected": "İşleminiz reddedildi.",
+    },
+    "en": {
+        "choose_language": "Please select your preferred language.\n\nLütfen kullanmak istediğiniz dili seçin.",
+        "language_saved": "Your language preference has been saved as English.",
+        "wallet": "My Wallet", "deposit": "Deposit", "withdraw": "Withdraw", "convert": "Convert",
+        "history": "Transaction History", "security": "Security", "favorites": "Saved Addresses", "support": "Support",
+        "language": "Language / Dil", "cancel": "Cancel", "confirm": "Confirm", "main_menu": "Main Menu",
+        "menu_prompt": "Please select an action from the menu.", "wallet_title": "Wallet", "pending": "Pending",
+        "last_10": "Last 10 Transactions", "not_found": "Transaction not found.", "completed": "Transaction completed",
+        "deposit_kind": "Deposit", "withdraw_kind": "Withdrawal", "convert_kind": "Conversion", "transaction_kind": "Transaction",
+        "status_pending": "Pending", "status_processing": "Processing", "status_completed": "Completed", "status_rejected": "Rejected",
+        "amount": "Amount", "net": "Net", "sender": "Sender", "reference": "Reference", "network": "Network",
+        "fee": "Fee", "bank": "Bank", "recipient": "Recipient", "address": "Address", "given": "Sent", "received": "Received",
+        "security_center": "Security Center", "transaction_pin": "Transaction PIN", "withdraw_status": "Withdrawal status",
+        "active_session": "Active session", "last_activity": "Last activity", "active": "Active", "not_set": "Not set",
+        "locked": "Locked", "open": "Open", "change_pin": "Change PIN", "notification_preferences": "Notification Preferences",
+        "logout_sessions": "Close All Other Sessions", "confirm_question": "Do you confirm this transaction?",
+        "request_created_title": "Request created", "new_withdraw_admin": "Yeni çekim talebi",
+        "no_saved_address": "You do not have any saved addresses.", "new_address": "Add New Address", "saved_wallets": "Saved Wallet Addresses",
+        "pin_digits": "The PIN must contain 4–6 digits.", "repeat_pin": "Enter your new PIN again.",
+        "pin_mismatch": "The PINs do not match. Please restart the transaction.", "new_pin": "Enter your new transaction PIN.",
+        "pin_locked": "Your withdrawals were temporarily locked after three incorrect PIN attempts.",
+        "valid_amount": "Enter a valid amount.", "insufficient": "Insufficient balance", "minimum": "Minimum",
+        "daily_limit": "This exceeds your daily withdrawal limit. Remaining limit: {amount}",
+        "deposit_summary_tl": "TRY Deposit Summary", "deposit_summary": "{asset} Deposit Summary", "to_deposit": "Deposit amount",
+        "credited": "Amount to be credited", "iban_copy": "Copy IBAN", "payment_sent": "I Made the Payment",
+        "show_qr": "Show QR", "notify_transfer": "Notify Transfer", "deposit_address": "Deposit Address",
+        "bank_unavailable": "TRY deposit details are currently incomplete. Please try again later or contact support.",
+        "bank_name_question": "Enter the bank name.", "iban_question": "Enter your IBAN.", "account_name_question": "Enter the account holder's full name.",
+        "wallet_address_question": "Enter the recipient wallet address.", "withdraw_address_select": "Select the withdrawal address.", "enter_new_address": "Enter a new address",
+        "swap_summary": "Conversion Summary", "sent": "Sent", "to_receive": "You will receive", "all_balance_note": "All available balance will be converted.",
+        "rate_note": "The rate is recalculated at final confirmation. Live rates refresh every 15 minutes.{updated}",
+        "sender_name_question": "Enter the full name of the person who made the payment.",
+        "sender_name_invalid": "Enter the payer's full name correctly.",
+        "reference_question": "Enter the payment description or receipt reference. Enter NONE if unavailable.",
+        "deposit_session_missing": "The deposit session was not found. Please restart the transaction.", "session_missing": "The transaction session was not found.",
+        "qr_missing": "QR information was not found.", "qr_caption": "Deposit QR Code", "new_deposit_admin": "Yeni bakiye yükleme bildirimi",
+        "available_balance": "Available balance", "min_withdraw": "Minimum withdrawal", "convert_available": "Available to convert: {amount}.",
+        "balance": "Balance", "enter_or_all": "Enter an amount or convert the full balance.", "convert_all": "Convert Full Balance",
+        "convert_session_missing": "The conversion session was not found.", "invalid_rate": "The conversion cannot be completed because the exchange rate is invalid.",
+        "invalid_fee": "The fee rate is invalid.", "invalid_net": "No valid amount remains after the fee.",
+        "already_confirmed": "This confirmation has already been used.", "missing_convert": "Conversion information is incomplete. Please restart the transaction.",
+        "nothing_to_confirm": "There is no transaction to confirm. Please restart it.",
+        "operation_failed": "The transaction could not be completed. Please restart it.",
+        "favorite_asset": "Select the asset for the saved address.", "favorite_label": "Enter a name for this address.",
+        "favorite_address": "Enter the wallet address.", "favorite_saved": "Address saved.",
+        "current_pin": "Enter your current transaction PIN.", "notifications_edit": "Edit your notification preferences.",
+        "transactions": "Transactions", "announcements": "Announcements", "notification_updated": "Notification preference updated.",
+        "sessions_closed": "Other session records were closed.", "on": "On", "off": "Off",
+        "withdraw_summary_tl": "TRY Withdrawal Summary", "withdraw_summary": "{asset} Withdrawal Summary", "recipient_gets": "Recipient receives", "to_send": "Amount to send",
+        "wallet_address": "Wallet Address", "deposit_pending_title": "Your deposit notification was received", "request_rejected": "Your transaction was rejected.",
+    },
+}
+
+MENU_ACTIONS = {
+    "Cüzdanım": "wallet", "My Wallet": "wallet",
+    "Bakiye Yükle": "deposit", "Deposit": "deposit",
+    "Para Çek": "withdraw", "Withdraw": "withdraw",
+    "Dönüştür": "convert", "Convert": "convert",
+    "İşlem Geçmişi": "history", "Transaction History": "history",
+    "Güvenlik": "security", "Security": "security",
+    "Kayıtlı Adresler": "favorites", "Saved Addresses": "favorites",
+    "Destek": "support", "Support": "support",
+    "Dil / Language": "language", "Language / Dil": "language",
+    "Ana Menü": "menu", "Main Menu": "menu",
+}
+
 DEFAULT_SETTINGS = {
     "bank_name": os.getenv("DEFAULT_BANK_NAME", ""),
     "iban": os.getenv("DEFAULT_IBAN", ""),
@@ -235,6 +383,10 @@ DEFAULT_SETTINGS = {
     "rate_USDT_TL": "46.40",
     "rate_LTC_TL": "2065.00",
     "rate_TRX_TL": "15.50",
+    "auto_rate_enabled": "on",
+    "rates_source": "Binance Spot",
+    "rates_last_updated": "",
+    "rates_last_error": "",
     "fee_deposit_TL_percent": "0",
     "fee_deposit_USDT_percent": "0",
     "fee_deposit_LTC_percent": "0",
@@ -431,34 +583,65 @@ def inline_button(text, data, icon_key=None):
     return b
 
 
-def reply_keyboard():
+def lang_of(uid):
+    lang = str(users.get(str(uid), {}).get("language", "")).lower()
+    return lang if lang in ("tr", "en") else "tr"
+
+
+def t(uid, key, **kwargs):
+    lang = lang_of(uid)
+    value = BOT_TEXTS.get(lang, BOT_TEXTS["tr"]).get(key, BOT_TEXTS["tr"].get(key, key))
+    try:
+        return value.format(**kwargs)
+    except (KeyError, ValueError):
+        return value
+
+
+def msg(uid, key):
+    return EN_MESSAGES.get(key, DEFAULT_MESSAGES.get(key, key)) if lang_of(uid) == "en" else messages.get(key, DEFAULT_MESSAGES.get(key, key))
+
+
+def language_keyboard():
+    return {"inline_keyboard": [[
+        inline_button("🇹🇷 Türkçe", "lang:tr"),
+        inline_button("🇬🇧 English", "lang:en"),
+    ]]}
+
+
+def reply_keyboard(uid=None):
+    lang = lang_of(uid) if uid is not None else "tr"
+    x = BOT_TEXTS[lang]
     return {
         "keyboard": [
-            [{"text": "Cüzdanım"}, {"text": "Bakiye Yükle"}],
-            [{"text": "Para Çek"}, {"text": "Dönüştür"}],
-            [{"text": "İşlem Geçmişi"}, {"text": "Güvenlik"}],
-            [{"text": "Kayıtlı Adresler"}, {"text": "Destek"}],
+            [{"text": x["wallet"]}, {"text": x["deposit"]}],
+            [{"text": x["withdraw"]}, {"text": x["convert"]}],
+            [{"text": x["history"]}, {"text": x["security"]}],
+            [{"text": x["favorites"]}, {"text": x["support"]}],
+            [{"text": x["language"]}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
     }
 
 
-def asset_keyboard(prefix, assets, exclude=None):
+def asset_keyboard(prefix, assets, exclude=None, uid=None):
     rows = []
     for asset in assets:
         if asset != exclude:
             rows.append([inline_button(asset, f"{prefix}:{asset}", f"icon_{asset}")])
-    rows.append([inline_button("İptal", "cancel")])
+    rows.append([inline_button(t(uid, "cancel"), "cancel")])
     return {"inline_keyboard": rows}
 
 
-def confirm_keyboard(ok_data, cancel_data="cancel"):
-    return {"inline_keyboard": [[inline_button("Onayla", ok_data), inline_button("İptal", cancel_data)]]}
+def confirm_keyboard(ok_data, cancel_data="cancel", uid=None):
+    return {"inline_keyboard": [[inline_button(t(uid, "confirm"), ok_data), inline_button(t(uid, "cancel"), cancel_data)]]}
 
 
 def copy_button(text, value):
-    return {"text": text, "copy_text": {"text": str(value)}}
+    value = str(value or "").strip()
+    if not value:
+        return None
+    return {"text": text, "copy_text": {"text": value}}
 
 
 def order_summary(title, rows, note=""):
@@ -469,6 +652,20 @@ def order_summary(title, rows, note=""):
         lines.extend(["━━━━━━━━━━━━", note])
     return "\n\n".join(lines)
 
+
+def coin_fmt_lang(value, asset, lang="tr"):
+    asset = str(asset or "")
+    value = D(value)
+    precision = Decimal("0.000001") if asset == "LTC" else Decimal("0.01")
+    out = value.quantize(precision, rounding=ROUND_DOWN)
+    raw = f"{out:,.6f}" if asset == "LTC" else f"{out:,.2f}"
+    if lang == "tr":
+        raw = raw.replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{raw} {{{{{asset}}}}}"
+
+
+def ucoin(uid, value, asset):
+    return coin_fmt_lang(value, asset, lang_of(uid))
 
 def hash_pin(pin):
     return generate_password_hash(str(pin), method="scrypt")
@@ -498,6 +695,7 @@ def get_user(chat_id, username=""):
             "pin_hash": "",
             "pin_failed_attempts": 0,
             "tier": "Basic",
+            "language": "",
             "balances": {a: "0" for a in ASSETS},
             "pending_balances": {a: "0" for a in ASSETS},
             "session_version": 1,
@@ -512,6 +710,7 @@ def get_user(chat_id, username=""):
     u.setdefault("withdraw_locked", False)
     u.setdefault("pin_failed_attempts", 0)
     u.setdefault("tier", "Basic")
+    u.setdefault("language", "")
     u.setdefault("favorites", [])
     u.setdefault("notifications", {"transactions": True, "security": True, "announcements": True})
     u.setdefault("sessions", {"telegram": {"created_at": now(), "last_seen": now(), "active": True}})
@@ -690,6 +889,123 @@ def rate(asset):
     return Decimal("1") if asset == "TL" else D(settings.get(f"rate_{asset}_TL", "0"))
 
 
+def _ticker_price(symbol):
+    last_error = None
+    for base in RATE_API_BASES:
+        try:
+            response = requests.get(
+                f"{base}/api/v3/ticker/price",
+                params={"symbol": symbol},
+                timeout=12,
+                headers={"User-Agent": "Nerlo-Wallet/1.0"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            price = D(payload.get("price", "0"))
+            if price > 0:
+                return price
+            last_error = RuntimeError(f"{symbol} price is empty")
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Live price could not be retrieved for {symbol}: {last_error}")
+
+
+def _fetch_binance_rates():
+    try:
+        usdt_try = _ticker_price("USDTTRY")
+    except Exception:
+        try_usdt = _ticker_price("TRYUSDT")
+        if try_usdt <= 0:
+            raise RuntimeError("TRY/USDT rate is invalid")
+        usdt_try = Decimal("1") / try_usdt
+
+    def try_rate(asset):
+        try:
+            return _ticker_price(f"{asset}TRY")
+        except Exception:
+            return _ticker_price(f"{asset}USDT") * usdt_try
+
+    rates = {"USDT": usdt_try, "LTC": try_rate("LTC"), "TRX": try_rate("TRX")}
+    if any(value <= 0 for value in rates.values()):
+        raise RuntimeError("One or more Binance rates are invalid")
+    return rates
+
+
+def _fetch_coingecko_rates():
+    headers = {"User-Agent": "Nerlo-Wallet/1.0"}
+    if COINGECKO_API_KEY:
+        headers["x-cg-demo-api-key"] = COINGECKO_API_KEY
+    response = requests.get(
+        "https://api.coingecko.com/api/v3/simple/price",
+        params={
+            "ids": "tether,litecoin,tron",
+            "vs_currencies": "try",
+            "include_last_updated_at": "true",
+        },
+        headers=headers,
+        timeout=15,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    rates = {
+        "USDT": D(payload.get("tether", {}).get("try", "0")),
+        "LTC": D(payload.get("litecoin", {}).get("try", "0")),
+        "TRX": D(payload.get("tron", {}).get("try", "0")),
+    }
+    if any(value <= 0 for value in rates.values()):
+        raise RuntimeError("One or more CoinGecko rates are invalid")
+    return rates
+
+
+def fetch_live_rates():
+    errors = []
+    try:
+        return _fetch_binance_rates(), "Binance Spot"
+    except Exception as exc:
+        errors.append(f"Binance: {exc}")
+    try:
+        return _fetch_coingecko_rates(), "CoinGecko"
+    except Exception as exc:
+        errors.append(f"CoinGecko: {exc}")
+    raise RuntimeError(" | ".join(errors))
+
+
+def update_live_rates():
+    if str(settings.get("auto_rate_enabled", "on")).lower() != "on":
+        return False
+    try:
+        rates, source = fetch_live_rates()
+        with data_lock:
+            for asset, value in rates.items():
+                precision = Decimal("0.00000001")
+                settings[f"rate_{asset}_TL"] = format(value.quantize(precision, rounding=ROUND_DOWN), "f")
+            settings["rates_source"] = source
+            settings["rates_last_updated"] = now()
+            settings["rates_last_error"] = ""
+            save_json(FILES["settings"], settings)
+        print("LIVE RATES UPDATED:", {asset: settings[f"rate_{asset}_TL"] for asset in ("USDT", "LTC", "TRX")})
+        return True
+    except Exception as exc:
+        settings["rates_last_error"] = str(exc)[:500]
+        try:
+            save_json(FILES["settings"], settings)
+        except Exception:
+            pass
+        print("LIVE RATE UPDATE ERROR:", exc)
+        return False
+
+
+def rate_update_loop():
+    while True:
+        update_live_rates()
+        time.sleep(RATE_UPDATE_SECONDS)
+
+
+def live_rate_note(uid):
+    updated = str(settings.get("rates_last_updated", "")).strip()
+    suffix = f" Son güncelleme: {updated}." if updated and lang_of(uid) == "tr" else (f" Last update: {updated}." if updated else "")
+    return t(uid, "rate_note", updated=suffix)
+
 def fee_percent(kind, asset=None, uid=None):
     if uid is not None:
         override = str(users.get(str(uid), {}).get("custom_fee_percent", "")).strip()
@@ -719,13 +1035,15 @@ def withdrawn_today(uid, asset):
 
 
 def wallet_text(uid):
-    u = users[str(uid)]
-    lines = [f"Cüzdan · {tier_label(u.get('tier', 'Basic'))}", ""]
+    uid = str(uid)
+    u = users[uid]
+    tier = tier_label(u.get("tier", "Basic")) if lang_of(uid) == "tr" else u.get("tier", "Basic")
+    lines = [f"{t(uid, 'wallet_title')} · {tier}", ""]
     for asset in ASSETS:
-        lines.append(coin_fmt(u["balances"].get(asset, "0"), asset))
+        lines.append(ucoin(uid, u["balances"].get(asset, "0"), asset))
         pending = D(u.get("pending_balances", {}).get(asset, "0"))
         if pending > 0:
-            lines.append(f"Bekleyen · {coin_fmt(pending, asset)}")
+            lines.append(f"{t(uid, 'pending')} · {ucoin(uid, pending, asset)}")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -734,607 +1052,590 @@ def active_balances(uid):
     return [a for a in ASSETS if balance(uid, a) > 0]
 
 
-def request_summary(rid):
+def localized_status(uid, value):
+    return t(uid, f"status_{value}") if value in ("pending", "processing", "completed", "rejected") else value
+
+
+def request_summary(rid, lang_uid=None):
     r = requests_db.get(str(rid), {})
+    uid = str(lang_uid if lang_uid is not None else r.get("user_id", ""))
     if not r:
-        return "İşlem bulunamadı."
+        return t(uid, "not_found")
 
     kind = {
-        "deposit": "Yükleme",
-        "withdraw": "Çekim",
-        "convert": "Dönüşüm",
-    }.get(r.get("type"), "İşlem")
-
-    lines = [f"{kind} · #{rid}", status_label(r.get("status"))]
+        "deposit": t(uid, "deposit_kind"),
+        "withdraw": t(uid, "withdraw_kind"),
+        "convert": t(uid, "convert_kind"),
+    }.get(r.get("type"), t(uid, "transaction_kind"))
+    lines = [f"{kind} · #{rid}", localized_status(uid, r.get("status"))]
 
     if r.get("type") == "deposit":
         asset = r.get("asset")
         lines += [
-            f"Tutar · {coin_fmt(r.get('amount'), asset)}",
-            f"Net · {coin_fmt(r.get('net_amount'), asset)}",
+            f"{t(uid, 'amount')} · {ucoin(uid, r.get('amount'), asset)}",
+            f"{t(uid, 'net')} · {ucoin(uid, r.get('net_amount'), asset)}",
         ]
         if asset == "TL":
             lines += [
-                f"Gönderen · {r.get('sender_name', '-')}",
-                f"Referans · {r.get('tx_note', '-')}",
+                f"{t(uid, 'sender')} · {r.get('sender_name', '-')}",
+                f"{t(uid, 'reference')} · {r.get('tx_note', '-')}",
             ]
         else:
-            lines.append(f"Ağ · {r.get('network', '-')}")
-
+            lines.append(f"{t(uid, 'network')} · {r.get('network', '-')}")
     elif r.get("type") == "withdraw":
         asset = r.get("asset")
         lines += [
-            f"Tutar · {coin_fmt(r.get('amount'), asset)}",
-            f"Net · {coin_fmt(r.get('net_amount'), asset)}",
-            f"Komisyon · {coin_fmt(r.get('fee'), asset)}",
+            f"{t(uid, 'amount')} · {ucoin(uid, r.get('amount'), asset)}",
+            f"{t(uid, 'net')} · {ucoin(uid, r.get('net_amount'), asset)}",
+            f"{t(uid, 'fee')} · {ucoin(uid, r.get('fee'), asset)}",
         ]
         if asset == "TL":
             lines += [
-                f"Banka · {r.get('bank_name', '-')}",
+                f"{t(uid, 'bank')} · {r.get('bank_name', '-')}",
                 f"IBAN · {r.get('iban', '-')}",
-                f"Alıcı · {r.get('name', '-')}",
+                f"{t(uid, 'recipient')} · {r.get('name', '-')}",
             ]
         else:
-            lines.append(f"Adres · {r.get('address', '-')}")
-
+            lines.append(f"{t(uid, 'address')} · {r.get('address', '-')}")
     elif r.get("type") == "convert":
         lines += [
-            f"Verilen · {coin_fmt(r.get('from_amount'), r.get('from_asset'))}",
-            f"Alınan · {coin_fmt(r.get('net_to_amount'), r.get('to_asset'))}",
-            f"Komisyon · {coin_fmt(r.get('fee'), r.get('to_asset'))}",
+            f"{t(uid, 'given')} · {ucoin(uid, r.get('from_amount'), r.get('from_asset'))}",
+            f"{t(uid, 'received')} · {ucoin(uid, r.get('net_to_amount'), r.get('to_asset'))}",
+            f"{t(uid, 'fee')} · {ucoin(uid, r.get('fee'), r.get('to_asset'))}",
         ]
-
     lines.append(r.get("created_at", ""))
     return "\n".join(lines)
 
 
-def receipt_text(rid):
-    if not requests_db.get(str(rid)):
-        return "İşlem bulunamadı."
-    return "İşlem tamamlandı\n\n" + request_summary(rid)
+def receipt_text(rid, lang_uid=None):
+    r = requests_db.get(str(rid))
+    uid = str(lang_uid if lang_uid is not None else (r or {}).get("user_id", ""))
+    if not r:
+        return t(uid, "not_found")
+    return t(uid, "completed") + "\n\n" + request_summary(rid, uid)
 
 
 def user_allowed(chat_id):
+    uid = str(chat_id)
     u = get_user(chat_id)
     if u.get("status") == "frozen":
-        send(chat_id, messages["frozen"], reply_keyboard())
+        send(chat_id, msg(uid, "frozen"), reply_keyboard(uid))
         return False
-    if settings.get("maintenance_mode") == "on" and str(chat_id) != str(ADMIN_CHAT_ID):
-        send(chat_id, settings.get("maintenance_message") or messages["maintenance"], reply_keyboard())
+    if settings.get("maintenance_mode") == "on" and uid != str(ADMIN_CHAT_ID):
+        maintenance_text = settings.get("maintenance_message") if lang_of(uid) == "tr" else ""
+        send(chat_id, maintenance_text or msg(uid, "maintenance"), reply_keyboard(uid))
         return False
     return True
 
 
+def ask_language(chat_id):
+    send(chat_id, BOT_TEXTS["tr"]["choose_language"], language_keyboard())
+
+
 def start_user(chat_id, username=""):
+    uid = str(chat_id)
     u = get_user(chat_id, username)
-    text = messages["welcome"]
+    if u.get("language") not in ("tr", "en"):
+        ask_language(chat_id)
+        return
+    text = msg(uid, "welcome")
     if settings.get("announcement_active") == "on" and u.get("notifications", {}).get("announcements", True) and settings.get("announcement_text"):
         text += "\n\n📢 " + settings["announcement_text"]
-    send(chat_id, text, reply_keyboard())
+    send(chat_id, text, reply_keyboard(uid))
 
 
 def show_history(chat_id):
-    items = [r for r in requests_db.values() if r.get("user_id") == str(chat_id)]
+    uid = str(chat_id)
+    items = [r for r in requests_db.values() if r.get("user_id") == uid]
     items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
     items = items[:10]
     if not items:
-        send(chat_id, messages["history_empty"], reply_keyboard())
+        send(chat_id, msg(uid, "history_empty"), reply_keyboard(uid))
         return
-    rows = [[inline_button(f"#{r['id']} · {r.get('status')}", f"detail:{r['id']}")] for r in items]
-    send(chat_id, "Son 10 İşlem", {"inline_keyboard": rows})
+    rows = [[inline_button(f"#{r['id']} · {localized_status(uid, r.get('status'))}", f"detail:{r['id']}")] for r in items]
+    send(chat_id, t(uid, "last_10"), {"inline_keyboard": rows})
 
 
 def show_security(chat_id):
+    uid = str(chat_id)
     u = get_user(chat_id)
-    pin = "Aktif" if u.get("pin_hash") else "Ayarlanmamış"
-    lock = "Kilitli" if u.get("withdraw_locked") else "Açık"
-    text = f"Güvenlik Merkezi\n\nİşlem PIN'i: {pin}\nÇekim durumu: {lock}\nAktif oturum: Telegram\nSon etkinlik: {u.get('last_seen','')}"
+    pin = t(uid, "active") if u.get("pin_hash") else t(uid, "not_set")
+    lock = t(uid, "locked") if u.get("withdraw_locked") else t(uid, "open")
+    text = (
+        f"{t(uid, 'security_center')}\n\n"
+        f"{t(uid, 'transaction_pin')}: {pin}\n"
+        f"{t(uid, 'withdraw_status')}: {lock}\n"
+        f"{t(uid, 'active_session')}: Telegram\n"
+        f"{t(uid, 'last_activity')}: {u.get('last_seen', '')}"
+    )
     kb = {"inline_keyboard": [
-        [inline_button("PIN Değiştir", "security:set_pin")],
-        [inline_button("Bildirim Tercihleri", "security:notifications")],
-        [inline_button("Tüm Oturumları Kapat", "security:logout_sessions")],
+        [inline_button(t(uid, "change_pin"), "security:set_pin")],
+        [inline_button(t(uid, "notification_preferences"), "security:notifications")],
+        [inline_button(t(uid, "logout_sessions"), "security:logout_sessions")],
     ]}
     send(chat_id, text, kb)
 
 
 def begin_deposit(chat_id):
-    user_state[str(chat_id)] = {"flow": "deposit", "step": "asset"}
-    send(chat_id, messages["deposit_menu"], asset_keyboard("deposit_asset", ASSETS))
+    uid = str(chat_id)
+    user_state[uid] = {"flow": "deposit", "step": "asset", "idempotency_key": secrets.token_urlsafe(24)}
+    send(chat_id, msg(uid, "deposit_menu"), asset_keyboard("deposit_asset", ASSETS, uid=uid))
 
 
 def begin_withdraw(chat_id):
+    uid = str(chat_id)
     u = get_user(chat_id)
     if u.get("withdraw_locked"):
-        send(chat_id, messages["withdraw_locked"], reply_keyboard())
+        send(chat_id, msg(uid, "withdraw_locked"), reply_keyboard(uid))
         return
     assets = active_balances(chat_id)
     if not assets:
-        send(chat_id, messages["no_balance"], reply_keyboard())
+        send(chat_id, msg(uid, "no_balance"), reply_keyboard(uid))
         return
-    user_state[str(chat_id)] = {"flow": "withdraw", "step": "asset"}
-    send(chat_id, messages["withdraw_menu"], asset_keyboard("withdraw_asset", assets))
+    user_state[uid] = {"flow": "withdraw", "step": "asset"}
+    send(chat_id, msg(uid, "withdraw_menu"), asset_keyboard("withdraw_asset", assets, uid=uid))
 
 
 def begin_convert(chat_id):
+    uid = str(chat_id)
     assets = active_balances(chat_id)
     if not assets:
-        send(chat_id, messages["no_balance"], reply_keyboard())
+        send(chat_id, msg(uid, "no_balance"), reply_keyboard(uid))
         return
-    user_state[str(chat_id)] = {"flow": "convert", "step": "from_asset"}
-    send(chat_id, messages["convert_menu"], asset_keyboard("convert_from", assets))
+    user_state[uid] = {"flow": "convert", "step": "from_asset"}
+    send(chat_id, msg(uid, "convert_menu"), asset_keyboard("convert_from", assets, uid=uid))
 
 
 def require_pin(uid, state, next_step="pin"):
     if not users[uid].get("pin_hash"):
         state["after_pin_setup"] = next_step
         state["step"] = "set_pin"
-        send(uid, messages["pin_set_question"], reply_keyboard())
+        send(uid, msg(uid, "pin_set_question"), reply_keyboard(uid))
     else:
         state["step"] = next_step
-        send(uid, messages["pin_question"], reply_keyboard())
+        send(uid, msg(uid, "pin_question"), reply_keyboard(uid))
 
 
 def send_second_confirmation(uid, state, prefix=""):
     state["step"] = "second_confirm"
     state["confirm_token"] = secrets.token_urlsafe(24)
     state["confirmation_consumed"] = False
-    preview = state.get("preview", "İşlemi onaylıyor musunuz?")
+    preview = state.get("preview", t(uid, "confirm_question"))
     text = f"{prefix}\n\n{preview}" if prefix else preview
-    send(uid, text, confirm_keyboard("second_confirm"))
+    send(uid, text, confirm_keyboard("second_confirm", uid=uid))
 
 
 def finalize_withdraw(uid, state):
     rid = atomic_withdraw(uid, state)
     user_state.pop(uid, None)
-    send(uid, "Talep oluşturuldu\n\n" + request_summary(rid), reply_keyboard())
+    send(uid, t(uid, "request_created_title") + "\n\n" + request_summary(rid, uid), reply_keyboard(uid))
     if ADMIN_CHAT_ID:
-        send(ADMIN_CHAT_ID, "Yeni çekim talebi\n\n" + request_summary(rid))
+        send(ADMIN_CHAT_ID, "Yeni çekim talebi\n\n" + request_summary(rid, ""))
+
+
+def create_deposit_notice(uid, state, extra=None):
+    uid = str(uid)
+    if state.get("request_id") and state["request_id"] in requests_db:
+        return state["request_id"]
+    idem = state.setdefault("idempotency_key", secrets.token_urlsafe(24))
+    for rid, existing in requests_db.items():
+        if existing.get("user_id") == uid and existing.get("type") == "deposit" and existing.get("idempotency_key") == idem:
+            state["request_id"] = rid
+            return rid
+    payload = {
+        "asset": state["asset"],
+        "amount": state["amount"],
+        "fee": state["fee"],
+        "net_amount": state["net_amount"],
+        "idempotency_key": idem,
+    }
+    if extra:
+        payload.update(extra)
+    with data_lock:
+        old_pending = pending_balance(uid, state["asset"])
+        rid = new_request(uid, "deposit", payload)
+        try:
+            change_pending(uid, state["asset"], D(state["net_amount"]), "deposit_pending", rid)
+            state["request_id"] = rid
+            return rid
+        except Exception:
+            users[uid]["pending_balances"][state["asset"]] = str(old_pending)
+            requests_db.pop(rid, None)
+            save_json(FILES["users"], users)
+            save_json(FILES["requests"], requests_db)
+            raise
 
 
 def handle_text(chat_id, username, text):
     uid = str(chat_id)
-    get_user(chat_id, username)
-    if text == "/start" or text == "Ana Menü":
-        start_user(chat_id, username); return
+    u = get_user(chat_id, username)
+    text = str(text or "").strip()
+    if text == "/start" or MENU_ACTIONS.get(text) == "menu":
+        start_user(chat_id, username)
+        return
+    if text in ("/language", "/dil") or MENU_ACTIONS.get(text) == "language":
+        ask_language(chat_id)
+        return
+    if u.get("language") not in ("tr", "en"):
+        ask_language(chat_id)
+        return
     if not user_allowed(chat_id):
         return
-    if text == "Cüzdanım":
-        send(chat_id, wallet_text(uid), reply_keyboard()); return
-    if text == "Bakiye Yükle": begin_deposit(chat_id); return
-    if text == "Para Çek": begin_withdraw(chat_id); return
-    if text == "Dönüştür": begin_convert(chat_id); return
-    if text == "İşlem Geçmişi": show_history(chat_id); return
-    if text == "Güvenlik": show_security(chat_id); return
-    if text == "Kayıtlı Adresler":
+
+    action = MENU_ACTIONS.get(text)
+    if action == "wallet": send(chat_id, wallet_text(uid), reply_keyboard(uid)); return
+    if action == "deposit": begin_deposit(chat_id); return
+    if action == "withdraw": begin_withdraw(chat_id); return
+    if action == "convert": begin_convert(chat_id); return
+    if action == "history": show_history(chat_id); return
+    if action == "security": show_security(chat_id); return
+    if action == "favorites":
         favs = users[uid].get("favorites", [])
         if not favs:
-            send(chat_id, "Kayıtlı adresiniz bulunmuyor.", {"inline_keyboard": [[inline_button("Yeni Adres Ekle", "favorite:add")]]})
+            send(chat_id, t(uid, "no_saved_address"), {"inline_keyboard": [[inline_button(t(uid, "new_address"), "favorite:add")]]})
         else:
-            lines = ["Kayıtlı Cüzdan Adresleri"] + [f"{i+1}. {f['label']} · {f['asset']}\n{f['address']}" for i, f in enumerate(favs)]
-            send(chat_id, "\n\n".join(lines), {"inline_keyboard": [[inline_button("Yeni Adres Ekle", "favorite:add")]]})
+            lines = [t(uid, "saved_wallets")] + [f"{i+1}. {f['label']} · {f['asset']}\n{f['address']}" for i, f in enumerate(favs)]
+            send(chat_id, "\n\n".join(lines), {"inline_keyboard": [[inline_button(t(uid, "new_address"), "favorite:add")]]})
         return
-    if text == "Destek": send(chat_id, messages["support"], reply_keyboard()); return
+    if action == "support": send(chat_id, msg(uid, "support"), reply_keyboard(uid)); return
 
     state = user_state.get(uid)
     if not state:
-        send(chat_id, "Menüden bir işlem seçiniz.", reply_keyboard()); return
+        send(chat_id, t(uid, "menu_prompt"), reply_keyboard(uid)); return
     flow, step = state.get("flow"), state.get("step")
 
     if step == "set_pin":
-        pin = text.strip()
+        pin = text
         if not pin.isdigit() or not 4 <= len(pin) <= 6:
-            send(chat_id, "PIN 4-6 haneli rakamlardan oluşmalıdır.")
-            return
+            send(chat_id, t(uid, "pin_digits")); return
         state["new_pin"] = pin
         state["step"] = "confirm_new_pin"
-        send(chat_id, "Yeni PIN'inizi tekrar giriniz.")
-        return
+        send(chat_id, t(uid, "repeat_pin")); return
 
     if step == "confirm_new_pin":
-        if text.strip() != state.get("new_pin"):
+        if text != state.get("new_pin"):
             user_state.pop(uid, None)
-            send(chat_id, "PIN'ler eşleşmedi. İşlemi yeniden başlatınız.")
-            return
+            send(chat_id, t(uid, "pin_mismatch"), reply_keyboard(uid)); return
         changing = state.get("changing_pin", False)
         next_step = state.get("after_pin_setup")
-        users[uid]["pin_hash"] = hash_pin(text.strip())
+        users[uid]["pin_hash"] = hash_pin(text)
         users[uid]["session_version"] = int(users[uid].get("session_version", 1)) + 1
         users[uid]["last_pin_change"] = now()
         users[uid]["sessions"] = {"telegram": {"created_at": now(), "last_seen": now(), "active": True, "version": users[uid]["session_version"]}}
         users[uid]["pin_failed_attempts"] = 0
         save_json(FILES["users"], users)
         add_security_event(uid, "pin_changed" if changing else "pin_created", "Tüm eski oturumlar geçersiz kılındı")
+        state.pop("new_pin", None); state.pop("after_pin_setup", None)
         if next_step == "pin":
-            state.pop("new_pin", None)
-            state.pop("after_pin_setup", None)
-            send_second_confirmation(uid, state, messages["pin_saved"])
+            send_second_confirmation(uid, state, msg(uid, "pin_saved"))
         elif next_step:
-            state.pop("new_pin", None)
-            state.pop("after_pin_setup", None)
             state["step"] = next_step
-            send(chat_id, messages["pin_saved"])
+            send(chat_id, msg(uid, "pin_saved"))
         else:
             user_state.pop(uid, None)
-            send(chat_id, messages["pin_changed"] if changing else messages["pin_saved"], reply_keyboard())
+            send(chat_id, msg(uid, "pin_changed" if changing else "pin_saved"), reply_keyboard(uid))
         return
 
-    if step == "old_pin":
-        if not verify_pin(users[uid].get("pin_hash"), text.strip()):
+    if step in ("old_pin", "pin"):
+        if not verify_pin(users[uid].get("pin_hash"), text):
             users[uid]["pin_failed_attempts"] = int(users[uid].get("pin_failed_attempts", 0)) + 1
             save_json(FILES["users"], users)
             if users[uid]["pin_failed_attempts"] >= 3:
                 users[uid]["withdraw_locked"] = True
                 save_json(FILES["users"], users)
                 add_security_event(uid, "pin_lock", "3 hatalı PIN denemesi")
-                send(chat_id, "Üç hatalı PIN denemesi nedeniyle çekimleriniz geçici olarak kilitlendi.")
+                send(chat_id, t(uid, "pin_locked"))
             else:
-                send(chat_id, messages["pin_wrong"])
+                send(chat_id, msg(uid, "pin_wrong"))
             return
         users[uid]["pin_failed_attempts"] = 0
         save_json(FILES["users"], users)
-        state["step"] = "set_pin"
-        state["changing_pin"] = True
-        send(chat_id, "Yeni işlem PIN'inizi giriniz.")
-        return
-
-    if step == "pin":
-        if not verify_pin(users[uid].get("pin_hash"), text.strip()):
-            users[uid]["pin_failed_attempts"] = int(users[uid].get("pin_failed_attempts", 0)) + 1
-            save_json(FILES["users"], users)
-            if users[uid]["pin_failed_attempts"] >= 3:
-                users[uid]["withdraw_locked"] = True
-                save_json(FILES["users"], users)
-                add_security_event(uid, "pin_lock", "3 hatalı PIN denemesi")
-                send(chat_id, "Üç hatalı PIN denemesi nedeniyle çekimleriniz geçici olarak kilitlendi.")
-            else:
-                send(chat_id, messages["pin_wrong"])
-            return
-        users[uid]["pin_failed_attempts"] = 0
-        save_json(FILES["users"], users)
-        send_second_confirmation(uid, state)
+        if step == "old_pin":
+            state["step"] = "set_pin"; state["changing_pin"] = True
+            send(chat_id, t(uid, "new_pin"))
+        else:
+            send_second_confirmation(uid, state)
         return
 
     if step == "amount":
         amount = D(text)
         if amount <= 0:
-            send(chat_id, "Geçerli bir tutar giriniz."); return
+            send(chat_id, t(uid, "valid_amount")); return
         asset = state.get("asset") or state.get("from_asset")
         if flow in ("withdraw", "convert") and amount > balance(uid, asset):
-            send(chat_id, f"Yetersiz bakiye · {coin_fmt(balance(uid, asset), asset)}"); return
+            send(chat_id, f"{t(uid, 'insufficient')} · {ucoin(uid, balance(uid, asset), asset)}"); return
         if amount < min_amount(flow, asset):
-            send(chat_id, f"Minimum · {coin_fmt(min_amount(flow, asset), asset)}"); return
+            send(chat_id, f"{t(uid, 'minimum')} · {ucoin(uid, min_amount(flow, asset), asset)}"); return
         state["amount"] = str(amount)
+
         if flow == "deposit":
-            p = fee_percent("deposit", asset, uid)
-            fee = fee_amount(amount, p)
-            net = amount - fee
+            p = fee_percent("deposit", asset, uid); fee = fee_amount(amount, p); net = amount - fee
             state.update({"fee": str(fee), "net_amount": str(net)})
             if asset == "TL":
+                iban = str(settings.get("iban", "")).strip()
+                owner = str(settings.get("iban_owner", "")).strip()
+                if not iban or not owner:
+                    user_state.pop(uid, None)
+                    send(chat_id, t(uid, "bank_unavailable"), reply_keyboard(uid)); return
                 summary = order_summary(
-                    "TL Yükleme Özeti",
+                    t(uid, "deposit_summary_tl"),
                     [
-                        ("Banka", settings["bank_name"] or "-"),
-                        ("Alıcı", settings["iban_owner"] or "-"),
-                        ("IBAN", settings["iban"] or "-"),
-                        ("Yüklenecek", coin_fmt(amount, "TL")),
-                        ("Komisyon", coin_fmt(fee, "TL")),
-                        ("Bakiyeye Geçecek", coin_fmt(net, "TL")),
+                        (t(uid, "bank"), settings.get("bank_name") or "-"),
+                        (t(uid, "recipient"), owner),
+                        ("IBAN", iban),
+                        (t(uid, "to_deposit"), ucoin(uid, amount, "TL")),
+                        (t(uid, "fee"), ucoin(uid, fee, "TL")),
+                        (t(uid, "credited"), ucoin(uid, net, "TL")),
                     ],
-                    messages["iban_warning"],
+                    msg(uid, "iban_warning"),
                 )
-                send(chat_id, summary, {"inline_keyboard": [
-                    [copy_button("IBAN Kopyala", settings["iban"])],
-                    [inline_button("Ödemeyi Yaptım", "deposit_sent")],
-                    [inline_button("İptal", "cancel")],
-                ]})
+                buttons = []
+                copy = copy_button(t(uid, "iban_copy"), iban)
+                if copy: buttons.append([copy])
+                buttons += [[inline_button(t(uid, "payment_sent"), "deposit_sent")], [inline_button(t(uid, "cancel"), "cancel")]]
+                send(chat_id, summary, {"inline_keyboard": buttons})
             else:
-                address = settings.get(f"wallet_{asset}", "")
+                address = str(settings.get(f"wallet_{asset}", "")).strip()
+                if not address:
+                    user_state.pop(uid, None)
+                    send(chat_id, t(uid, "bank_unavailable"), reply_keyboard(uid)); return
                 network = settings.get(f"network_{asset}", asset)
-                state["network"] = network
-                state["qr_content"] = address
-                state["qr_caption"] = f"{asset} Yatırma QR Kodu · {network}"
+                state.update({"network": network, "qr_content": address, "qr_caption": f"{asset} {t(uid, 'qr_caption')} · {network}"})
                 card = order_summary(
-                    f"{asset} Yükleme Özeti",
+                    t(uid, "deposit_summary", asset=asset),
                     [
-                        ("Ağ", network),
-                        ("Yüklenecek", coin_fmt(amount, asset)),
-                        ("Komisyon", coin_fmt(fee, asset)),
-                        ("Bakiyeye Geçecek", coin_fmt(net, asset)),
-                        ("Yatırma Adresi", address or "-"),
+                        (t(uid, "network"), network),
+                        (t(uid, "to_deposit"), ucoin(uid, amount, asset)),
+                        (t(uid, "fee"), ucoin(uid, fee, asset)),
+                        (t(uid, "credited"), ucoin(uid, net, asset)),
+                        (t(uid, "deposit_address"), address),
                     ],
-                    messages["deposit_crypto_intro"],
+                    msg(uid, "deposit_crypto_intro"),
                 )
                 send(chat_id, card, {"inline_keyboard": [
-                    [inline_button("QR Göster", "show_deposit_qr")],
-                    [inline_button("Gönderimi Bildir", "deposit_sent")],
-                    [inline_button("İptal", "cancel")],
+                    [inline_button(t(uid, "show_qr"), "show_deposit_qr")],
+                    [inline_button(t(uid, "notify_transfer"), "deposit_sent")],
+                    [inline_button(t(uid, "cancel"), "cancel")],
                 ]})
             state["step"] = "waiting_sent"
             return
+
         if flow == "withdraw":
             if withdrawn_today(uid, asset) + amount > daily_limit(asset) > 0:
                 remaining = daily_limit(asset) - withdrawn_today(uid, asset)
-                send(chat_id, f"Günlük çekim limitiniz aşılıyor. Kalan limit: {coin_fmt(max(remaining, Decimal('0')), asset)}"); return
+                send(chat_id, t(uid, "daily_limit", amount=ucoin(uid, max(remaining, Decimal("0")), asset))); return
             p = fee_percent("withdraw", asset, uid); fee = fee_amount(amount, p); net = amount - fee
             state.update({"fee": str(fee), "net_amount": str(net)})
-            if asset == "TL": state["step"] = "bank_name"; send(chat_id, "Banka adını giriniz.")
+            if asset == "TL":
+                state["step"] = "bank_name"; send(chat_id, t(uid, "bank_name_question"))
             else:
                 favs = [f for f in users[uid].get("favorites", []) if f.get("asset") == asset]
                 if favs:
                     rows = [[inline_button(f["label"], f"favorite_use:{i}")] for i, f in enumerate(users[uid]["favorites"]) if f.get("asset") == asset]
-                    rows.append([inline_button("Yeni adres gir", "favorite_use:new")])
-                    send(chat_id, "Çekim adresini seçiniz.", {"inline_keyboard": rows}); state["step"] = "address_choice"
+                    rows.append([inline_button(t(uid, "enter_new_address"), "favorite_use:new")])
+                    send(chat_id, t(uid, "withdraw_address_select"), {"inline_keyboard": rows}); state["step"] = "address_choice"
                 else:
-                    state["step"] = "address"; send(chat_id, "Alıcı cüzdan adresini giriniz.")
+                    state["step"] = "address"; send(chat_id, t(uid, "wallet_address_question"))
             return
+
         if flow == "convert":
             to_asset = state["to_asset"]
-            source_rate = rate(asset)
-            target_rate = rate(to_asset)
-            if source_rate <= 0 or target_rate <= 0:
-                send(chat_id, "Geçersiz kur nedeniyle dönüşüm yapılamıyor.")
-                return
+            source_rate, target_rate = rate(asset), rate(to_asset)
+            if source_rate <= 0 or target_rate <= 0: send(chat_id, t(uid, "invalid_rate")); return
             p = fee_percent("convert", uid=uid)
-            if p < 0 or p >= 100:
-                send(chat_id, "Geçersiz komisyon oranı.")
-                return
-            tl_value = amount * source_rate
-            gross = tl_value / target_rate
-            fee = fee_amount(gross, p)
-            net = gross - fee
-            if net <= 0:
-                send(chat_id, "Komisyon sonrası geçerli tutar oluşmadı.")
-                return
+            if p < 0 or p >= 100: send(chat_id, t(uid, "invalid_fee")); return
+            tl_value = amount * source_rate; gross = tl_value / target_rate; fee = fee_amount(gross, p); net = gross - fee
+            if net <= 0: send(chat_id, t(uid, "invalid_net")); return
             state.update({"tl_value": str(tl_value), "gross_to": str(gross), "fee": str(fee), "net_amount": str(net)})
             state["preview"] = order_summary(
-                "Takas Özeti",
-                [
-                    ("Gönderilen", coin_fmt(amount, asset)),
-                    ("Alınacak", coin_fmt(net, to_asset)),
-                    ("Komisyon", coin_fmt(fee, to_asset)),
-                ],
-                "Kur ve tutarlar onay anındaki değerlerdir.",
+                t(uid, "swap_summary"),
+                [(t(uid, "sent"), ucoin(uid, amount, asset)), (t(uid, "to_receive"), ucoin(uid, net, to_asset)), (t(uid, "fee"), ucoin(uid, fee, to_asset))],
+                live_rate_note(uid),
             )
             require_pin(uid, state); return
 
     if flow == "deposit" and step == "sender_name":
-        state["sender_name"] = text.strip()
+        if len(text) < 3 or not any(ch.isalpha() for ch in text):
+            send(chat_id, t(uid, "sender_name_invalid")); return
+        state["sender_name"] = text
         state["step"] = "tx_note"
-        send(chat_id, "Ödeme açıklamasını veya dekont referansını giriniz. Yoksa YOK yazabilirsiniz.")
-        return
+        send(chat_id, t(uid, "reference_question")); return
+
     if flow == "deposit" and step == "tx_note":
-        data = {
-            "asset": state["asset"],
-            "amount": state["amount"],
-            "fee": state["fee"],
-            "net_amount": state["net_amount"],
-            "sender_name": state.get("sender_name", ""),
-            "tx_note": text.strip(),
-        }
-        rid = new_request(uid, "deposit", data)
-        change_pending(uid, state["asset"], D(state["net_amount"]), "deposit_pending", rid)
-        user_state.pop(uid, None)
-        send(chat_id, messages["deposit_received"] + f"\n\n{request_summary(rid)}", reply_keyboard())
-        if ADMIN_CHAT_ID:
-            send(ADMIN_CHAT_ID, "Yeni bakiye yükleme bildirimi\n\n" + request_summary(rid))
+        try:
+            rid = create_deposit_notice(uid, state, {"sender_name": state.get("sender_name", ""), "tx_note": text})
+            user_state.pop(uid, None)
+            send(chat_id, msg(uid, "deposit_received") + f"\n\n{request_summary(rid, uid)}", reply_keyboard(uid))
+            if ADMIN_CHAT_ID: send(ADMIN_CHAT_ID, "Yeni bakiye yükleme bildirimi\n\n" + request_summary(rid, ""))
+        except Exception as exc:
+            print("TL DEPOSIT NOTICE ERROR:", exc)
+            user_state.pop(uid, None)
+            send(chat_id, t(uid, "operation_failed"), reply_keyboard(uid))
         return
-    if flow == "withdraw" and step == "bank_name": state["bank_name"] = text.strip(); state["step"] = "iban"; send(chat_id, "IBAN bilginizi giriniz."); return
-    if flow == "withdraw" and step == "iban": state["iban"] = text.replace(" ", "").upper(); state["step"] = "name"; send(chat_id, "Hesap sahibinin ad ve soyadını giriniz."); return
+
+    if flow == "withdraw" and step == "bank_name": state["bank_name"] = text; state["step"] = "iban"; send(chat_id, t(uid, "iban_question")); return
+    if flow == "withdraw" and step == "iban": state["iban"] = text.replace(" ", "").upper(); state["step"] = "name"; send(chat_id, t(uid, "account_name_question")); return
     if flow == "withdraw" and step == "name":
-        state["name"] = text.strip()
-        state["preview"] = order_summary(
-            "TL Çekim Özeti",
-            [
-                ("Tutar", coin_fmt(state["amount"], state["asset"])),
-                ("Komisyon", coin_fmt(state["fee"], state["asset"])),
-                ("Alıcıya Geçecek", coin_fmt(state["net_amount"], state["asset"])),
-                ("IBAN", state["iban"]),
-                ("Alıcı", state["name"]),
-            ],
-        )
-        require_pin(uid, state)
-        return
+        state["name"] = text
+        state["preview"] = order_summary(t(uid, "withdraw_summary_tl"), [
+            (t(uid, "amount"), ucoin(uid, state["amount"], state["asset"])),
+            (t(uid, "fee"), ucoin(uid, state["fee"], state["asset"])),
+            (t(uid, "recipient_gets"), ucoin(uid, state["net_amount"], state["asset"])),
+            ("IBAN", state["iban"]), (t(uid, "recipient"), state["name"]),
+        ])
+        require_pin(uid, state); return
     if flow == "withdraw" and step == "address":
-        state["address"] = text.strip()
-        state["preview"] = order_summary(
-            f"{state['asset']} Çekim Özeti",
-            [
-                ("Tutar", coin_fmt(state["amount"], state["asset"])),
-                ("Komisyon", coin_fmt(state["fee"], state["asset"])),
-                ("Gönderilecek", coin_fmt(state["net_amount"], state["asset"])),
-                ("Cüzdan Adresi", state["address"]),
-            ],
-        )
-        require_pin(uid, state)
-        return
-    if flow == "favorite_add" and step == "label": state["label"] = text.strip(); state["step"] = "address"; send(chat_id, "Cüzdan adresini giriniz."); return
+        state["address"] = text
+        state["preview"] = order_summary(t(uid, "withdraw_summary", asset=state["asset"]), [
+            (t(uid, "amount"), ucoin(uid, state["amount"], state["asset"])),
+            (t(uid, "fee"), ucoin(uid, state["fee"], state["asset"])),
+            (t(uid, "to_send"), ucoin(uid, state["net_amount"], state["asset"])),
+            (t(uid, "wallet_address"), state["address"]),
+        ])
+        require_pin(uid, state); return
+    if flow == "favorite_add" and step == "label": state["label"] = text; state["step"] = "address"; send(chat_id, t(uid, "favorite_address")); return
     if flow == "favorite_add" and step == "address":
-        users[uid]["favorites"].append({"label": state["label"], "asset": state["asset"], "address": text.strip(), "created_at": now()}); save_json(FILES["users"], users); user_state.pop(uid, None); send(chat_id, "Adres kaydedildi.", reply_keyboard()); return
+        users[uid]["favorites"].append({"label": state["label"], "asset": state["asset"], "address": text, "created_at": now()})
+        save_json(FILES["users"], users); user_state.pop(uid, None); send(chat_id, t(uid, "favorite_saved"), reply_keyboard(uid)); return
 
 
 def handle_callback(chat_id, username, data, cb_id):
-    answer(cb_id)
-    uid = str(chat_id); get_user(chat_id, username)
-    if data == "cancel": user_state.pop(uid, None); send(chat_id, messages["request_cancelled"], reply_keyboard()); return
+    uid = str(chat_id)
+    get_user(chat_id, username)
+
+    if data.startswith("lang:"):
+        lang = data.split(":", 1)[1]
+        if lang not in ("tr", "en"):
+            answer(cb_id); return
+        users[uid]["language"] = lang
+        save_json(FILES["users"], users)
+        answer(cb_id, BOT_TEXTS[lang]["language_saved"])
+        user_state.pop(uid, None)
+        start_user(chat_id, username)
+        return
+
+    if data != "second_confirm":
+        answer(cb_id)
+    if users[uid].get("language") not in ("tr", "en"):
+        ask_language(chat_id); return
+    if data == "cancel": user_state.pop(uid, None); send(chat_id, msg(uid, "request_cancelled"), reply_keyboard(uid)); return
     if data == "show_deposit_qr":
         state = user_state.get(uid, {})
         content = str(state.get("qr_content", "")).strip()
-        if not content:
-            send(chat_id, "QR bilgisi bulunamadı.")
-            return
-        send_qr(chat_id, content, state.get("qr_caption", "Yatırma QR Kodu"))
-        return
+        if not content: send(chat_id, t(uid, "qr_missing")); return
+        send_qr(chat_id, content, state.get("qr_caption", t(uid, "qr_caption"))); return
     if data.startswith("detail:"):
         rid = data.split(":", 1)[1]
         if requests_db.get(rid, {}).get("user_id") == uid:
-            send(chat_id, receipt_text(rid), {"inline_keyboard": [[inline_button("Makbuzu Yeniden Göster", f"detail:{rid}")]]})
+            send(chat_id, receipt_text(rid, uid), {"inline_keyboard": [[inline_button(t(uid, "completed"), f"detail:{rid}")]]})
         return
     if data.startswith("deposit_asset:"):
-        asset = data.split(":", 1)[1]; user_state[uid] = {"flow": "deposit", "step": "amount", "asset": asset}; send(chat_id, f"{asset} için {messages['amount_question']}\nMinimum: {coin_fmt(min_amount('deposit', asset), asset)}"); return
+        asset = data.split(":", 1)[1]
+        current = user_state.get(uid, {})
+        idem = current.get("idempotency_key", secrets.token_urlsafe(24))
+        user_state[uid] = {"flow": "deposit", "step": "amount", "asset": asset, "idempotency_key": idem}
+        send(chat_id, f"{asset}: {msg(uid, 'amount_question')}\n{t(uid, 'minimum')}: {ucoin(uid, min_amount('deposit', asset), asset)}"); return
     if data == "deposit_sent":
         state = user_state.get(uid, {})
-        if not state:
-            send(chat_id, "İşlem oturumu bulunamadı.")
-            return
+        if state.get("flow") != "deposit" or state.get("step") != "waiting_sent" or not state.get("amount"):
+            send(chat_id, t(uid, "deposit_session_missing"), reply_keyboard(uid)); return
         if state.get("asset") == "TL":
             state["step"] = "sender_name"
-            send(chat_id, "Ödemeyi gönderen kişinin ad ve soyadını giriniz.")
+            send(chat_id, t(uid, "sender_name_question"))
         else:
-            data = {
-                "asset": state["asset"],
-                "amount": state["amount"],
-                "fee": state["fee"],
-                "net_amount": state["net_amount"],
-                "network": state.get("network", ""),
-            }
-            rid = new_request(uid, "deposit", data)
-            change_pending(uid, state["asset"], D(state["net_amount"]), "deposit_pending", rid)
-            user_state.pop(uid, None)
-            send(chat_id, messages["deposit_received"] + f"\n\n{request_summary(rid)}", reply_keyboard())
-            if ADMIN_CHAT_ID:
-                send(ADMIN_CHAT_ID, "Yeni bakiye yükleme bildirimi\n\n" + request_summary(rid))
+            try:
+                rid = create_deposit_notice(uid, state, {"network": state.get("network", "")})
+                user_state.pop(uid, None)
+                send(chat_id, msg(uid, "deposit_received") + f"\n\n{request_summary(rid, uid)}", reply_keyboard(uid))
+                if ADMIN_CHAT_ID: send(ADMIN_CHAT_ID, "Yeni bakiye yükleme bildirimi\n\n" + request_summary(rid, ""))
+            except Exception as exc:
+                print("CRYPTO DEPOSIT NOTICE ERROR:", exc)
+                user_state.pop(uid, None)
+                send(chat_id, t(uid, "operation_failed"), reply_keyboard(uid))
         return
     if data.startswith("withdraw_asset:"):
         asset = data.split(":", 1)[1]
-        if balance(uid, asset) <= 0: send(chat_id, messages["no_balance"]); return
-        user_state[uid] = {"flow": "withdraw", "step": "amount", "asset": asset}; send(chat_id, f"Çekilebilir bakiye: {coin_fmt(balance(uid, asset), asset)}\nMinimum çekim: {coin_fmt(min_amount('withdraw', asset), asset)}\n\nÇekmek istediğiniz tutarı giriniz."); return
+        if balance(uid, asset) <= 0: send(chat_id, msg(uid, "no_balance")); return
+        user_state[uid] = {"flow": "withdraw", "step": "amount", "asset": asset}
+        send(chat_id, f"{t(uid, 'available_balance')}: {ucoin(uid, balance(uid, asset), asset)}\n{t(uid, 'min_withdraw')}: {ucoin(uid, min_amount('withdraw', asset), asset)}\n\n{msg(uid, 'amount_question')}"); return
     if data.startswith("convert_from:"):
         asset = data.split(":", 1)[1]
-        if balance(uid, asset) <= 0: send(chat_id, messages["no_balance"]); return
+        if balance(uid, asset) <= 0: send(chat_id, msg(uid, "no_balance")); return
         user_state[uid] = {"flow": "convert", "step": "to_asset", "from_asset": asset}
-        send(chat_id, f"Dönüştürülecek: {coin_fmt(balance(uid, asset), asset)} kullanılabilir.", asset_keyboard("convert_to", ASSETS, asset)); return
+        send(chat_id, t(uid, "convert_available", amount=ucoin(uid, balance(uid, asset), asset)), asset_keyboard("convert_to", ASSETS, asset, uid)); return
     if data.startswith("convert_to:"):
         to_asset = data.split(":", 1)[1]
         state = user_state.get(uid, {})
-        if state.get("flow") != "convert" or not state.get("from_asset"):
-            send(chat_id, "Dönüşüm oturumu bulunamadı.")
-            return
+        if state.get("flow") != "convert" or not state.get("from_asset"): send(chat_id, t(uid, "convert_session_missing")); return
         state.update({"to_asset": to_asset, "step": "amount"})
         source = state["from_asset"]
-        send(
-            chat_id,
-            f"Bakiye · {coin_fmt(balance(uid, source), source)}\n"
-            f"Minimum · {coin_fmt(min_amount('convert', source), source)}\n\n"
-            "Tutarı girin veya tüm bakiyeyi dönüştürün.",
-            {"inline_keyboard": [
-                [inline_button("Tüm Bakiyeyi Dönüştür", "convert_all")],
-                [inline_button("İptal", "cancel")],
-            ]},
-        )
-        return
+        send(chat_id, f"{t(uid, 'balance')} · {ucoin(uid, balance(uid, source), source)}\n{t(uid, 'minimum')} · {ucoin(uid, min_amount('convert', source), source)}\n\n{t(uid, 'enter_or_all')}", {"inline_keyboard": [[inline_button(t(uid, "convert_all"), "convert_all")], [inline_button(t(uid, "cancel"), "cancel")]]}); return
     if data == "convert_all":
         state = user_state.get(uid, {})
-        if state.get("flow") != "convert" or not state.get("from_asset") or not state.get("to_asset"):
-            send(chat_id, "Dönüşüm oturumu bulunamadı.")
-            return
-
-        source = state["from_asset"]
-        target = state["to_asset"]
+        if state.get("flow") != "convert" or not state.get("from_asset") or not state.get("to_asset"): send(chat_id, t(uid, "convert_session_missing")); return
+        source, target = state["from_asset"], state["to_asset"]
         amount = balance(uid, source)
-        if amount <= 0:
-            send(chat_id, messages["no_balance"])
-            return
-        if amount < min_amount("convert", source):
-            send(chat_id, f"Minimum · {coin_fmt(min_amount('convert', source), source)}")
-            return
-
-        source_rate = rate(source)
-        target_rate = rate(target)
-        if source_rate <= 0 or target_rate <= 0:
-            send(chat_id, "Geçersiz kur nedeniyle dönüşüm yapılamıyor.")
-            return
-
+        if amount <= 0: send(chat_id, msg(uid, "no_balance")); return
+        if amount < min_amount("convert", source): send(chat_id, f"{t(uid, 'minimum')} · {ucoin(uid, min_amount('convert', source), source)}"); return
+        source_rate, target_rate = rate(source), rate(target)
+        if source_rate <= 0 or target_rate <= 0: send(chat_id, t(uid, "invalid_rate")); return
         fee_rate = fee_percent("convert", uid=uid)
-        if fee_rate < 0 or fee_rate >= 100:
-            send(chat_id, "Geçersiz komisyon oranı.")
-            return
-
-        tl_value = amount * source_rate
-        gross = tl_value / target_rate
-        fee = fee_amount(gross, fee_rate)
-        net = gross - fee
-        if net <= 0:
-            send(chat_id, "Komisyon sonrası geçerli tutar oluşmadı.")
-            return
-
-        state.update({
-            "amount": str(amount),
-            "tl_value": str(tl_value),
-            "gross_to": str(gross),
-            "fee": str(fee),
-            "net_amount": str(net),
-        })
-        state["preview"] = order_summary(
-            "Takas Özeti",
-            [
-                ("Gönderilen", coin_fmt(amount, source)),
-                ("Alınacak", coin_fmt(net, target)),
-                ("Komisyon", coin_fmt(fee, target)),
-            ],
-            "Tüm kullanılabilir bakiye dönüştürülecektir. Kur son onayda yeniden hesaplanır.",
-        )
-        require_pin(uid, state)
-        return
+        if fee_rate < 0 or fee_rate >= 100: send(chat_id, t(uid, "invalid_fee")); return
+        tl_value = amount * source_rate; gross = tl_value / target_rate; fee = fee_amount(gross, fee_rate); net = gross - fee
+        if net <= 0: send(chat_id, t(uid, "invalid_net")); return
+        state.update({"amount": str(amount), "tl_value": str(tl_value), "gross_to": str(gross), "fee": str(fee), "net_amount": str(net)})
+        state["preview"] = order_summary(t(uid, "swap_summary"), [(t(uid, "sent"), ucoin(uid, amount, source)), (t(uid, "to_receive"), ucoin(uid, net, target)), (t(uid, "fee"), ucoin(uid, fee, target))], t(uid, "all_balance_note") + " " + live_rate_note(uid))
+        require_pin(uid, state); return
     if data == "second_confirm":
         state = user_state.get(uid, {})
-        if not consume_confirmation(state):
-            answer(cb_id, "Bu onay daha önce kullanıldı.")
-            return
+        if not consume_confirmation(state): answer(cb_id, t(uid, "already_confirmed")); return
+        answer(cb_id)
         try:
-            if state.get("flow") == "withdraw":
-                finalize_withdraw(uid, state)
+            if state.get("flow") == "withdraw": finalize_withdraw(uid, state)
             elif state.get("flow") == "convert":
-                required = ("from_asset", "to_asset", "amount")
-                if any(not state.get(key) for key in required):
-                    raise ValueError("Dönüşüm bilgileri eksik. İşlemi yeniden başlatınız.")
+                if any(not state.get(key) for key in ("from_asset", "to_asset", "amount")): raise ValueError(t(uid, "missing_convert"))
                 rid = atomic_convert(uid, state)
                 user_state.pop(uid, None)
-                send(chat_id, receipt_text(rid), reply_keyboard())
-            else:
-                raise ValueError("Onaylanacak işlem bulunamadı. İşlemi yeniden başlatınız.")
+                send(chat_id, receipt_text(rid, uid), reply_keyboard(uid))
+            else: raise ValueError(t(uid, "nothing_to_confirm"))
         except ValueError as exc:
-            user_state.pop(uid, None)
-            send(chat_id, str(exc), reply_keyboard())
+            user_state.pop(uid, None); send(chat_id, str(exc), reply_keyboard(uid))
         except Exception as exc:
-            print("İŞLEM ONAY HATASI:", exc)
-            user_state.pop(uid, None)
-            send(chat_id, "İşlem tamamlanamadı. Lütfen işlemi yeniden başlatınız.", reply_keyboard())
+            print("TRANSACTION CONFIRM ERROR:", exc); user_state.pop(uid, None); send(chat_id, t(uid, "operation_failed"), reply_keyboard(uid))
         return
-    if data == "favorite:add": user_state[uid] = {"flow": "favorite_add", "step": "asset"}; send(chat_id, "Kayıtlı adresin para birimini seçiniz.", asset_keyboard("favorite_asset", CRYPTO_ASSETS)); return
-    if data.startswith("favorite_asset:"): user_state[uid] = {"flow": "favorite_add", "step": "label", "asset": data.split(":",1)[1]}; send(chat_id, "Bu adres için bir isim giriniz."); return
+    if data == "favorite:add": user_state[uid] = {"flow": "favorite_add", "step": "asset"}; send(chat_id, t(uid, "favorite_asset"), asset_keyboard("favorite_asset", CRYPTO_ASSETS, uid=uid)); return
+    if data.startswith("favorite_asset:"): user_state[uid] = {"flow": "favorite_add", "step": "label", "asset": data.split(":",1)[1]}; send(chat_id, t(uid, "favorite_label")); return
     if data.startswith("favorite_use:"):
         choice = data.split(":", 1)[1]; state = user_state.get(uid, {})
-        if choice == "new": state["step"] = "address"; send(chat_id, "Alıcı cüzdan adresini giriniz.")
+        if choice == "new": state["step"] = "address"; send(chat_id, t(uid, "wallet_address_question"))
         else:
-            fav = users[uid]["favorites"][int(choice)]; state["address"] = fav["address"]
-            state["preview"] = order_summary(
-                f"{state['asset']} Çekim Özeti",
-                [
-                    ("Tutar", coin_fmt(state["amount"], state["asset"])),
-                    ("Komisyon", coin_fmt(state["fee"], state["asset"])),
-                    ("Gönderilecek", coin_fmt(state["net_amount"], state["asset"])),
-                    ("Cüzdan Adresi", state["address"]),
-                ],
-            )
+            try: fav = users[uid]["favorites"][int(choice)]
+            except (ValueError, IndexError): send(chat_id, t(uid, "session_missing")); return
+            state["address"] = fav["address"]
+            state["preview"] = order_summary(t(uid, "withdraw_summary", asset=state["asset"]), [(t(uid, "amount"), ucoin(uid, state["amount"], state["asset"])), (t(uid, "fee"), ucoin(uid, state["fee"], state["asset"])), (t(uid, "to_send"), ucoin(uid, state["net_amount"], state["asset"])), (t(uid, "wallet_address"), state["address"])])
             require_pin(uid, state)
         return
     if data == "security:set_pin":
-        if users[uid].get("pin_hash"):
-            user_state[uid] = {"flow": "set_pin", "step": "old_pin"}
-            send(chat_id, "Mevcut işlem PIN'inizi giriniz.")
-        else:
-            user_state[uid] = {"flow": "set_pin", "step": "set_pin"}
-            send(chat_id, messages["pin_set_question"])
+        if users[uid].get("pin_hash"): user_state[uid] = {"flow": "set_pin", "step": "old_pin"}; send(chat_id, t(uid, "current_pin"))
+        else: user_state[uid] = {"flow": "set_pin", "step": "set_pin"}; send(chat_id, msg(uid, "pin_set_question"))
         return
     if data == "security:notifications":
         n = users[uid]["notifications"]
-        kb = {"inline_keyboard": [[inline_button(f"İşlemler: {'Açık' if n['transactions'] else 'Kapalı'}", "notify:transactions")], [inline_button(f"Güvenlik: {'Açık' if n['security'] else 'Kapalı'}", "notify:security")], [inline_button(f"Duyurular: {'Açık' if n['announcements'] else 'Kapalı'}", "notify:announcements")]]}
-        send(chat_id, "Bildirim tercihlerinizi düzenleyiniz.", kb); return
+        kb = {"inline_keyboard": [
+            [inline_button(f"{t(uid, 'transactions')}: {t(uid, 'on') if n['transactions'] else t(uid, 'off')}", "notify:transactions")],
+            [inline_button(f"{t(uid, 'security')}: {t(uid, 'on') if n['security'] else t(uid, 'off')}", "notify:security")],
+            [inline_button(f"{t(uid, 'announcements')}: {t(uid, 'on') if n['announcements'] else t(uid, 'off')}", "notify:announcements")],
+        ]}
+        send(chat_id, t(uid, "notifications_edit"), kb); return
     if data.startswith("notify:"):
-        key = data.split(":", 1)[1]; users[uid]["notifications"][key] = not users[uid]["notifications"].get(key, True); save_json(FILES["users"], users); send(chat_id, "Bildirim tercihi güncellendi."); return
+        key = data.split(":", 1)[1]
+        if key in users[uid]["notifications"]:
+            users[uid]["notifications"][key] = not users[uid]["notifications"].get(key, True)
+            save_json(FILES["users"], users)
+        send(chat_id, t(uid, "notification_updated")); return
     if data == "security:logout_sessions":
-        users[uid]["sessions"] = {"telegram": {"created_at": now(), "last_seen": now(), "active": True}}; save_json(FILES["users"], users); send(chat_id, "Diğer oturum kayıtları kapatıldı."); return
-
+        users[uid]["sessions"] = {"telegram": {"created_at": now(), "last_seen": now(), "active": True}}
+        save_json(FILES["users"], users); send(chat_id, t(uid, "sessions_closed")); return
 
 def load_offset():
     return load_json(OFFSET_FILE, {"offset": None}).get("offset")
@@ -1821,7 +2122,7 @@ def set_admin_notice(message, kind="success"):
     session["admin_notice"] = {"message": str(message), "kind": kind}
 
 
-EDITABLE_SETTING_KEYS = [key for key in DEFAULT_SETTINGS if not key.startswith("icon_")]
+EDITABLE_SETTING_KEYS = [key for key in DEFAULT_SETTINGS if not key.startswith("icon_") and key not in {"rates_source", "rates_last_updated", "rates_last_error"}]
 
 
 @app.route("/admin", methods=["GET", "POST"])
@@ -1851,7 +2152,7 @@ def admin():
                     elif r["type"] == "withdraw":
                         change_pending(uid, r["asset"], -D(r["amount"]), "withdraw_pending_release", rid)
                     r["status"] = "completed"; r["completed_at"] = now()
-                    send(uid, "İşleminiz tamamlandı.\n\n" + receipt_text(rid), reply_keyboard())
+                    send(uid, receipt_text(rid, uid), reply_keyboard(uid))
                     set_admin_notice(f"#{rid} tamamlandı.")
                 elif action == "reject_request" and r.get("status") in ("pending", "processing"):
                     if r["type"] == "withdraw":
@@ -1860,7 +2161,7 @@ def admin():
                     elif r["type"] == "deposit":
                         change_pending(uid, r["asset"], -D(r["net_amount"]), "deposit_pending_cancel", rid)
                     r["status"] = "rejected"; r["rejected_at"] = now()
-                    send(uid, f"İşleminiz reddedildi.\n\nİşlem No: #{rid}", reply_keyboard())
+                    send(uid, f"{t(uid, 'request_rejected')}\n\n#{rid}", reply_keyboard(uid))
                     set_admin_notice(f"#{rid} reddedildi.")
                 else:
                     set_admin_notice("İşlem durumu değiştirilemedi.", "error")
@@ -1921,7 +2222,7 @@ def admin():
                 count = 0
                 for uid, u in users.items():
                     if u.get("notifications", {}).get("announcements", True):
-                        send(uid, "📢 " + announcement, reply_keyboard()); count += 1
+                        send(uid, "📢 " + announcement, reply_keyboard(uid)); count += 1
                 add_admin_log("broadcast", f"{count} kullanıcıya gönderildi")
                 set_admin_notice(f"Duyuru {count} kullanıcıya gönderildi.")
             else:
@@ -2053,5 +2354,6 @@ def admin_user(uid):
 
 if __name__ == "__main__":
     validate_runtime_config()
-    threading.Thread(target=bot_loop, daemon=True).start()
+    threading.Thread(target=bot_loop, daemon=True, name="telegram-bot").start()
+    threading.Thread(target=rate_update_loop, daemon=True, name="live-rates").start()
     app.run(host="0.0.0.0", port=PORT)
