@@ -1,6 +1,7 @@
 import os
 import io
 import base64
+import binascii
 import time
 import json
 import random
@@ -85,7 +86,7 @@ WITHDRAW_SIGNER_TOKEN = os.getenv("WITHDRAW_SIGNER_TOKEN", "").strip()
 WITHDRAW_STATUS_URL = os.getenv("WITHDRAW_STATUS_URL", "").strip()
 EXCHANGE_INTERNAL_TOKEN = os.getenv("EXCHANGE_INTERNAL_TOKEN", "").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
-BUILD_VERSION = "NERLO-2026-06-25-WITHDRAW-GUARD-V3-FRESH"
+BUILD_VERSION = "NERLO-2026-06-25-PRO-PANEL-V5-FRESH"
 
 CONFIRMATION_THRESHOLDS = {
     "BTC": max(1, int(os.getenv("BTC_CONFIRMATIONS", "3"))),
@@ -733,6 +734,184 @@ def _normalize_evm_address(value):
     if text and not text.startswith("0x"):
         text = "0x" + text
     return text
+
+def _decode_segwit_address(value, expected_hrp):
+    text = str(value or "").strip()
+    if not (8 <= len(text) <= 90) or (text.lower() != text and text.upper() != text):
+        raise ValueError("Geçersiz Bech32 adresi")
+    text = text.lower()
+    separator = text.rfind("1")
+    if separator < 1 or separator + 7 > len(text):
+        raise ValueError("Geçersiz Bech32 yapısı")
+    hrp = text[:separator]
+    if hrp != expected_hrp:
+        raise ValueError("Adres ağı uyuşmuyor")
+    try:
+        data = [_BECH32_ALPHABET.index(char) for char in text[separator + 1:]]
+    except ValueError as exc:
+        raise ValueError("Geçersiz Bech32 karakteri") from exc
+    polymod = _bech32_polymod(_bech32_hrp_expand(hrp) + data)
+    encoding = "bech32" if polymod == 1 else ("bech32m" if polymod == 0x2BC830A3 else "")
+    if not encoding:
+        raise ValueError("Bech32 checksum doğrulanamadı")
+    payload = data[:-6]
+    if not payload:
+        raise ValueError("SegWit verisi eksik")
+    witness_version = payload[0]
+    if witness_version > 16:
+        raise ValueError("Geçersiz witness sürümü")
+    program = bytes(_convert_bits(payload[1:], 5, 8, False))
+    if not 2 <= len(program) <= 40:
+        raise ValueError("Geçersiz witness programı")
+    if witness_version == 0:
+        if encoding != "bech32" or len(program) not in (20, 32):
+            raise ValueError("Geçersiz SegWit v0 adresi")
+    elif encoding != "bech32m":
+        raise ValueError("SegWit v1+ adresi Bech32m olmalıdır")
+    return text
+
+
+def _validate_evm_checksum(value):
+    text = str(value or "").strip()
+    if not re.fullmatch(r"0x[0-9a-fA-F]{40}", text):
+        return False
+    body = text[2:]
+    if body.islower() or body.isupper():
+        return True
+    digest = _keccak256(body.lower().encode("ascii")).hex()
+    for index, char in enumerate(body):
+        if char.isalpha():
+            should_upper = int(digest[index], 16) >= 8
+            if char.isupper() != should_upper:
+                return False
+    return True
+
+
+_CRYPTONOTE_DECODED_BLOCK_SIZES = {2: 1, 3: 2, 5: 3, 6: 4, 7: 5, 9: 6, 10: 7, 11: 8}
+
+
+def _cryptonote_base58_decode(value):
+    text = str(value or "").strip()
+    if not text or any(char not in _B58_INDEX for char in text):
+        raise ValueError("Geçersiz Monero Base58 adresi")
+    output = bytearray()
+    for offset in range(0, len(text), 11):
+        block = text[offset:offset + 11]
+        decoded_size = _CRYPTONOTE_DECODED_BLOCK_SIZES.get(len(block))
+        if decoded_size is None:
+            raise ValueError("Geçersiz Monero adres uzunluğu")
+        number = 0
+        for char in block:
+            number = number * 58 + _B58_INDEX[char]
+        if number >= 1 << (8 * decoded_size):
+            raise ValueError("Geçersiz Monero adres bloğu")
+        output.extend(number.to_bytes(decoded_size, "big"))
+    return bytes(output)
+
+
+def _crc16_xmodem(data):
+    crc = 0
+    for byte in bytes(data):
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+def validate_wallet_address(asset, value):
+    """Validate and normalize a withdrawal/saved wallet address.
+
+    This proves that the text has a valid address format and checksum where the
+    network provides one. It does not prove ownership of the destination.
+    """
+    asset = str(asset or "").upper()
+    text = re.sub(r"\s+", "", str(value or "").strip())
+    if asset == "TL":
+        return True, text, ""
+    if not text or len(text) > 160:
+        return False, "", "Geçerli bir cüzdan adresi giriniz."
+
+    try:
+        if asset == "BTC":
+            if text.lower().startswith("bc1"):
+                return True, _decode_segwit_address(text, "bc"), ""
+            payload = _b58check_decode(text)
+            if len(payload) != 21 or payload[0] not in (0x00, 0x05):
+                raise ValueError("Bitcoin ağıyla uyumsuz adres")
+            return True, text, ""
+
+        if asset == "LTC":
+            if text.lower().startswith("ltc1"):
+                return True, _decode_segwit_address(text, "ltc"), ""
+            payload = _b58check_decode(text)
+            if len(payload) != 21 or payload[0] not in (0x30, 0x05, 0x32):
+                raise ValueError("Litecoin ağıyla uyumsuz adres")
+            return True, text, ""
+
+        if asset == "ETH":
+            normalized = text if text.startswith("0x") else "0x" + text
+            if not _validate_evm_checksum(normalized):
+                raise ValueError("Ethereum adresi veya checksum geçersiz")
+            return True, normalized, ""
+
+        if asset in ("TRX", "USDT"):
+            payload = _b58check_decode(text)
+            if len(payload) != 21 or payload[0] != 0x41 or not text.startswith("T"):
+                raise ValueError("TRON / TRC20 adresi geçersiz")
+            return True, text, ""
+
+        if asset == "XMR":
+            raw = _cryptonote_base58_decode(text)
+            if len(raw) not in (69, 77):
+                raise ValueError("Monero adres uzunluğu geçersiz")
+            payload, checksum = raw[:-4], raw[-4:]
+            if not secrets.compare_digest(checksum, _keccak256(payload)[:4]):
+                raise ValueError("Monero adres checksum geçersiz")
+            if payload[0] not in (18, 19, 42):
+                raise ValueError("Monero mainnet adresi bekleniyor")
+            return True, text, ""
+
+        if asset == "TON":
+            if re.fullmatch(r"(?:-1|0):[0-9a-fA-F]{64}", text):
+                workchain, account = text.split(":", 1)
+                return True, f"{workchain}:{account.lower()}", ""
+            padded = text + "=" * ((4 - len(text) % 4) % 4)
+            raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+            if len(raw) != 36:
+                raise ValueError("TON friendly adres uzunluğu geçersiz")
+            expected_crc = _crc16_xmodem(raw[:-2]).to_bytes(2, "big")
+            if not secrets.compare_digest(raw[-2:], expected_crc):
+                raise ValueError("TON adres checksum geçersiz")
+            if (raw[0] & 0x7F) not in (0x11, 0x51) or raw[1] not in (0x00, 0xFF):
+                raise ValueError("TON adres başlığı geçersiz")
+            return True, text, ""
+
+        raise ValueError("Bu varlık için adres doğrulama desteklenmiyor")
+    except (ValueError, binascii.Error, UnicodeEncodeError):
+        network = {
+            "BTC": "Bitcoin", "LTC": "Litecoin", "ETH": "Ethereum",
+            "TRX": "TRON", "USDT": "TRC20", "XMR": "Monero", "TON": "TON",
+        }.get(asset, asset)
+        return False, "", f"Geçersiz {network} cüzdan adresi. Adresi ve ağı kontrol ediniz."
+
+
+def wallet_address_prompt(uid, asset):
+    network = {
+        "BTC": "Bitcoin (BTC)",
+        "LTC": "Litecoin (LTC)",
+        "ETH": "Ethereum (ERC20)",
+        "TRX": "TRON",
+        "USDT": "TRON / TRC20",
+        "XMR": "Monero",
+        "TON": "TON",
+    }.get(str(asset or "").upper(), str(asset or "").upper())
+    return (
+        f"{network} ağındaki alıcı cüzdan adresini giriniz.\n\n"
+        "Adres formatı ve ağ uyumu otomatik kontrol edilecektir."
+        if lang_of(uid) == "tr"
+        else f"Enter the recipient wallet address on {network}.\n\n"
+             "The address format and network will be checked automatically."
+    )
 
 
 def _asset_chain(asset):
@@ -3059,14 +3238,13 @@ def copy_button(text, value):
 
 
 def order_summary(title, rows, note=""):
-    clean_rows = [(str(label), str(value)) for label, value in rows if value not in (None, "")]
-    lines = [f"◆ {title}", "━━━━━━━━━━━━━━━━━━"]
+    clean_rows = [(str(label).strip(), str(value).strip()) for label, value in rows if value not in (None, "")]
+    lines = ["NERLO WALLET", str(title).upper(), "────────────────────"]
     for label, value in clean_rows:
-        lines.extend([label, f"  {value}", ""])
-    if lines and lines[-1] == "":
-        lines.pop()
+        lines.append(f"{label.upper()}")
+        lines.append(value)
     if note:
-        lines.extend(["━━━━━━━━━━━━━━━━━━", f"ℹ️ {note}"])
+        lines.extend(["────────────────────", f"Bilgi · {str(note).strip()}"])
     return "\n".join(lines)
 
 
@@ -3249,6 +3427,11 @@ def atomic_withdraw(uid, state):
     uid = str(uid)
     amount = D(state["amount"])
     asset = state["asset"]
+    if asset != "TL":
+        valid, normalized_address, address_error = validate_wallet_address(asset, state.get("address", ""))
+        if not valid:
+            raise ValueError(address_error)
+        state["address"] = normalized_address
     if amount <= 0:
         raise ValueError("Geçersiz çekim tutarı")
     if balance(uid, asset) < amount:
@@ -3560,31 +3743,42 @@ def request_summary(rid, lang_uid=None):
     if not r:
         return t(uid, "not_found")
 
+    is_tr = lang_of(uid) == "tr"
     kind = {
         "deposit": t(uid, "deposit_kind"),
         "withdraw": t(uid, "withdraw_kind"),
         "convert": t(uid, "convert_kind"),
     }.get(r.get("type"), t(uid, "transaction_kind"))
-
+    status = localized_status(uid, r.get("status"))
     rows = [
-        ("İşlem No" if lang_of(uid) == "tr" else "Transaction ID", f"#{rid}"),
-        ("Durum" if lang_of(uid) == "tr" else "Status", localized_status(uid, r.get("status"))),
+        ("İşlem No" if is_tr else "Transaction ID", f"#{rid}"),
+        ("Durum" if is_tr else "Status", status),
     ]
 
     if r.get("type") == "deposit":
         asset = r.get("asset")
-        rows.append((t(uid, "credited"), ucoin(uid, r.get("net_amount"), asset)))
+        rows.extend([
+            (t(uid, "amount"), ucoin(uid, r.get("amount"), asset)),
+            (t(uid, "fee"), ucoin(uid, r.get("fee"), asset)),
+            (t(uid, "credited"), ucoin(uid, r.get("net_amount"), asset)),
+        ])
         if asset == "TL":
             rows.extend([
                 (t(uid, "sender"), r.get("sender_name", "-")),
                 (t(uid, "reference"), r.get("tx_note", "-")),
             ])
         else:
-            rows.append((t(uid, "network"), r.get("network", "-")))
+            rows.append((t(uid, "network"), r.get("network") or settings.get(f"network_{asset}", asset)))
+            if r.get("txid"):
+                rows.append(("TXID", r.get("txid")))
 
     elif r.get("type") == "withdraw":
         asset = r.get("asset")
-        rows.append((t(uid, "recipient_gets"), ucoin(uid, r.get("net_amount"), asset)))
+        rows.extend([
+            (t(uid, "amount"), ucoin(uid, r.get("amount"), asset)),
+            (t(uid, "fee"), ucoin(uid, r.get("fee"), asset)),
+            (t(uid, "recipient_gets"), ucoin(uid, r.get("net_amount"), asset)),
+        ])
         if asset == "TL":
             rows.extend([
                 (t(uid, "bank"), r.get("bank_name", "-")),
@@ -3592,16 +3786,22 @@ def request_summary(rid, lang_uid=None):
                 (t(uid, "recipient"), r.get("name", "-")),
             ])
         else:
-            rows.append((t(uid, "wallet_address"), r.get("address", "-")))
+            rows.extend([
+                (t(uid, "network"), settings.get(f"network_{asset}", asset)),
+                (t(uid, "wallet_address"), r.get("address", "-")),
+            ])
+            if r.get("broadcast_txid"):
+                rows.append(("TXID", r.get("broadcast_txid")))
 
     elif r.get("type") == "convert":
         rows.extend([
             (t(uid, "sent"), ucoin(uid, r.get("from_amount"), r.get("from_asset"))),
+            (t(uid, "fee"), ucoin(uid, r.get("fee"), r.get("to_asset"))),
             (t(uid, "to_receive"), ucoin(uid, r.get("net_to_amount"), r.get("to_asset"))),
         ])
 
-    rows.append(("Tarih" if lang_of(uid) == "tr" else "Date", r.get("created_at", "-")))
-    return order_summary(f"{kind} · #{rid}", rows)
+    rows.append(("Tarih" if is_tr else "Date", r.get("created_at", "-")))
+    return order_summary(f"{kind} · {status}", rows)
 
 
 def receipt_text(rid, lang_uid=None):
@@ -3609,8 +3809,16 @@ def receipt_text(rid, lang_uid=None):
     uid = str(lang_uid if lang_uid is not None else (r or {}).get("user_id", ""))
     if not r:
         return t(uid, "not_found")
-    title = "✓ İşlem Tamamlandı" if lang_of(uid) == "tr" else "✓ Transaction Completed"
-    return f"{title}\n\n{request_summary(rid, uid)}"
+    is_tr = lang_of(uid) == "tr"
+    titles = {
+        "pending": "İşlem Talebi Alındı" if is_tr else "Request Received",
+        "processing": "İşlem İşleniyor" if is_tr else "Transaction Processing",
+        "completed": "İşlem Tamamlandı" if is_tr else "Transaction Completed",
+        "rejected": "İşlem Reddedildi" if is_tr else "Transaction Rejected",
+    }
+    marks = {"pending": "◷", "processing": "↻", "completed": "✓", "rejected": "×"}
+    status = str(r.get("status") or "pending")
+    return f"{marks.get(status, '•')} {titles.get(status, titles['pending'])}\n\n{request_summary(rid, uid)}"
 
 
 def user_allowed(chat_id):
@@ -3838,6 +4046,62 @@ def create_deposit_notice(uid, state, extra=None):
     state["request_id"] = rid
     return rid
 
+def prepare_withdraw_amount(uid, state, amount):
+    uid = str(uid)
+    asset = str(state.get("asset") or "").upper()
+    amount = D(amount)
+    available = balance(uid, asset)
+    if amount <= 0:
+        send(uid, t(uid, "valid_amount"))
+        return False
+    if amount > available:
+        send(uid, f"{t(uid, 'insufficient')} · {ucoin(uid, available, asset)}")
+        return False
+    minimum = min_amount("withdraw", asset)
+    if amount < minimum:
+        send(uid, f"{t(uid, 'minimum')} · {ucoin(uid, minimum, asset)}")
+        return False
+    used_today = withdrawn_today(uid, asset)
+    limit = daily_limit(asset)
+    if limit > 0 and used_today + amount > limit:
+        remaining = max(limit - used_today, Decimal("0"))
+        send(uid, t(uid, "daily_limit", amount=ucoin(uid, remaining, asset)))
+        return False
+
+    percent = fee_percent("withdraw", asset, uid)
+    fee = fee_amount(amount, percent)
+    net = amount - fee
+    if net <= 0:
+        send(uid, t(uid, "invalid_net"))
+        return False
+    state.update({
+        "amount": str(amount),
+        "fee": str(fee),
+        "net_amount": str(net),
+        "withdraw_all": amount == available,
+    })
+
+    if asset == "TL":
+        state["step"] = "bank_name"
+        send(uid, t(uid, "bank_name_question"))
+        return True
+
+    favs = [item for item in users[uid].get("favorites", []) if item.get("asset") == asset]
+    if favs:
+        rows = [
+            [inline_button(item["label"], f"favorite_use:{index}")]
+            for index, item in enumerate(users[uid]["favorites"])
+            if item.get("asset") == asset
+        ]
+        rows.append([inline_button(t(uid, "enter_new_address"), "favorite_use:new")])
+        rows.append([inline_button(t(uid, "cancel"), "cancel")])
+        send(uid, t(uid, "withdraw_address_select"), {"inline_keyboard": rows})
+        state["step"] = "address_choice"
+    else:
+        state["step"] = "address"
+        send(uid, wallet_address_prompt(uid, asset))
+    return True
+
 
 def handle_text(chat_id, username, text):
     uid = str(chat_id)
@@ -3973,21 +4237,7 @@ def handle_text(chat_id, username, text):
             return
 
         if flow == "withdraw":
-            if withdrawn_today(uid, asset) + amount > daily_limit(asset) > 0:
-                remaining = daily_limit(asset) - withdrawn_today(uid, asset)
-                send(chat_id, t(uid, "daily_limit", amount=ucoin(uid, max(remaining, Decimal("0")), asset))); return
-            p = fee_percent("withdraw", asset, uid); fee = fee_amount(amount, p); net = amount - fee
-            state.update({"fee": str(fee), "net_amount": str(net)})
-            if asset == "TL":
-                state["step"] = "bank_name"; send(chat_id, t(uid, "bank_name_question"))
-            else:
-                favs = [f for f in users[uid].get("favorites", []) if f.get("asset") == asset]
-                if favs:
-                    rows = [[inline_button(f["label"], f"favorite_use:{i}")] for i, f in enumerate(users[uid]["favorites"]) if f.get("asset") == asset]
-                    rows.append([inline_button(t(uid, "enter_new_address"), "favorite_use:new")])
-                    send(chat_id, t(uid, "withdraw_address_select"), {"inline_keyboard": rows}); state["step"] = "address_choice"
-                else:
-                    state["step"] = "address"; send(chat_id, t(uid, "wallet_address_question"))
+            prepare_withdraw_amount(uid, state, amount)
             return
 
         if flow == "convert":
@@ -4036,17 +4286,37 @@ def handle_text(chat_id, username, text):
         ])
         require_pin(uid, state); return
     if flow == "withdraw" and step == "address":
-        state["address"] = text
+        valid, normalized_address, address_error = validate_wallet_address(state["asset"], text)
+        if not valid:
+            send(chat_id, address_error)
+            return
+        state["address"] = normalized_address
         state["preview"] = order_summary(t(uid, "withdraw_summary", asset=state["asset"]), [
+            (t(uid, "network"), settings.get(f"network_{state['asset']}", state["asset"])),
             (t(uid, "amount"), ucoin(uid, state["amount"], state["asset"])),
+            (t(uid, "fee"), ucoin(uid, state["fee"], state["asset"])),
             (t(uid, "to_send"), ucoin(uid, state["net_amount"], state["asset"])),
             (t(uid, "wallet_address"), state["address"]),
-        ])
+        ], "Adres ve ağ formatı doğrulandı." if lang_of(uid) == "tr" else "Address and network format verified.")
         require_pin(uid, state); return
-    if flow == "favorite_add" and step == "label": state["label"] = text; state["step"] = "address"; send(chat_id, t(uid, "favorite_address")); return
+    if flow == "favorite_add" and step == "label":
+        state["label"] = text
+        state["step"] = "address"
+        send(chat_id, wallet_address_prompt(uid, state["asset"]))
+        return
     if flow == "favorite_add" and step == "address":
-        users[uid]["favorites"].append({"label": state["label"], "asset": state["asset"], "address": text, "created_at": now()})
-        save_user_profile(uid); user_state.pop(uid, None); send(chat_id, t(uid, "favorite_saved"), reply_keyboard(uid)); return
+        valid, normalized_address, address_error = validate_wallet_address(state["asset"], text)
+        if not valid:
+            send(chat_id, address_error)
+            return
+        users[uid]["favorites"].append({
+            "label": state["label"], "asset": state["asset"],
+            "address": normalized_address, "created_at": now(),
+        })
+        save_user_profile(uid)
+        user_state.pop(uid, None)
+        send(chat_id, t(uid, "favorite_saved"), reply_keyboard(uid))
+        return
 
 
 def handle_callback(chat_id, username, data, cb_id):
@@ -4077,7 +4347,7 @@ def handle_callback(chat_id, username, data, cb_id):
     if data.startswith("detail:"):
         rid = data.split(":", 1)[1]
         if requests_db.get(rid, {}).get("user_id") == uid:
-            send(chat_id, receipt_text(rid, uid), {"inline_keyboard": [[inline_button(t(uid, "completed"), f"detail:{rid}")]]})
+            send(chat_id, receipt_text(rid, uid), {"inline_keyboard": [[inline_button(localized_status(uid, requests_db.get(rid, {}).get("status")), f"detail:{rid}")]]})
         return
     if data.startswith("deposit_asset:"):
         asset = data.split(":", 1)[1]
@@ -4130,9 +4400,33 @@ def handle_callback(chat_id, username, data, cb_id):
         return
     if data.startswith("withdraw_asset:"):
         asset = data.split(":", 1)[1]
-        if balance(uid, asset) <= 0: send(chat_id, msg(uid, "no_balance")); return
+        available = balance(uid, asset)
+        if available <= 0:
+            send(chat_id, msg(uid, "no_balance"))
+            return
         user_state[uid] = {"flow": "withdraw", "step": "amount", "asset": asset}
-        send(chat_id, f"{t(uid, 'available_balance')}: {ucoin(uid, balance(uid, asset), asset)}\n{t(uid, 'min_withdraw')}: {ucoin(uid, min_amount('withdraw', asset), asset)}\n\n{msg(uid, 'amount_question')}"); return
+        full_label = "Tüm Bakiyeyi Çek" if lang_of(uid) == "tr" else "Withdraw Full Balance"
+        keyboard = {"inline_keyboard": [
+            [inline_button(full_label, "withdraw_all")],
+            [inline_button(t(uid, "cancel"), "cancel")],
+        ]}
+        send(
+            chat_id,
+            f"{t(uid, 'available_balance')}: {ucoin(uid, available, asset)}\n"
+            f"{t(uid, 'min_withdraw')}: {ucoin(uid, min_amount('withdraw', asset), asset)}\n\n"
+            f"{msg(uid, 'amount_question')}",
+            keyboard,
+        )
+        return
+    if data == "withdraw_all":
+        state = user_state.get(uid, {})
+        if state.get("flow") != "withdraw" or state.get("step") != "amount" or not state.get("asset"):
+            send(chat_id, t(uid, "session_missing"), reply_keyboard(uid))
+            return
+        amount = balance(uid, state["asset"])
+        if prepare_withdraw_amount(uid, state, amount):
+            state["withdraw_all"] = True
+        return
     if data.startswith("convert_from:"):
         asset = data.split(":", 1)[1]
         if balance(uid, asset) <= 0: send(chat_id, msg(uid, "no_balance")); return
@@ -4181,13 +4475,34 @@ def handle_callback(chat_id, username, data, cb_id):
     if data == "favorite:add": user_state[uid] = {"flow": "favorite_add", "step": "asset"}; send(chat_id, t(uid, "favorite_asset"), asset_keyboard("favorite_asset", CRYPTO_ASSETS, uid=uid)); return
     if data.startswith("favorite_asset:"): user_state[uid] = {"flow": "favorite_add", "step": "label", "asset": data.split(":",1)[1]}; send(chat_id, t(uid, "favorite_label")); return
     if data.startswith("favorite_use:"):
-        choice = data.split(":", 1)[1]; state = user_state.get(uid, {})
-        if choice == "new": state["step"] = "address"; send(chat_id, t(uid, "wallet_address_question"))
+        choice = data.split(":", 1)[1]
+        state = user_state.get(uid, {})
+        if choice == "new":
+            state["step"] = "address"
+            send(chat_id, wallet_address_prompt(uid, state.get("asset")))
         else:
-            try: fav = users[uid]["favorites"][int(choice)]
-            except (ValueError, IndexError): send(chat_id, t(uid, "session_missing")); return
-            state["address"] = fav["address"]
-            state["preview"] = order_summary(t(uid, "withdraw_summary", asset=state["asset"]), [(t(uid, "amount"), ucoin(uid, state["amount"], state["asset"])), (t(uid, "to_send"), ucoin(uid, state["net_amount"], state["asset"])), (t(uid, "wallet_address"), state["address"])])
+            try:
+                fav = users[uid]["favorites"][int(choice)]
+            except (ValueError, IndexError):
+                send(chat_id, t(uid, "session_missing"))
+                return
+            valid, normalized_address, address_error = validate_wallet_address(state["asset"], fav.get("address", ""))
+            if not valid:
+                send(
+                    chat_id,
+                    ("Bu kayıtlı adres artık geçerli değil. Yeni bir adres giriniz.\n\n" if lang_of(uid) == "tr"
+                     else "This saved address is no longer valid. Enter a new address.\n\n") + address_error,
+                )
+                state["step"] = "address"
+                return
+            state["address"] = normalized_address
+            state["preview"] = order_summary(t(uid, "withdraw_summary", asset=state["asset"]), [
+                (t(uid, "network"), settings.get(f"network_{state['asset']}", state["asset"])),
+                (t(uid, "amount"), ucoin(uid, state["amount"], state["asset"])),
+                (t(uid, "fee"), ucoin(uid, state["fee"], state["asset"])),
+                (t(uid, "to_send"), ucoin(uid, state["net_amount"], state["asset"])),
+                (t(uid, "wallet_address"), state["address"]),
+            ], "Kayıtlı adres doğrulandı." if lang_of(uid) == "tr" else "Saved address verified.")
             require_pin(uid, state)
         return
     if data == "security:set_pin":
@@ -4367,6 +4682,7 @@ def version_info():
         "build_version": BUILD_VERSION,
         "withdraw_guard": True,
         "crypto_manual_complete_blocked": True,
+        "panel_release": "PRO-PANEL-V5-FRESH",
     }
 
 
@@ -4418,11 +4734,16 @@ def exchange_withdrawal_callback():
 def login():
     error = ""
     ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
-    attempts = LOGIN_ATTEMPTS[ip]; cutoff = time.time() - LOGIN_WINDOW_SECONDS
-    while attempts and attempts[0] < cutoff: attempts.popleft()
+    attempts = LOGIN_ATTEMPTS[ip]
+    cutoff = time.time() - LOGIN_WINDOW_SECONDS
+    while attempts and attempts[0] < cutoff:
+        attempts.popleft()
     if request.method == "POST":
-        if len(attempts) >= LOGIN_MAX_ATTEMPTS: return "Çok fazla başarısız giriş denemesi", 429
-        panel_username, is_root = authenticate_panel_account(request.form.get("username", ""), request.form.get("password", ""))
+        if len(attempts) >= LOGIN_MAX_ATTEMPTS:
+            return "Çok fazla başarısız giriş denemesi", 429
+        panel_username, is_root = authenticate_panel_account(
+            request.form.get("username", ""), request.form.get("password", "")
+        )
         if panel_username:
             attempts.clear()
             session.clear()
@@ -4432,9 +4753,43 @@ def login():
             session.permanent = True
             csrf_token()
             return redirect("/admin")
-        attempts.append(time.time()); time.sleep(min(2 ** len(attempts), 8) / 10); error = "Kullanıcı adı veya şifre hatalı"
-    return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='color-scheme' content='dark'><title>Nerlo Wallet Yönetim</title><style>
-    :root{{--bg:#070a10;--panel:#0f141d;--panel2:#141b26;--line:#242d3a;--text:#f5f7fb;--muted:#8f9bab;--accent:#6ee7d8;--accent2:#7dd3fc;--danger:#fb7185}}*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px;background:radial-gradient(circle at 15% 10%,rgba(110,231,216,.12),transparent 30%),radial-gradient(circle at 90% 90%,rgba(125,211,252,.1),transparent 28%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}.login{{width:min(420px,100%);background:rgba(15,20,29,.94);border:1px solid var(--line);border-radius:24px;padding:28px;box-shadow:0 30px 90px rgba(0,0,0,.42);backdrop-filter:blur(18px)}}.brand{{display:flex;align-items:center;gap:12px;margin-bottom:26px}}.mark{{width:42px;height:42px;display:grid;place-items:center;border-radius:14px;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#051116;font-weight:900;font-size:20px}}h1{{font-size:22px;margin:0}}p{{margin:5px 0 0;color:var(--muted);font-size:14px}}label{{display:block;font-size:12px;font-weight:700;color:#b8c2cf;margin:16px 0 7px}}input,button{{width:100%;height:46px;border-radius:13px;border:1px solid var(--line);font:inherit}}input{{background:#0a0f16;color:var(--text);padding:0 14px;outline:none}}input:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,231,216,.1)}}button{{margin-top:18px;border:0;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#061116;font-weight:850;cursor:pointer}}.error{{min-height:20px;color:var(--danger);font-size:13px;margin-top:12px}}</style></head><body><form class='login' method='post'><div class='brand'><div class='mark'>N</div><div><h1>Nerlo Wallet</h1><p>Yönetim paneli</p></div></div><label>Kullanıcı adı</label><input name='username' autocomplete='username' required><label>Şifre</label><input type='password' autocomplete='current-password' name='password' required><button>Giriş Yap</button><div class='error'>{h(error)}</div></form></body></html>"""
+        attempts.append(time.time())
+        time.sleep(min(2 ** len(attempts), 8) / 10)
+        error = "Kullanıcı adı veya şifre hatalı"
+
+    return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'>
+    <meta name='viewport' content='width=device-width,initial-scale=1'>
+    <meta name='color-scheme' content='dark'><title>Nerlo Operations</title><style>
+    :root{{--bg:#05080d;--card:#0d131c;--line:#1c2836;--text:#f6f8fb;--muted:#8190a3;--accent:#64e4ce;--accent2:#72bfff;--danger:#ff8095}}
+    *{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;color:var(--text);
+    font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    background:radial-gradient(circle at 12% 12%,rgba(100,228,206,.13),transparent 28%),
+    radial-gradient(circle at 88% 86%,rgba(114,191,255,.10),transparent 30%),var(--bg)}}
+    .shell{{width:min(960px,100%);display:grid;grid-template-columns:1.05fr .95fr;border:1px solid var(--line);
+    border-radius:28px;overflow:hidden;background:rgba(8,12,18,.92);box-shadow:0 40px 120px rgba(0,0,0,.48)}}
+    .intro{{padding:54px;background:linear-gradient(145deg,rgba(100,228,206,.10),rgba(114,191,255,.03));display:flex;flex-direction:column;justify-content:space-between}}
+    .brand{{display:flex;align-items:center;gap:13px}}.mark{{width:46px;height:46px;border-radius:15px;display:grid;place-items:center;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));color:#031014;font-size:20px;font-weight:950}}
+    .brand b{{font-size:18px}}.brand span{{display:block;color:var(--muted);font-size:12px;margin-top:2px}}
+    .intro h1{{font-size:38px;line-height:1.08;letter-spacing:-.045em;margin:52px 0 14px;max-width:520px}}
+    .intro p{{color:#9aa8b9;line-height:1.65;max-width:510px;margin:0}}.trust{{display:flex;gap:9px;flex-wrap:wrap;margin-top:44px}}
+    .trust span{{padding:8px 10px;border:1px solid rgba(255,255,255,.08);border-radius:999px;color:#a9b5c4;font-size:11px;background:rgba(255,255,255,.025)}}
+    .login{{padding:54px;display:flex;flex-direction:column;justify-content:center;background:var(--card)}}.login h2{{font-size:24px;margin:0}}
+    .login>p{{color:var(--muted);margin:8px 0 26px;line-height:1.5}}label{{display:block;color:#aeb9c7;font-size:11px;font-weight:750;margin:16px 0 7px}}
+    input,button{{width:100%;height:48px;border-radius:13px;font:inherit}}input{{border:1px solid var(--line);background:#080d14;color:var(--text);padding:0 14px;outline:none}}
+    input:focus{{border-color:var(--accent);box-shadow:0 0 0 4px rgba(100,228,206,.08)}}button{{border:0;margin-top:20px;
+    background:linear-gradient(135deg,var(--accent),var(--accent2));color:#041116;font-weight:900;cursor:pointer}}
+    .error{{min-height:22px;color:var(--danger);font-size:12px;margin-top:12px}}.secure{{color:#627083;font-size:10px;margin-top:18px;text-align:center}}
+    @media(max-width:760px){{.shell{{grid-template-columns:1fr}}.intro{{display:none}}.login{{padding:34px 24px}}}}
+    </style></head><body><main class='shell'><section class='intro'><div><div class='brand'><div class='mark'>N</div>
+    <div><b>Nerlo Wallet</b><span>Exchange Operations Suite</span></div></div><h1>Finans operasyonlarını tek merkezden yönetin.</h1>
+    <p>Bakiyeler, blockchain hareketleri, kullanıcılar, çekim onayları ve sistem ayarları için güvenli yönetim alanı.</p></div>
+    <div class='trust'><span>PostgreSQL Ledger</span><span>Blockchain Indexer</span><span>Rol Bazlı Erişim</span></div></section>
+    <form class='login' method='post'><h2>Yönetim paneli</h2><p>Yetkili hesabınızla güvenli oturum açın.</p>
+    <label>Kullanıcı adı</label><input name='username' autocomplete='username' required>
+    <label>Şifre</label><input type='password' autocomplete='current-password' name='password' required>
+    <button>Güvenli Giriş</button><div class='error'>{h(error)}</div><div class='secure'>Oturumlar güvenli çerez ve CSRF koruması ile doğrulanır.</div>
+    </form></main></body></html>"""
 
 @app.route("/logout")
 def logout(): session.clear(); return redirect("/login")
@@ -4713,70 +5068,80 @@ def request_search_matches(rid, r, query):
 def panel_request_card(rid, r):
     uid = str(r.get("user_id", ""))
     username = username_label(users.get(uid, {}).get("username"))
-    status = r.get("status")
-    detail_items = [
-        ("Kullanıcı", f"@{username} · {uid}"),
-        ("Oluşturuldu", r.get("created_at", "-")),
-    ]
-    if r.get("type") == "deposit":
-        asset = r.get("asset")
-        detail_items += [
-            ("Tutar", fmt(r.get("amount"), asset)),
-            ("Net", fmt(r.get("net_amount"), asset)),
+    status = str(r.get("status") or "pending")
+    request_type = str(r.get("type") or "")
+    asset = str(r.get("asset") or r.get("to_asset") or "")
+    network = str(r.get("network") or settings.get(f"network_{asset}", asset) or asset)
+    created = str(r.get("created_at") or "-")
+    target = str(r.get("iban") or r.get("address") or "")
+    txid = str(r.get("broadcast_txid") or r.get("txid") or "")
+
+    if request_type == "deposit":
+        primary_label = "Bakiyeye geçecek"
+        primary_value = fmt(r.get("net_amount"), asset)
+        secondary = [
+            ("Brüt tutar", fmt(r.get("amount"), asset)),
+            ("Komisyon", fmt(r.get("fee"), asset)),
+            ("Ağ", network),
         ]
         if asset == "TL":
-            detail_items += [("Gönderen", r.get("sender_name", "-")), ("Açıklama", r.get("tx_note", "-"))]
-        else:
-            detail_items.append(("Ağ", r.get("network", "-")))
-    elif r.get("type") == "withdraw":
-        asset = r.get("asset")
-        detail_items += [
-            ("Tutar", fmt(r.get("amount"), asset)),
+            secondary.extend([("Gönderen", r.get("sender_name", "-")), ("Referans", r.get("tx_note", "-"))])
+    elif request_type == "withdraw":
+        primary_label = "Alıcıya gönderilecek"
+        primary_value = fmt(r.get("net_amount"), asset)
+        secondary = [
+            ("Talep tutarı", fmt(r.get("amount"), asset)),
             ("Komisyon", fmt(r.get("fee"), asset)),
-            ("Net", fmt(r.get("net_amount"), asset)),
-            ("Hedef", r.get("iban") or r.get("address", "-")),
+            ("Ağ", network),
+            ("Hedef", target or "-"),
         ]
-        if r.get("broadcast_txid"):
-            detail_items.append(("TXID", r.get("broadcast_txid")))
-    elif r.get("type") == "convert":
-        detail_items += [
+    else:
+        primary_label = "Alınacak"
+        primary_value = fmt(r.get("net_to_amount"), r.get("to_asset"))
+        secondary = [
             ("Gönderilen", fmt(r.get("from_amount"), r.get("from_asset"))),
-            ("Alınan", fmt(r.get("net_to_amount"), r.get("to_asset"))),
+            ("Komisyon", fmt(r.get("fee"), r.get("to_asset"))),
+            ("Parite", f"{r.get('from_asset', '-')} → {r.get('to_asset', '-')}"),
         ]
 
+    if txid:
+        secondary.append(("TXID", txid))
     details = "".join(
-        f"<div class='request-detail'><span>{h(label)}</span><b>{h(value)}</b></div>"
-        for label, value in detail_items
+        f"<div class='request-detail'><span>{h(label)}</span><b title='{h(value)}'>{h(value)}</b></div>"
+        for label, value in secondary
     )
+
     actions = ""
     if status in ("pending", "processing") and not r.get("automatic"):
         is_crypto_withdraw = _is_crypto_withdraw_record(r)
         if is_crypto_withdraw and r.get("broadcast_locked"):
             signer_state = h(r.get("signer_status") or "işleniyor")
-            actions = f"<div class='request-warning'>Otomatik gönderim başlatıldı. Durum: {signer_state}. Zincir sonucu bekleniyor.</div>"
+            actions = f"<div class='request-warning'><b>Blockchain gönderimi başlatıldı</b><span>Durum: {signer_state}. Ağ sonucu bekleniyor.</span></div>"
         else:
             process_button = "" if status == "processing" else "<button class='btn ghost' name='action' value='process_request'>İşleme Al</button>"
             approve_button = "" if is_crypto_withdraw else "<button class='btn success' name='action' value='approve_request'>Tamamla</button>"
             if is_crypto_withdraw and r.get("signer_enabled"):
-                warning = "<div class='request-warning'>İşleme Al düğmesine basınca para otomatik gönderilir.</div>"
+                warning = "<div class='request-warning safe'><b>Otomatik çekim hazır</b><span>İşleme Al dediğinizde transfer blockchain'e gönderilir.</span></div>"
             elif is_crypto_withdraw:
-                warning = "<div class='request-warning'>Otomatik gönderim servisi bağlı değil. Bu çekim başlatılamaz.</div>"
+                warning = "<div class='request-warning'><b>Gönderim servisi bağlı değil</b><span>Bu çekim para gönderilmeden tamamlanamaz.</span></div>"
             else:
                 warning = ""
             actions = (
-                f"{warning}"
-                f"<form method='post' class='request-actions'>"
+                f"{warning}<form method='post' class='request-actions'>"
                 f"<input type='hidden' name='rid' value='{h(rid)}'>"
                 f"<input type='hidden' name='return_to' value='/admin?view=requests'>"
-                f"{process_button}"
-                f"{approve_button}"
+                f"{process_button}{approve_button}"
                 f"<button class='btn danger' name='action' value='reject_request'>Reddet</button>"
                 f"</form>"
             )
+
     return (
-        f"<article class='request-item'>"
-        f"<div class='request-title'><div><span class='eyebrow'>#{h(rid)}</span><h3>{h(request_type_label(r.get('type')))}</h3></div>"
+        f"<article class='request-item request-{h(request_type)}'>"
+        f"<div class='request-title'>"
+        f"<div class='request-ident'><span class='request-type'>{h(request_type_label(request_type))}</span>"
+        f"<h3>#{h(rid)}</h3><p>@{h(username)} · {h(uid)} · {h(created)}</p></div>"
         f"<span class='status {request_status_class(status)}'>{h(status_label(status))}</span></div>"
+        f"<div class='request-primary'><span>{h(primary_label)}</span><strong>{h(primary_value)}</strong></div>"
         f"<div class='request-details'>{details}</div>{actions}</article>"
     )
 
@@ -4821,13 +5186,16 @@ def exchange_user_ledger_rows(user_id, limit=50):
 
 
 def user_balance_cards(uid, u):
+    names = {"TL": "Türk Lirası", "USDT": "Tether", "LTC": "Litecoin", "TRX": "TRON",
+             "XMR": "Monero", "BTC": "Bitcoin", "ETH": "Ethereum", "TON": "Toncoin"}
     cards = []
     for asset in ASSETS:
         available = fmt(u.get("balances", {}).get(asset, "0"), asset)
         pending_value = fmt(u.get("pending_balances", {}).get(asset, "0"), asset)
         cards.append(
-            f"<div class='mini-balance'><div><span>{h(asset)}</span><strong>{h(available)}</strong></div>"
-            f"<small>Bekleyen: {h(pending_value)}</small></div>"
+            f"<div class='mini-balance'><div class='mini-asset'><span>{h(asset)}</span>"
+            f"<small>{h(names.get(asset, asset))}</small></div><strong>{h(available)}</strong>"
+            f"<div class='mini-pending'>Bekleyen · {h(pending_value)}</div></div>"
         )
     return "".join(cards)
 
@@ -5254,8 +5622,8 @@ def admin():
         for slug, label, number in nav_items if slug in allowed_views
     )
 
-    dashboard_section = f"""<section class='page-view {'active' if active_view == 'dashboard' else ''}' data-view='dashboard'><div class='section-head'><div><span class='eyebrow'>GENEL BAKIŞ</span><h2>Cüzdan Özeti</h2><p>Tüm kullanıcı bakiyelerinin kompakt görünümü</p></div></div><div class='dashboard-grid'>{asset_metrics}</div><div class='summary-grid'><div class='summary-card'><span>Toplam kullanıcı</span><strong>{len(users)}</strong></div><div class='summary-card'><span>Bekleyen / işlenen talep</span><strong>{pending_count}</strong></div><div class='summary-card'><span>Bugün tamamlanan</span><strong>{completed_today}</strong></div></div></section>""" if "dashboard" in allowed_views else ""
-    requests_section = f"""<section class='page-view {'active' if active_view == 'requests' else ''}' data-view='requests'><div class='section-head'><div><span class='eyebrow'>OPERASYON</span><h2>İşlem Talepleri</h2><p>Yükleme, çekim ve dönüşüm taleplerini tek ekrandan yönetin</p></div></div><div class='panel-card'><form id='request-filter' class='toolbar'><input name='rq' value='{h(request_query)}' placeholder='İşlem no, kullanıcı ID veya kullanıcı adı'><select name='status'><option value='all'>Tüm durumlar</option>{''.join(f"<option value='{s}' {'selected' if status_filter == s else ''}>{status_label(s)}</option>" for s in ['pending','processing','completed','rejected'])}</select><select name='type'><option value='all'>Tüm işlem türleri</option>{''.join(f"<option value='{t}' {'selected' if type_filter == t else ''}>{request_type_label(t)}</option>" for t in ['deposit','withdraw','convert'])}</select><button class='btn primary'>Filtrele</button></form><div id='request-list' class='request-list'>{render_request_list(request_query, status_filter, type_filter)}</div></div></section>""" if "requests" in allowed_views else ""
+    dashboard_section = f"""<section class='page-view {'active' if active_view == 'dashboard' else ''}' data-view='dashboard'><div class='section-head'><div><span class='eyebrow'>CANLI FİNANS ÖZETİ</span><h2>Varlık ve Operasyon Merkezi</h2><p>Kullanıcı varlıkları, bekleyen çekimler ve günlük işlem akışı.</p></div><span class='pill'>Ledger eşleşmesi aktif</span></div><div class='summary-grid'><div class='summary-card'><span>Toplam kullanıcı</span><strong>{len(users)}</strong></div><div class='summary-card'><span>Aksiyon bekleyen</span><strong>{pending_count}</strong></div><div class='summary-card'><span>Bugün tamamlanan</span><strong>{completed_today}</strong></div></div><div class='dashboard-grid' style='margin-top:12px'>{asset_metrics}</div></section>""" if "dashboard" in allowed_views else ""
+    requests_section = f"""<section class='page-view {'active' if active_view == 'requests' else ''}' data-view='requests'><div class='section-head'><div><span class='eyebrow'>ONAY VE İŞLEM AKIŞI</span><h2>İşlem Merkezi</h2><p>Her talebi tutar, ağ, hedef ve durum bilgileriyle hızlıca yönetin.</p></div></div><div class='panel-card'><form id='request-filter' class='toolbar'><input name='rq' value='{h(request_query)}' placeholder='İşlem no, kullanıcı ID veya kullanıcı adı'><select name='status'><option value='all'>Tüm durumlar</option>{''.join(f"<option value='{s}' {'selected' if status_filter == s else ''}>{status_label(s)}</option>" for s in ['pending','processing','completed','rejected'])}</select><select name='type'><option value='all'>Tüm işlem türleri</option>{''.join(f"<option value='{t}' {'selected' if type_filter == t else ''}>{request_type_label(t)}</option>" for t in ['deposit','withdraw','convert'])}</select><button class='btn primary'>Filtrele</button></form><div id='request-list' class='request-list'>{render_request_list(request_query, status_filter, type_filter)}</div></div></section>""" if "requests" in allowed_views else ""
     users_section = f"""<section class='page-view {'active' if active_view == 'users' else ''}' data-view='users'><div class='section-head'><div><span class='eyebrow'>KULLANICI YÖNETİMİ</span><h2>ID ile Kullanıcı Aç</h2><p>Kullanıcı satırlarına tıklamadan doğrudan kimlik ile yönetin</p></div></div><div class='panel-card'><form id='user-lookup' class='lookup-bar'><input id='manage-user-id' name='uid' value='{h(manage_user_id)}' inputmode='numeric' placeholder='Telegram kullanıcı ID'><button class='btn primary'>Kullanıcıyı Getir</button></form><div id='user-management-result'>{render_user_management(manage_user_id)}</div></div><div class='panel-card' style='margin-top:10px'><div class='section-head'><div><span class='eyebrow'>SON KULLANICILAR</span><h3>Hızlı Referans</h3></div><p>ID değerleri bağlantı değildir</p></div><div class='table-wrap'><table><thead><tr><th>Kullanıcı ID</th><th>Kullanıcı adı</th><th>TL</th><th>USDT</th><th>LTC</th><th>TRX</th><th>Hesap</th><th>Son görülme</th></tr></thead><tbody>{user_rows}</tbody></table></div></div></section>""" if "users" in allowed_views else ""
     broadcast_section = f"""<section class='page-view {'active' if active_view == 'broadcast' else ''}' data-view='broadcast'><div class='section-head'><div><span class='eyebrow'>İLETİŞİM</span><h2>Duyuru Gönder</h2><p>Bildirimleri açık kullanıcılara toplu mesaj gönderin</p></div></div><div class='broadcast-grid'><form method='post' class='panel-card'><input type='hidden' name='action' value='broadcast'><input type='hidden' name='return_to' value='/admin?view=broadcast'><label>Duyuru metni</label><textarea name='announcement_text' placeholder='Kullanıcılara gönderilecek mesajı yazın' required></textarea><button class='btn primary' style='width:100%;margin-top:10px'>Duyuruyu Gönder</button></form><div class='broadcast-note'><b style='color:#dce5ef'>Gönderim bilgisi</b><br><br>Duyuru yalnızca duyuru bildirimleri açık olan kullanıcılara iletilir. Gönderim sonucu yönetim kayıtlarına eklenir.</div></div></section>""" if "broadcast" in allowed_views else ""
     settings_section = f"""<section class='page-view {'active' if active_view == 'settings' else ''}' data-view='settings'><div class='section-head'><div><span class='eyebrow'>SİSTEM</span><h2>Ayar Yönetimi</h2><p>Kur, limit, cüzdan, sistem ve bot mesajlarını yönetin</p></div></div><form method='post' class='panel-card'><input type='hidden' name='action' value='settings'><input type='hidden' name='return_to' value='/admin?view=settings'><div class='settings-nav'>{settings_tabs}</div>{''.join(settings_panes)}<div class='save-bar'><button class='btn primary'>Tüm Ayarları Kaydet</button></div></form></section>""" if "settings" in allowed_views else ""
@@ -5264,7 +5632,68 @@ def admin():
 
     return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='color-scheme' content='dark'><title>Nerlo Wallet Yönetim</title><style>
     :root{{--bg:#090c12;--sidebar:#0b0f16;--surface:#10151e;--surface-2:#141b25;--surface-3:#0c1118;--line:#222b38;--line-soft:#1a2230;--text:#f4f7fb;--muted:#8c98a8;--muted-2:#667386;--accent:#68e0d2;--accent-2:#7cc7ff;--success:#59d99b;--warning:#f6c96b;--danger:#ff7489;--radius:18px}}*{{box-sizing:border-box}}html{{scroll-behavior:smooth}}body{{margin:0;background:radial-gradient(circle at 85% -10%,rgba(104,224,210,.08),transparent 32%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px}}button,input,select,textarea{{font:inherit}}button{{cursor:pointer}}.app-shell{{min-height:100vh;display:grid;grid-template-columns:238px minmax(0,1fr)}}.sidebar{{position:sticky;top:0;height:100vh;background:rgba(11,15,22,.96);border-right:1px solid var(--line-soft);padding:20px 14px;display:flex;flex-direction:column;backdrop-filter:blur(18px)}}.brand{{display:flex;align-items:center;gap:11px;padding:6px 8px 22px}}.brand-mark{{width:38px;height:38px;border-radius:13px;display:grid;place-items:center;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#061116;font-weight:950;font-size:18px;box-shadow:0 10px 30px rgba(104,224,210,.14)}}.brand strong{{display:block;font-size:15px}}.brand small{{display:block;color:var(--muted);margin-top:2px;font-size:11px}}.nav{{display:grid;gap:4px}}.nav-item{{width:100%;border:0;background:transparent;color:#aeb8c6;display:flex;align-items:center;gap:10px;padding:10px 11px;border-radius:11px;text-align:left;font-weight:680}}.nav-item span{{width:24px;height:24px;border-radius:8px;display:grid;place-items:center;background:#111923;color:#66778c;font-size:10px}}.nav-item:hover{{background:#111822;color:#fff}}.nav-item.active{{background:#151e29;color:#fff}}.nav-item.active span{{background:rgba(104,224,210,.13);color:var(--accent)}}.sidebar-foot{{margin-top:auto;padding:14px 8px 2px;border-top:1px solid var(--line-soft)}}.version{{display:block;color:var(--muted-2);font-size:10px;margin-bottom:10px;letter-spacing:.06em}}.logout{{color:#aeb8c6;text-decoration:none;font-size:12px}}.main{{min-width:0;padding:22px clamp(16px,3vw,36px) 40px}}.topbar{{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:22px}}.topbar h1{{font-size:22px;margin:0;letter-spacing:-.03em}}.topbar p{{margin:5px 0 0;color:var(--muted);font-size:12px}}.top-pill{{padding:8px 11px;border:1px solid var(--line);border-radius:999px;color:var(--muted);background:var(--surface-3);font-size:11px}}.page-view{{display:none}}.page-view.active{{display:block}}.section-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:14px}}.section-head h2,.section-head h3{{margin:2px 0 0;letter-spacing:-.025em}}.section-head h2{{font-size:18px}}.section-head h3{{font-size:15px}}.section-head p{{margin:3px 0 0;color:var(--muted);font-size:12px}}.eyebrow{{display:block;color:var(--muted-2);font-size:9px;font-weight:850;letter-spacing:.13em}}.panel-card{{background:rgba(16,21,30,.92);border:1px solid var(--line);border-radius:var(--radius);padding:17px;box-shadow:0 16px 50px rgba(0,0,0,.14)}}.compact-card{{padding:15px}}.dashboard-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}}.wallet-metric{{min-height:108px;background:linear-gradient(145deg,#111823,#0d131c);border:1px solid var(--line);border-radius:16px;padding:14px;display:flex;gap:11px;align-items:flex-start}}.asset-dot{{width:30px;height:30px;flex:0 0 auto;border-radius:10px;background:rgba(104,224,210,.1);color:var(--accent);display:grid;place-items:center;font-size:11px;font-weight:900}}.wallet-metric span{{display:block;color:var(--muted);font-size:10px}}.wallet-metric strong{{display:block;font-size:18px;margin:5px 0 3px;letter-spacing:-.03em;white-space:nowrap}}.wallet-metric small{{color:var(--muted-2);font-size:10px}}.summary-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:10px}}.summary-card{{padding:13px 14px;border:1px solid var(--line);border-radius:14px;background:var(--surface-3)}}.summary-card span{{color:var(--muted);font-size:10px}}.summary-card strong{{display:block;font-size:20px;margin-top:4px}}.toolbar{{display:grid;grid-template-columns:minmax(220px,2fr) repeat(2,minmax(150px,1fr)) auto;gap:9px;margin-bottom:13px}}input,select,textarea{{width:100%;border:1px solid var(--line);background:#0b1017;color:var(--text);border-radius:11px;min-height:41px;padding:9px 11px;outline:none}}input:focus,select:focus,textarea:focus{{border-color:var(--accent);box-shadow:0 0 0 3px rgba(104,224,210,.08)}}textarea{{min-height:110px;resize:vertical}}label{{display:block;color:#aab5c4;font-size:10px;font-weight:760;margin:0 0 6px}}.btn{{border:1px solid transparent;min-height:38px;border-radius:10px;padding:8px 12px;font-weight:800;background:#192431;color:#dfe8f3}}.btn.primary{{background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#061116}}.btn.ghost{{background:#111923;border-color:var(--line);color:#c9d3df}}.btn.success{{background:rgba(89,217,155,.13);border-color:rgba(89,217,155,.23);color:#88ebba}}.btn.danger{{background:rgba(255,116,137,.12);border-color:rgba(255,116,137,.22);color:#ff96a6}}.request-list{{display:grid;gap:9px}}.request-item{{background:var(--surface-3);border:1px solid var(--line);border-radius:15px;padding:13px}}.request-title{{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}}.request-title h3{{font-size:14px;margin:3px 0 0}}.request-details{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin-top:11px}}.request-detail{{min-width:0;background:#101721;border:1px solid var(--line-soft);border-radius:10px;padding:8px 9px}}.request-detail span{{display:block;color:var(--muted-2);font-size:9px;margin-bottom:4px}}.request-detail b{{display:block;font-size:11px;overflow-wrap:anywhere}}.request-warning{{margin-top:10px;padding:9px 10px;border:1px solid rgba(246,201,107,.25);border-radius:10px;background:rgba(246,201,107,.08);color:var(--warning);font-size:10px;line-height:1.45}}.request-actions{{display:flex;justify-content:flex-end;gap:7px;margin-top:10px}}.request-actions .btn{{width:auto;min-height:34px;font-size:11px}}.status{{display:inline-flex;align-items:center;justify-content:center;min-height:25px;padding:4px 8px;border-radius:999px;font-size:9px;font-weight:850;white-space:nowrap}}.status.waiting{{background:rgba(246,201,107,.12);color:var(--warning)}}.status.working{{background:rgba(124,199,255,.12);color:var(--accent-2)}}.status.done{{background:rgba(89,217,155,.12);color:var(--success)}}.status.declined{{background:rgba(255,116,137,.12);color:var(--danger)}}.empty-state{{min-height:140px;border:1px dashed #2a3442;border-radius:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--muted);gap:5px;padding:20px}}.empty-state b{{color:#dbe4ee}}.error-state{{border-color:rgba(255,116,137,.3)}}.lookup-bar{{display:grid;grid-template-columns:minmax(220px,1fr) auto;gap:9px;margin-bottom:12px}}.lookup-bar .btn{{min-width:130px}}.user-profile-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin:2px 0 13px}}.user-profile-head h2{{font-size:19px;margin:3px 0}}.user-profile-head p{{margin:0;color:var(--muted);font-size:11px}}.profile-badges{{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}}.pill{{padding:6px 9px;border-radius:999px;background:#151e29;border:1px solid var(--line);color:#cbd5e1;font-size:9px;font-weight:800}}.danger-pill{{color:var(--danger);background:rgba(255,116,137,.08)}}.mini-balance-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px}}.mini-balance{{background:#0d141d;border:1px solid var(--line);border-radius:13px;padding:11px}}.mini-balance div{{display:flex;align-items:center;justify-content:space-between;gap:8px}}.mini-balance span{{font-size:10px;color:var(--muted)}}.mini-balance strong{{font-size:13px;white-space:nowrap}}.mini-balance small{{display:block;color:var(--muted-2);font-size:9px;margin-top:7px}}.user-workspace{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}}.history-grid{{align-items:start}}.form-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:end}}.form-grid .wide{{grid-column:span 2}}.submit-cell{{display:flex;align-items:flex-end}}.submit-cell .btn{{width:100%}}.balance-form{{grid-template-columns:repeat(3,minmax(0,1fr))}}.security-actions{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}}.security-actions .btn{{width:100%}}.table-wrap{{overflow:auto;border:1px solid var(--line-soft);border-radius:12px}}table{{width:100%;border-collapse:collapse;min-width:720px}}th,td{{padding:9px 10px;text-align:left;border-bottom:1px solid var(--line-soft);font-size:10px;white-space:nowrap}}th{{color:var(--muted-2);font-size:9px;letter-spacing:.04em;background:#0c121a}}td{{color:#cbd5df}}tbody tr:last-child td{{border-bottom:0}}code{{color:#c8d5e4;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px}}.muted-cell{{text-align:center;color:var(--muted)}}.broadcast-grid{{display:grid;grid-template-columns:1.25fr .75fr;gap:10px}}.broadcast-note{{padding:16px;border:1px solid var(--line);border-radius:14px;background:var(--surface-3);color:var(--muted);font-size:12px;line-height:1.55}}.settings-nav{{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}}.setting-tab{{border:1px solid var(--line);background:#0c1219;color:#95a2b2;padding:8px 10px;border-radius:9px;font-size:10px;font-weight:800}}.setting-tab.active{{background:#17222d;color:var(--accent);border-color:#29404a}}.setting-pane{{display:none}}.setting-pane.active{{display:block}}.settings-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px}}.field{{min-width:0}}.settings-grid textarea{{min-height:90px}}.save-bar{{display:flex;justify-content:flex-end;margin-top:13px}}.save-bar .btn{{min-width:180px}}.admin-account-list{{display:grid;gap:10px;margin-top:10px}}.admin-account{{background:var(--surface-3);border:1px solid var(--line);border-radius:15px;padding:15px}}.root-account{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}}.admin-account h3{{margin:3px 0;font-size:15px}}.admin-account p{{margin:0;color:var(--muted);font-size:10px}}.admin-account-head{{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}}.admin-account-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}.permission-title{{margin-top:13px}}.permission-grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}}.permission-option{{display:flex;align-items:center;gap:8px;margin:0;padding:9px 10px;border:1px solid var(--line-soft);border-radius:10px;background:#0d141d;color:#c4cfdb;font-size:10px;cursor:pointer}}.permission-option input{{width:auto;min-height:0;margin:0;accent-color:var(--accent)}}.admin-account-actions{{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}}.toast{{position:fixed;right:22px;top:18px;z-index:20;max-width:min(360px,calc(100vw - 32px));padding:11px 14px;border:1px solid rgba(89,217,155,.25);background:#10231c;color:#9aebc0;border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.35);font-size:12px}}.toast-error{{background:#28131a;color:#ff9bad;border-color:rgba(255,116,137,.28)}}@media(max-width:1180px){{.permission-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.dashboard-grid,.mini-balance-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.request-details{{grid-template-columns:repeat(2,minmax(0,1fr))}}.settings-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:880px){{.app-shell{{grid-template-columns:1fr}}.sidebar{{position:static;height:auto;padding:12px}}.brand{{padding-bottom:12px}}.nav{{grid-template-columns:repeat(3,minmax(0,1fr))}}.nav-item{{justify-content:center;font-size:11px}}.sidebar-foot{{display:none}}.main{{padding-top:14px}}.user-workspace,.broadcast-grid{{grid-template-columns:1fr}}.toolbar{{grid-template-columns:1fr 1fr}}.toolbar input{{grid-column:1/-1}}.security-actions{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}@media(max-width:620px){{.admin-account-grid,.permission-grid{{grid-template-columns:1fr}}.admin-account-actions{{display:grid}}.root-account,.admin-account-head{{display:block}}.root-account .pill,.admin-account-head .pill{{display:inline-flex;margin-top:9px}}.topbar{{align-items:flex-start}}.top-pill{{display:none}}.dashboard-grid,.summary-grid,.mini-balance-grid{{grid-template-columns:1fr}}.nav{{grid-template-columns:repeat(2,minmax(0,1fr))}}.nav-item span{{display:none}}.toolbar,.lookup-bar,.settings-grid,.form-grid,.balance-form{{grid-template-columns:1fr}}.form-grid .wide{{grid-column:auto}}.request-details{{grid-template-columns:1fr}}.request-actions{{display:grid;grid-template-columns:1fr}}.request-actions .btn{{width:100%}}.user-profile-head{{display:block}}.profile-badges{{justify-content:flex-start;margin-top:10px}}.security-actions{{grid-template-columns:1fr}}}}
-    </style></head><body>{notice_html}<div class='app-shell'><aside class='sidebar'><div class='brand'><div class='brand-mark'>N</div><div><strong>Nerlo Wallet</strong><small>Yönetim Merkezi</small></div></div><nav class='nav'>{nav_html}</nav><div class='sidebar-foot'><span class='version'>NERLO-FULL-EXCHANGE-2026.06.24-R1</span><a class='logout' href='/logout'>Güvenli çıkış</a></div></aside><main class='main'><header class='topbar'><div><h1>Kontrol Merkezi</h1><p>Kullanıcı, bakiye ve işlem operasyonları</p></div><span class='top-pill'>{h(current_panel_username())} · {h(now())}</span></header>
+    
+    /* Professional Operations UI v5 fresh build */
+    :root{{--bg:#06090e;--sidebar:#090d13;--surface:#0d131c;--surface-2:#111925;--surface-3:#080d14;
+    --line:#1b2735;--line-soft:#141e2a;--text:#f5f7fa;--muted:#8998aa;--muted-2:#5e6c7d;
+    --accent:#63e2cb;--accent-2:#72bfff;--success:#62d99e;--warning:#f1c96d;--danger:#ff7e94;--radius:20px}}
+    body{{background:radial-gradient(circle at 82% -8%,rgba(99,226,203,.08),transparent 28%),
+    linear-gradient(180deg,#070a10 0%,#05080c 100%);font-size:14px}}
+    .app-shell{{grid-template-columns:260px minmax(0,1fr)}}
+    .sidebar{{padding:22px 16px;background:rgba(8,12,18,.97);border-right:1px solid rgba(255,255,255,.055)}}
+    .brand{{padding:4px 8px 25px}}.brand-mark{{width:42px;height:42px;border-radius:14px;box-shadow:none}}
+    .brand strong{{font-size:16px;letter-spacing:-.02em}}.brand small{{font-size:10px;letter-spacing:.05em;text-transform:uppercase}}
+    .nav{{gap:6px}}.nav-item{{min-height:44px;border:1px solid transparent;border-radius:13px;padding:9px 11px;color:#98a6b7;font-weight:700}}
+    .nav-item span{{width:28px;height:28px;border-radius:9px;background:#0d141e;color:#627286}}
+    .nav-item:hover{{background:#0e151f;border-color:#182433}}.nav-item.active{{background:linear-gradient(135deg,rgba(99,226,203,.12),rgba(114,191,255,.06));
+    border-color:rgba(99,226,203,.17);color:#f6f9fb}}.nav-item.active span{{background:rgba(99,226,203,.15);color:var(--accent)}}
+    .sidebar-foot{{border-color:rgba(255,255,255,.055)}}.logout{{display:inline-flex;padding:8px 0;color:#aab5c2}}
+    .main{{padding:28px clamp(20px,3.2vw,46px) 48px;max-width:1680px;width:100%}}
+    .topbar{{margin-bottom:28px;padding-bottom:20px;border-bottom:1px solid rgba(255,255,255,.055)}}
+    .topbar h1{{font-size:25px}}.topbar p{{font-size:12px}}.top-pill{{display:flex;align-items:center;gap:8px;padding:9px 12px;background:#0a1018}}
+    .live-dot{{width:7px;height:7px;border-radius:50%;background:var(--success);box-shadow:0 0 0 5px rgba(98,217,158,.09)}}
+    .section-head{{margin-bottom:17px}}.section-head h2{{font-size:21px}}.section-head h3{{font-size:16px}}
+    .eyebrow{{color:#6f8092;font-size:9px;letter-spacing:.16em}}.panel-card{{background:linear-gradient(180deg,rgba(15,22,32,.96),rgba(10,16,24,.96));
+    border-color:rgba(255,255,255,.07);box-shadow:0 22px 60px rgba(0,0,0,.16);padding:20px}}
+    .dashboard-grid{{grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}}.wallet-metric{{min-height:124px;padding:17px;border-radius:18px;
+    background:linear-gradient(145deg,#0f1722,#0a1018);border-color:rgba(255,255,255,.07)}}
+    .asset-dot{{width:36px;height:36px;border-radius:11px;font-size:12px}}.wallet-metric span{{font-size:10px;text-transform:uppercase;letter-spacing:.08em}}
+    .wallet-metric strong{{font-size:20px;margin-top:8px}}.wallet-metric small{{display:block;margin-top:7px}}
+    .summary-grid{{gap:12px;margin-top:12px}}.summary-card{{padding:17px 18px;border-radius:16px;background:#0a1018;border-color:rgba(255,255,255,.065)}}
+    .summary-card span{{font-size:10px;text-transform:uppercase;letter-spacing:.08em}}.summary-card strong{{font-size:25px}}
+    input,select,textarea{{min-height:44px;border-radius:12px;border-color:#1d2a39;background:#080d14;padding:10px 12px}}
+    label{{font-size:10px;letter-spacing:.04em}}.btn{{min-height:40px;border-radius:11px;padding:9px 14px;transition:.18s ease}}
+    .btn:hover{{transform:translateY(-1px);filter:brightness(1.06)}}.btn.primary{{box-shadow:0 12px 26px rgba(99,226,203,.10)}}
+    .toolbar{{padding:4px;gap:10px;margin-bottom:17px}}.request-list{{gap:12px}}
+    .request-item{{position:relative;overflow:hidden;padding:18px;border-radius:18px;background:linear-gradient(160deg,#0d141e,#080d14);
+    border-color:rgba(255,255,255,.075)}}.request-item:before{{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:#334255}}
+    .request-deposit:before{{background:var(--success)}}.request-withdraw:before{{background:var(--accent-2)}}.request-convert:before{{background:var(--accent)}}
+    .request-title{{align-items:center}}.request-ident{{min-width:0}}.request-type{{display:inline-block;color:var(--accent);font-size:9px;font-weight:850;
+    letter-spacing:.12em;text-transform:uppercase;margin-bottom:5px}}.request-title h3{{font-size:15px;margin:0}}.request-title p{{margin:5px 0 0;color:var(--muted-2);font-size:10px}}
+    .request-primary{{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:16px 0 12px;padding:15px 16px;
+    border:1px solid rgba(255,255,255,.06);border-radius:14px;background:rgba(255,255,255,.022)}}
+    .request-primary span{{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}}.request-primary strong{{font-size:22px;letter-spacing:-.035em}}
+    .request-details{{grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:0}}.request-detail{{padding:10px 11px;border-radius:11px;
+    background:#0b1119;border-color:rgba(255,255,255,.05)}}.request-detail span{{font-size:9px;text-transform:uppercase;letter-spacing:.07em}}
+    .request-detail b{{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}.request-warning{{display:flex;justify-content:space-between;gap:12px;align-items:center;
+    padding:11px 12px;border-radius:12px}}.request-warning b{{font-size:11px}}.request-warning span{{font-size:10px}}.request-warning.safe{{border-color:rgba(98,217,158,.22);
+    background:rgba(98,217,158,.07);color:#8ce8b9}}.request-actions{{padding-top:12px;border-top:1px solid rgba(255,255,255,.05)}}
+    .status{{min-height:28px;padding:5px 10px;font-size:9px;letter-spacing:.04em}}
+    .mini-balance-grid{{gap:10px}}.mini-balance{{padding:13px;border-radius:14px;background:#0a1018;border-color:rgba(255,255,255,.06)}}
+    .mini-balance .mini-asset{{display:flex;align-items:baseline;justify-content:flex-start;gap:7px}}.mini-balance .mini-asset span{{color:var(--accent);font-weight:900}}
+    .mini-balance .mini-asset small{{margin:0;color:var(--muted-2)}}.mini-balance strong{{display:block;font-size:15px;margin-top:10px}}
+    .mini-pending{{font-size:9px;color:var(--muted-2);margin-top:8px}}.table-wrap{{border-radius:14px;border-color:rgba(255,255,255,.06)}}
+    th{{padding:11px 12px;background:#090f16;font-size:9px}}td{{padding:11px 12px;font-size:10px}}tbody tr:hover{{background:rgba(255,255,255,.018)}}
+    .settings-nav{{padding:5px;border:1px solid rgba(255,255,255,.06);border-radius:13px;background:#080d14}}
+    .setting-tab{{border:0;border-radius:9px}}.setting-tab.active{{background:rgba(99,226,203,.11);color:var(--accent)}}
+    .toast{{top:22px;right:26px;border-radius:13px}}.empty-state{{border-color:#263444;background:rgba(255,255,255,.012)}}
+    @media(max-width:1180px){{.dashboard-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.request-details{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
+    @media(max-width:880px){{.app-shell{{grid-template-columns:1fr}}.sidebar{{position:static;height:auto}}.nav{{grid-template-columns:repeat(3,minmax(0,1fr))}}
+    .main{{padding:18px}}.request-primary{{align-items:flex-start;flex-direction:column}}.request-primary strong{{font-size:20px}}}}
+    @media(max-width:620px){{.dashboard-grid,.summary-grid,.mini-balance-grid{{grid-template-columns:1fr}}.nav{{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    .request-details{{grid-template-columns:1fr}}.request-warning{{display:block}}.request-warning span{{display:block;margin-top:5px}}}}
+
+    </style></head><body>{notice_html}<div class='app-shell'><aside class='sidebar'><div class='brand'><div class='brand-mark'>N</div><div><strong>Nerlo Wallet</strong><small>Yönetim Merkezi</small></div></div><nav class='nav'>{nav_html}</nav><div class='sidebar-foot'><span class='version'>NERLO OPERATIONS · PRO V5</span><a class='logout' href='/logout'>Güvenli çıkış</a></div></aside><main class='main'><header class='topbar'><div><span class='eyebrow'>NERLO OPERATIONS</span><h1>Finans Kontrol Merkezi</h1><p>Blockchain, kullanıcı ve bakiye operasyonları tek güvenli çalışma alanında.</p></div><span class='top-pill'><i class='live-dot'></i>{h(current_panel_username())} · Sistem aktif</span></header>
 
     {dashboard_section}
 
