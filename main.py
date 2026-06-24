@@ -380,11 +380,12 @@ DEFAULT_SETTINGS = {
     "iban_owner": os.getenv("DEFAULT_IBAN_OWNER", ""),
     "wallet_USDT": os.getenv("DEFAULT_WALLET_USDT", ""),
     "wallet_TRX": os.getenv("DEFAULT_WALLET_TRX", ""),
-    "wallet_XMR": os.getenv("DEFAULT_WALLET_XMR", ""), os.getenv("DEFAULT_WALLET_TRX", ""),
+    "wallet_XMR": os.getenv("DEFAULT_WALLET_XMR", ""),
     "wallet_LTC": os.getenv("DEFAULT_WALLET_LTC", ""),
     "rate_USDT_TL": "46.40",
     "rate_LTC_TL": "2065.00",
     "rate_TRX_TL": "15.50",
+    "rate_XMR_TL": "0", "15.50",
     "auto_rate_enabled": "on",
     "rates_source": "Binance Spot",
     "rates_last_updated": "",
@@ -438,7 +439,7 @@ DEFAULT_SETTINGS = {
     "icon_rejected": "5895319286410387652",
     "icon_USDT": "5895571353746021767",
     "icon_LTC": "5895441495409828662",
-    "icon_TRX": "5895440778150288520",
+    "icon_TRX": settings.get("icon_TRX", ""),
     "icon_XMR": "5900147027219587568", "5895440778150288520",
     "icon_TL": "5897961936837943618",
 }
@@ -495,7 +496,7 @@ def _render_asset_icons(value):
     entities = []
     cursor = 0
     offset = 0
-    pattern = re.compile(r"\{\{(TL|USDT|LTC|TRX|XMR)\}\}")
+    pattern = re.compile(r"\{\{(TL|USDT|LTC|TRX)\}\}")
 
     for match in pattern.finditer(source):
         before = source[cursor:match.start()]
@@ -528,7 +529,7 @@ def _render_asset_icons(value):
 
 def _plain_asset_icons(value):
     return re.sub(
-        r"\{\{(TL|USDT|LTC|TRX|XMR)\}\}",
+        r"\{\{(TL|USDT|LTC|TRX)\}\}",
         lambda m: "₺" if m.group(1) == "TL" else m.group(1),
         str(value),
     )
@@ -1936,8 +1937,7 @@ def setting_label(key):
         "iban": "IBAN",
         "iban_owner": "IBAN hesap sahibi",
         "wallet_USDT": "USDT yatırma adresi",
-        "wallet_TRX": os.getenv("DEFAULT_WALLET_TRX", ""),
-    "wallet_XMR": os.getenv("DEFAULT_WALLET_XMR", ""), "TRX yatırma adresi",
+        "wallet_TRX": "TRX yatırma adresi",
         "wallet_LTC": "LTC yatırma adresi",
         "maintenance_mode": "Bakım durumu",
         "maintenance_message": "Bakım mesajı",
