@@ -118,12 +118,12 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-25-TRON-POOL-V10-FRESH"
-PANEL_RELEASE = "ENTERPRISE-OPERATIONS-POOL-V10"
+BUILD_VERSION = "NERLO-2026-06-25-TREASURY-CONTROL-V11-FRESH"
+PANEL_RELEASE = "TREASURY-CONTROL-CENTER-V11"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
 SWEEP_RELEASE = "TRON-HD-DEPOSIT-SWEEP-V1"
-SOURCE_BASE_SHA256 = "1dec90192c4e2bbf7c1266738f9f74db2e2d89f265ef735134655b4cb81069d3"
+SOURCE_BASE_SHA256 = "e02572a5075f8b29236086eedc23ddefd97ec049855ac2229138e4cd4b92aea2"
 
 CONFIRMATION_THRESHOLDS = {
     "BTC": max(1, int(os.getenv("BTC_CONFIRMATIONS", "3"))),
@@ -6664,38 +6664,41 @@ def login():
 
     return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'>
     <meta name='viewport' content='width=device-width,initial-scale=1'>
-    <meta name='color-scheme' content='dark'><title>Nerlo Operations · Pool V10</title><style>
-    :root{{--bg:#05080d;--card:#0d131c;--line:#1c2836;--text:#f6f8fb;--muted:#8190a3;--accent:#64e4ce;--accent2:#72bfff;--danger:#ff8095}}
-    *{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;color:var(--text);
-    font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-    background:radial-gradient(circle at 12% 12%,rgba(100,228,206,.13),transparent 28%),
-    radial-gradient(circle at 88% 86%,rgba(114,191,255,.10),transparent 30%),var(--bg)}}
-    .shell{{width:min(960px,100%);display:grid;grid-template-columns:1.05fr .95fr;border:1px solid var(--line);
-    border-radius:28px;overflow:hidden;background:rgba(8,12,18,.92);box-shadow:0 40px 120px rgba(0,0,0,.48)}}
-    .intro{{padding:54px;background:linear-gradient(145deg,rgba(100,228,206,.10),rgba(114,191,255,.03));display:flex;flex-direction:column;justify-content:space-between}}
-    .brand{{display:flex;align-items:center;gap:13px}}.mark{{width:46px;height:46px;border-radius:15px;display:grid;place-items:center;
-    background:linear-gradient(135deg,var(--accent),var(--accent2));color:#031014;font-size:20px;font-weight:950}}
-    .brand b{{font-size:18px}}.brand span{{display:block;color:var(--muted);font-size:12px;margin-top:2px}}
-    .intro h1{{font-size:38px;line-height:1.08;letter-spacing:-.045em;margin:52px 0 14px;max-width:520px}}
-    .intro p{{color:#9aa8b9;line-height:1.65;max-width:510px;margin:0}}.trust{{display:flex;gap:9px;flex-wrap:wrap;margin-top:44px}}
-    .trust span{{padding:8px 10px;border:1px solid rgba(255,255,255,.08);border-radius:999px;color:#a9b5c4;font-size:11px;background:rgba(255,255,255,.025)}}
-    .login{{padding:54px;display:flex;flex-direction:column;justify-content:center;background:var(--card)}}.login h2{{font-size:24px;margin:0}}
-    .login>p{{color:var(--muted);margin:8px 0 26px;line-height:1.5}}label{{display:block;color:#aeb9c7;font-size:11px;font-weight:750;margin:16px 0 7px}}
-    input,button{{width:100%;height:48px;border-radius:13px;font:inherit}}input{{border:1px solid var(--line);background:#080d14;color:var(--text);padding:0 14px;outline:none}}
-    input:focus{{border-color:var(--accent);box-shadow:0 0 0 4px rgba(100,228,206,.08)}}button{{border:0;margin-top:20px;
-    background:linear-gradient(135deg,var(--accent),var(--accent2));color:#041116;font-weight:900;cursor:pointer}}
-    .error{{min-height:22px;color:var(--danger);font-size:12px;margin-top:12px}}.secure{{color:#627083;font-size:10px;margin-top:18px;text-align:center}}
-    @media(max-width:760px){{.shell{{grid-template-columns:1fr}}.intro{{display:none}}.login{{padding:34px 24px}}}}
-    </style></head><body><main class='shell'><section class='intro'><div><div class='brand'><div class='mark'>N</div>
-    <div><b>Nerlo Wallet</b><span>Exchange Operations Suite</span></div></div><h1>Finans operasyonlarını tek merkezden yönetin.</h1>
-    <p>Bakiyeler, blockchain hareketleri, kullanıcılar, çekim onayları ve sistem ayarları için güvenli yönetim alanı.</p></div>
-    <div class='trust'><span>PostgreSQL Ledger</span><span>Blockchain Indexer</span><span>Rol Bazlı Erişim</span></div></section>
-    <form class='login' method='post'><h2>Yönetim paneli</h2><p>Yetkili hesabınızla güvenli oturum açın.</p>
-    <label>Kullanıcı adı</label><input name='username' autocomplete='username' required>
-    <label>Şifre</label><input type='password' autocomplete='current-password' name='password' required>
-    <button>Güvenli Giriş</button><div class='error'>{h(error)}</div><div class='secure'>Oturumlar güvenli çerez ve CSRF koruması ile doğrulanır.</div>
-    </form></main></body></html>"""
-
+    <meta name='color-scheme' content='dark'><title>Nerlo Treasury Control</title><style>
+    :root{{--ink:#f4f7fb;--muted:#8b98a9;--line:#202b3a;--panel:#0d141e;--panel2:#111b28;--bg:#06090e;
+    --blue:#6aa9ff;--mint:#69dfc3;--amber:#efc36b;--danger:#ff7890;--success:#5ed29b}}
+    *{{box-sizing:border-box}}html,body{{min-height:100%}}body{{margin:0;color:var(--ink);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:
+    radial-gradient(circle at 8% 0%,rgba(106,169,255,.12),transparent 28%),radial-gradient(circle at 90% 100%,rgba(105,223,195,.09),transparent 30%),var(--bg)}}
+    .login-layout{{min-height:100vh;display:grid;grid-template-columns:minmax(0,1.25fr) minmax(420px,.75fr)}}
+    .briefing{{position:relative;overflow:hidden;padding:54px clamp(36px,7vw,92px);display:flex;flex-direction:column;justify-content:space-between;border-right:1px solid rgba(255,255,255,.06)}}
+    .briefing:before{{content:"";position:absolute;inset:0;background:linear-gradient(125deg,rgba(255,255,255,.018),transparent 45%);pointer-events:none}}
+    .brandline{{position:relative;display:flex;align-items:center;gap:13px}}.brandmark{{width:44px;height:44px;border-radius:13px;display:grid;place-items:center;background:#f4f7fb;color:#06101b;font-weight:950;font-size:18px}}
+    .brandline b{{display:block;font-size:16px;letter-spacing:-.02em}}.brandline span{{display:block;color:#66758a;font-size:10px;letter-spacing:.13em;text-transform:uppercase;margin-top:2px}}
+    .brief-copy{{position:relative;max-width:730px;margin:80px 0}}.brief-copy small{{display:inline-flex;align-items:center;gap:8px;color:var(--mint);font-weight:800;letter-spacing:.12em;text-transform:uppercase;font-size:10px}}
+    .brief-copy small:before{{content:"";width:24px;height:1px;background:var(--mint)}}.brief-copy h1{{font-size:clamp(42px,6vw,76px);line-height:.98;letter-spacing:-.06em;margin:18px 0 22px;max-width:780px}}
+    .brief-copy p{{max-width:650px;color:#94a2b3;font-size:16px;line-height:1.7;margin:0}}
+    .capabilities{{position:relative;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}}.cap{{padding:15px 16px;border:1px solid rgba(255,255,255,.065);border-radius:15px;background:rgba(12,18,27,.58)}}
+    .cap span{{display:block;color:#627184;font-size:9px;letter-spacing:.1em;text-transform:uppercase}}.cap strong{{display:block;margin-top:5px;font-size:12px}}
+    .access{{display:grid;place-items:center;padding:30px;background:rgba(7,11,17,.86)}}.access-card{{width:min(420px,100%);padding:34px;border:1px solid var(--line);border-radius:24px;background:linear-gradient(180deg,#101823,#0b1119);box-shadow:0 32px 100px rgba(0,0,0,.42)}}
+    .access-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:28px}}.access-head h2{{margin:0;font-size:24px;letter-spacing:-.035em}}.access-head p{{margin:7px 0 0;color:var(--muted);font-size:12px}}
+    .secure-dot{{width:38px;height:38px;border:1px solid rgba(94,210,155,.2);border-radius:12px;display:grid;place-items:center;background:rgba(94,210,155,.08);color:var(--success);font-weight:900}}
+    label{{display:block;margin:15px 0 7px;color:#a8b4c3;font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}}input,button{{width:100%;height:48px;border-radius:12px;font:inherit}}
+    input{{border:1px solid var(--line);background:#080d14;color:var(--ink);padding:0 14px;outline:none}}input:focus{{border-color:var(--blue);box-shadow:0 0 0 4px rgba(106,169,255,.09)}}
+    button{{border:0;margin-top:21px;background:#f4f7fb;color:#07111b;font-weight:900;cursor:pointer;transition:.2s transform,.2s opacity}}button:hover{{transform:translateY(-1px);opacity:.94}}
+    .login-error{{min-height:20px;margin-top:12px;color:var(--danger);font-size:11px}}.access-foot{{display:flex;justify-content:space-between;gap:12px;margin-top:18px;padding-top:16px;border-top:1px solid rgba(255,255,255,.055);color:#637185;font-size:9px}}
+    @media(max-width:900px){{.login-layout{{grid-template-columns:1fr}}.briefing{{display:none}}.access{{min-height:100vh;padding:20px}}.access-card{{padding:28px 22px}}}}
+    </style></head><body><main class='login-layout'>
+      <section class='briefing'><div class='brandline'><div class='brandmark'>N</div><div><b>Nerlo Wallet</b><span>Treasury Control Center</span></div></div>
+        <div class='brief-copy'><small>Kurumsal operasyon alanı</small><h1>Finans akışını net, kontrollü ve izlenebilir yönetin.</h1><p>Blockchain yatırımları, havuz hareketleri, çekim onayları, kullanıcı bakiyeleri ve denetim kayıtları için tek merkez.</p></div>
+        <div class='capabilities'><div class='cap'><span>Finans</span><strong>PostgreSQL Ledger</strong></div><div class='cap'><span>Blockchain</span><strong>Indexer & Sweep</strong></div><div class='cap'><span>Güvenlik</span><strong>Rol Bazlı Yetki</strong></div></div>
+      </section>
+      <section class='access'><form class='access-card' method='post'><div class='access-head'><div><h2>Yetkili girişi</h2><p>Operasyon hesabınızla devam edin.</p></div><div class='secure-dot'>✓</div></div>
+        <label>Kullanıcı adı</label><input name='username' autocomplete='username' required autofocus>
+        <label>Şifre</label><input type='password' autocomplete='current-password' name='password' required>
+        <button>Kontrol merkezine gir</button><div class='login-error'>{h(error)}</div>
+        <div class='access-foot'><span>CSRF korumalı oturum</span><span>30 dk güvenli süre</span></div>
+      </form></section>
+    </main></body></html>"""
 @app.route("/logout")
 def logout(): session.clear(); return redirect("/login")
 
@@ -7035,70 +7038,52 @@ def panel_request_card(rid, r):
     destination_label = ""
     destination_value = ""
     if request_type == "deposit":
-        primary_label = "Bakiyeye eklenecek"
+        primary_label = "Net yatırım"
         primary_value = fmt(r.get("net_amount"), asset)
-        amount_caption = (
-            f"Brüt {fmt(r.get('amount'), asset)} · Hizmet ücreti {fmt(r.get('fee'), asset)}"
-        )
-        facts = [
-            ("Ağ", network),
-            ("Kullanıcı", f"@{username}"),
-            ("Kullanıcı ID", uid),
-            ("Oluşturulma", created),
-        ]
+        gross_label = "Brüt yatırım"
+        gross_value = fmt(r.get("amount"), asset)
+        fee_value = fmt(r.get("fee"), asset)
+        details = [("Ağ", network), ("Kullanıcı", f"@{username}"), ("Kullanıcı ID", uid)]
         if asset == "TL":
+            details.insert(0, ("Gönderen", r.get("sender_name") or "-"))
             destination_label = "Ödeme referansı"
             destination_value = str(r.get("tx_note") or "-")
-            facts.insert(0, ("Gönderen", r.get("sender_name") or "-"))
         elif txid:
             destination_label = "Blockchain TXID"
             destination_value = txid
     elif request_type == "withdraw":
-        primary_label = "Gönderilecek net tutar"
+        primary_label = "Net gönderim"
         primary_value = fmt(r.get("net_amount"), asset)
-        amount_caption = (
-            f"Talep {fmt(r.get('amount'), asset)} · Hizmet ücreti {fmt(r.get('fee'), asset)}"
-        )
-        facts = [
-            ("Ağ", network),
-            ("Kullanıcı", f"@{username}"),
-            ("Kullanıcı ID", uid),
-            ("Oluşturulma", created),
-        ]
+        gross_label = "Talep tutarı"
+        gross_value = fmt(r.get("amount"), asset)
+        fee_value = fmt(r.get("fee"), asset)
+        details = [("Ağ", network), ("Kullanıcı", f"@{username}"), ("Kullanıcı ID", uid)]
         destination_label = "Hedef IBAN" if asset == "TL" else "Hedef cüzdan"
         destination_value = str(r.get("iban") or r.get("address") or "-")
         if asset == "TL":
-            facts.insert(1, ("Alıcı", r.get("name") or "-"))
+            details.insert(1, ("Alıcı", r.get("name") or "-"))
         if txid:
-            facts.append(("TXID", txid))
+            details.append(("TXID", txid))
     else:
         target_asset = str(r.get("to_asset") or "")
         primary_label = "Dönüşüm sonucu"
         primary_value = fmt(r.get("net_to_amount"), target_asset)
-        amount_caption = (
-            f"Gönderilen {fmt(r.get('from_amount'), r.get('from_asset'))} · "
-            f"Hizmet ücreti {fmt(r.get('fee'), target_asset)}"
-        )
-        facts = [
-            ("Parite", f"{r.get('from_asset', '-')} → {target_asset or '-'}"),
-            ("Kullanıcı", f"@{username}"),
-            ("Kullanıcı ID", uid),
-            ("Oluşturulma", created),
-        ]
+        gross_label = "Kaynak tutar"
+        gross_value = fmt(r.get("from_amount"), r.get("from_asset"))
+        fee_value = fmt(r.get("fee"), target_asset)
+        details = [("Parite", f"{r.get('from_asset', '-')} → {target_asset or '-'}"), ("Kullanıcı", f"@{username}"), ("Kullanıcı ID", uid)]
 
-    fact_html = "".join(
-        f"<div class='request-fact'><span>{h(label)}</span><strong title='{h(value)}'>{h(value)}</strong></div>"
-        for label, value in facts
+    detail_html = "".join(
+        f"<div class='case-detail'><span>{h(label)}</span><strong title='{h(value)}'>{h(value)}</strong></div>"
+        for label, value in details
     )
     destination_html = ""
     if destination_value:
-        copy_button_html = (
-            f"<button type='button' class='copy-control' data-copy='{h(destination_value)}'>Kopyala</button>"
-            if destination_value != "-" else ""
-        )
         destination_html = (
-            f"<div class='destination-box'><div><span>{h(destination_label)}</span>"
-            f"<code>{h(destination_value)}</code></div>{copy_button_html}</div>"
+            "<div class='case-destination'><div><span>" + h(destination_label) + "</span>"
+            f"<code>{h(destination_value)}</code></div>"
+            + (f"<button type='button' class='copy-control' data-copy='{h(destination_value)}'>Kopyala</button>" if destination_value != "-" else "")
+            + "</div>"
         )
 
     actions = ""
@@ -7106,67 +7091,46 @@ def panel_request_card(rid, r):
         is_crypto_withdraw = _is_crypto_withdraw_record(r)
         asset_upper = str(r.get("asset") or "").upper()
         if is_crypto_withdraw and r.get("broadcast_locked"):
-            signer_state = h(r.get("signer_status") or "işleniyor")
             actions = (
-                "<div class='operation-banner info'><div><b>Blockchain gönderimi başlatıldı</b>"
-                f"<span>Signer durumu: {signer_state}. Ağ sonucu bekleniyor.</span></div></div>"
+                "<div class='case-alert info'><b>Blockchain gönderimi devam ediyor</b>"
+                f"<span>Signer durumu: {h(r.get('signer_status') or 'işleniyor')}. Ağ sonucu bekleniyor.</span></div>"
             )
         elif is_crypto_withdraw and asset_upper in MANUAL_WITHDRAW_ASSETS:
-            process_button = "" if status == "processing" else "<button class='btn ghost' name='action' value='process_request'>İşleme Al</button>"
+            process_button = "" if status == "processing" else "<button class='btn subtle' name='action' value='process_request'>İşleme al</button>"
             actions = (
-                "<div class='operation-banner warning'><div><b>Manuel blockchain gönderimi</b>"
-                "<span>Transferi harici cüzdandan hedef adrese gönderin. Gerçek TXID oluşunca aşağıya girin.</span></div></div>"
-                f"<form method='post' class='manual-txid-form'>"
-                f"<input type='hidden' name='rid' value='{h(rid)}'>"
-                f"<input type='hidden' name='return_to' value='/admin?view=requests'>"
-                f"<input name='manual_txid' autocomplete='off' placeholder='{h(asset_upper)} TXID' required>"
-                f"<button class='btn success' name='action' value='complete_manual_crypto'>TXID ile Tamamla</button>"
-                "</form>"
-                f"<form method='post' class='request-actions'>"
-                f"<input type='hidden' name='rid' value='{h(rid)}'>"
-                f"<input type='hidden' name='return_to' value='/admin?view=requests'>"
-                f"{process_button}<button class='btn danger' name='action' value='reject_request'>Reddet</button>"
-                "</form>"
+                "<div class='case-alert warning'><b>Manuel blockchain transferi</b><span>Harici cüzdandan gönderim yapın; gerçek TXID oluşunca kaydedin.</span></div>"
+                f"<form method='post' class='txid-command'><input type='hidden' name='rid' value='{h(rid)}'><input type='hidden' name='return_to' value='/admin?view=requests'>"
+                f"<input name='manual_txid' autocomplete='off' placeholder='{h(asset_upper)} TXID' required><button class='btn positive' name='action' value='complete_manual_crypto'>TXID ile tamamla</button></form>"
+                f"<form method='post' class='case-actions'><input type='hidden' name='rid' value='{h(rid)}'><input type='hidden' name='return_to' value='/admin?view=requests'>{process_button}<button class='btn negative' name='action' value='reject_request'>Reddet</button></form>"
             )
         else:
-            process_button = "" if status == "processing" else "<button class='btn ghost' name='action' value='process_request'>İşleme Al</button>"
-            approve_button = "" if is_crypto_withdraw else "<button class='btn success' name='action' value='approve_request'>Tamamla</button>"
+            process_button = "" if status == "processing" else "<button class='btn subtle' name='action' value='process_request'>İşleme al</button>"
+            approve_button = "" if is_crypto_withdraw else "<button class='btn positive' name='action' value='approve_request'>Tamamla</button>"
             if is_crypto_withdraw and asset_upper in AUTO_WITHDRAW_ASSETS and r.get("signer_enabled"):
-                warning = (
-                    "<div class='operation-banner safe'><div><b>Otomatik gönderim hazır</b>"
-                    "<span>İşleme Al komutu transferi TRON ağına gönderir.</span></div></div>"
-                )
+                note = "<div class='case-alert safe'><b>Otomatik gönderime hazır</b><span>İşleme al komutu transferi TRON ağına iletir.</span></div>"
             elif is_crypto_withdraw:
-                warning = (
-                    "<div class='operation-banner warning'><div><b>Bu çekim akışı hazır değil</b>"
-                    "<span>Talep zincire gönderilmeden tamamlanamaz.</span></div></div>"
-                )
+                note = "<div class='case-alert warning'><b>Blockchain akışı hazır değil</b><span>Talep gerçek TXID olmadan tamamlanamaz.</span></div>"
             else:
-                warning = ""
+                note = ""
             actions = (
-                f"{warning}<form method='post' class='request-actions'>"
-                f"<input type='hidden' name='rid' value='{h(rid)}'>"
-                f"<input type='hidden' name='return_to' value='/admin?view=requests'>"
-                f"{process_button}{approve_button}"
-                f"<button class='btn danger' name='action' value='reject_request'>Reddet</button>"
-                "</form>"
+                note + f"<form method='post' class='case-actions'><input type='hidden' name='rid' value='{h(rid)}'><input type='hidden' name='return_to' value='/admin?view=requests'>"
+                f"{process_button}{approve_button}<button class='btn negative' name='action' value='reject_request'>Reddet</button></form>"
             )
 
-    return (
-        f"<article class='request-card request-{h(request_type)}'>"
-        "<header class='request-card-head'>"
-        f"<div><span class='request-kicker'>{h(request_type_label(request_type))}</span>"
-        f"<h3>#{h(rid)}</h3><p>@{h(username)} · {h(uid)}</p></div>"
-        f"<span class='status {request_status_class(status)}'><i></i>{h(status_label(status))}</span>"
-        "</header>"
-        "<div class='request-money'>"
-        f"<span>{h(primary_label)}</span><strong>{h(primary_value)}</strong><small>{h(amount_caption)}</small>"
-        "</div>"
-        f"<div class='request-facts'>{fact_html}</div>"
-        f"{destination_html}{actions}</article>"
-    )
-
-
+    return f"""
+    <article class='case-card case-{h(request_type)}'>
+      <div class='case-topline'>
+        <div class='case-identity'><span class='case-type'>{h(request_type_label(request_type))}</span><strong>#{h(rid)}</strong><small>{h(created)}</small></div>
+        <span class='status {request_status_class(status)}'><i></i>{h(status_label(status))}</span>
+      </div>
+      <div class='case-body'>
+        <section class='case-amount'><span>{h(primary_label)}</span><strong>{h(primary_value)}</strong><div class='case-breakdown'><span>{h(gross_label)} <b>{h(gross_value)}</b></span><span>Hizmet ücreti <b>{h(fee_value)}</b></span></div></section>
+        <section class='case-information'>{detail_html}</section>
+      </div>
+      {destination_html}
+      <footer class='case-footer'>{actions or "<span class='case-complete-note'>Bu işlem için açık yönetici aksiyonu bulunmuyor.</span>"}</footer>
+    </article>
+    """
 def render_request_list(query="", status_filter="all", type_filter="all"):
     items = []
     for rid, r in requests_db.items():
@@ -7604,6 +7568,7 @@ def admin():
     request_query = request.args.get("rq", "").strip()
     status_filter = request.args.get("status", "all")
     type_filter = request.args.get("type", "all")
+
     totals, pending = reserve_totals()
     pool_snapshot = tron_pool_snapshot()
     pool_counts = pool_snapshot.get("sweeps") or {}
@@ -7615,17 +7580,41 @@ def admin():
     pool_address = str(pool_snapshot.get("address") or TRON_POOL_ADDRESS or "")
     pool_error = str(pool_snapshot.get("error") or "")
 
-    asset_metrics = "".join(
-        f"<div class='wallet-metric'><div class='asset-dot'>{h(a[0])}</div><div><span>{h(a)} toplam bakiye</span><strong>{h(fmt(totals[a], a))}</strong><small>Bekleyen çekim: {h(fmt(pending[a], a))}</small></div></div>"
-        for a in ASSETS
+    status_counts = {key: 0 for key in ("pending", "processing", "completed", "rejected")}
+    type_counts = {key: 0 for key in ("deposit", "withdraw", "convert")}
+    for item in requests_db.values():
+        status_counts[str(item.get("status") or "pending")] = status_counts.get(str(item.get("status") or "pending"), 0) + 1
+        type_counts[str(item.get("type") or "other")] = type_counts.get(str(item.get("type") or "other"), 0) + 1
+
+    pending_count = status_counts.get("pending", 0) + status_counts.get("processing", 0)
+    completed_today = sum(
+        1 for r in requests_db.values()
+        if r.get("status") == "completed" and str(r.get("updated_at", r.get("created_at", ""))).startswith(today())
     )
-    pending_count = sum(1 for r in requests_db.values() if r.get("status") in ("pending", "processing"))
-    completed_today = sum(1 for r in requests_db.values() if r.get("status") == "completed" and str(r.get("updated_at", r.get("created_at", ""))).startswith(today()))
+    frozen_users = sum(1 for u in users.values() if u.get("status") == "frozen")
+    locked_users = sum(1 for u in users.values() if u.get("withdraw_locked"))
+
+    recent_requests = sorted(requests_db.items(), key=lambda item: item[1].get("created_at", ""), reverse=True)[:8]
+    recent_activity = "".join(
+        f"<div class='activity-row'><span class='activity-mark {request_status_class(r.get('status'))}'></span>"
+        f"<div><strong>{h(request_type_label(r.get('type')))} · #{h(rid)}</strong><small>@{h(username_label(users.get(str(r.get('user_id')), {}).get('username')))} · {h(r.get('created_at') or '-')}</small></div>"
+        f"<b>{h(fmt(r.get('net_amount') or r.get('net_to_amount') or r.get('amount') or r.get('from_amount') or '0', r.get('asset') or r.get('to_asset') or r.get('from_asset') or ''))}</b></div>"
+        for rid, r in recent_requests
+    ) or "<div class='empty-state compact-empty'>Henüz işlem hareketi bulunmuyor.</div>"
+
+    asset_cards = "".join(
+        f"<div class='asset-card'><div class='asset-head'><span class='asset-symbol'>{h(asset)}</span><small>Kullanıcı yükümlülüğü</small></div>"
+        f"<strong>{h(fmt(totals[asset], asset))}</strong><div class='asset-meta'><span>Bekleyen çekim</span><b>{h(fmt(pending[asset], asset))}</b></div></div>"
+        for asset in ASSETS
+    )
+
     recent_users = sorted(users.items(), key=lambda item: item[1].get("last_seen", ""), reverse=True)[:25]
     user_rows = "".join(
-        f"<tr><td><code>{h(uid)}</code></td><td>@{h(username_label(u.get('username')))}</td><td>{h(fmt(u.get('balances', {}).get('TL', '0'), 'TL'))}</td><td>{h(fmt(u.get('balances', {}).get('USDT', '0'), 'USDT'))}</td><td>{h(fmt(u.get('balances', {}).get('LTC', '0'), 'LTC'))}</td><td>{h(fmt(u.get('balances', {}).get('TRX', '0'), 'TRX'))}</td><td>{h(account_status_label(u.get('status')))}</td><td>{h(u.get('last_seen') or '-')}</td></tr>"
+        f"<tr><td><code>{h(uid)}</code></td><td>@{h(username_label(u.get('username')))}</td><td>{h(fmt(u.get('balances', {}).get('TL', '0'), 'TL'))}</td>"
+        f"<td>{h(fmt(u.get('balances', {}).get('USDT', '0'), 'USDT'))}</td><td>{h(fmt(u.get('balances', {}).get('TRX', '0'), 'TRX'))}</td>"
+        f"<td><span class='status {'declined' if u.get('status') == 'frozen' else 'done'}'><i></i>{h(account_status_label(u.get('status')))}</span></td><td>{h(u.get('last_seen') or '-')}</td></tr>"
         for uid, u in recent_users
-    ) or "<tr><td colspan='8' class='muted-cell'>Henüz kullanıcı yok.</td></tr>"
+    ) or "<tr><td colspan='7' class='muted-cell'>Henüz kullanıcı yok.</td></tr>"
 
     settings_groups = [
         ("rates", "Kur Yönetimi", [k for k in EDITABLE_SETTING_KEYS if k.startswith("rate_")]),
@@ -7635,264 +7624,200 @@ def admin():
         ("system", "Sistem ve Duyuru", [k for k in EDITABLE_SETTING_KEYS if k.startswith("maintenance_") or k.startswith("announcement_")]),
         ("messages", "Bot Mesajları", list(DEFAULT_MESSAGES.keys())),
     ]
-    settings_tabs = "".join(f"<button type='button' class='setting-tab {'active' if i == 0 else ''}' data-setting-target='{h(slug)}'>{h(title)}</button>" for i, (slug, title, keys) in enumerate(settings_groups))
+    settings_tabs = "".join(
+        f"<button type='button' class='setting-tab {'active' if i == 0 else ''}' data-setting-target='{h(slug)}'>{h(title)}</button>"
+        for i, (slug, title, keys) in enumerate(settings_groups)
+    )
     settings_panes = []
     for index, (slug, title, keys) in enumerate(settings_groups):
-        if slug == "messages":
-            fields = "".join(message_field(key) for key in keys)
-        else:
-            fields = "".join(setting_field(key) for key in keys)
-        settings_panes.append(f"<div class='setting-pane {'active' if index == 0 else ''}' data-setting-pane='{h(slug)}'><div class='section-head'><div><span class='eyebrow'>AYARLAR</span><h3>{h(title)}</h3></div></div><div class='settings-grid'>{fields}</div></div>")
+        fields = "".join(message_field(key) for key in keys) if slug == "messages" else "".join(setting_field(key) for key in keys)
+        settings_panes.append(
+            f"<div class='setting-pane {'active' if index == 0 else ''}' data-setting-pane='{h(slug)}'><div class='section-title compact'><div><span>AYAR GRUBU</span><h3>{h(title)}</h3></div></div><div class='settings-grid'>{fields}</div></div>"
+        )
 
     logs = "".join(
         f"<tr><td>{h(item.get('created_at'))}</td><td>{h(admin_action_label(item.get('action')))}</td><td>{h(item.get('user_id') or '-')}</td><td>{h(localized_admin_detail(item.get('details')))}</td></tr>"
         for item in reversed(admin_logs[-120:])
     ) or "<tr><td colspan='4' class='muted-cell'>Yönetim kaydı yok.</td></tr>"
+
     notice = session.pop("admin_notice", None)
     notice_html = ""
     if notice:
         notice_html = f"<div class='toast {'toast-error' if notice.get('kind') == 'error' else ''}' id='admin-toast'>{h(notice.get('message'))}</div>"
 
     nav_items = [
-        ("dashboard", "Genel Bakış", "⌂"),
-        ("pool", "Havuz & Sweep", "◉"),
-        ("requests", "İşlem Talepleri", "↗"),
-        ("users", "Kullanıcılar", "◎"),
-        ("broadcast", "Duyurular", "◫"),
-        ("settings", "Sistem Ayarları", "⚙"),
-        ("logs", "Denetim Kayıtları", "≡"),
-        ("admins", "Yetkililer", "◇"),
+        ("dashboard", "Kontrol Merkezi", "01", "Operasyon"),
+        ("pool", "Havuz & Sweep", "02", "Operasyon"),
+        ("requests", "İşlem Talepleri", "03", "Operasyon"),
+        ("users", "Kullanıcılar", "04", "Yönetim"),
+        ("broadcast", "Duyurular", "05", "Yönetim"),
+        ("settings", "Sistem Ayarları", "06", "Sistem"),
+        ("logs", "Denetim Kayıtları", "07", "Sistem"),
+        ("admins", "Yetkililer", "08", "Sistem"),
     ]
-    nav_html = "".join(
-        f"<button class='nav-item {'active' if slug == active_view else ''}' "
-        f"data-view-target='{slug}' data-view-title='{h(label)}'><span>{symbol}</span><b>{h(label)}</b></button>"
-        for slug, label, symbol in nav_items if slug in allowed_views
-    )
+    nav_parts = []
+    last_group = None
+    for slug, label, number, group in nav_items:
+        if slug not in allowed_views:
+            continue
+        if group != last_group:
+            nav_parts.append(f"<div class='nav-group-label'>{h(group)}</div>")
+            last_group = group
+        badge = ""
+        if slug == "requests" and pending_count:
+            badge = f"<em>{pending_count}</em>"
+        elif slug == "pool" and pool_review_count:
+            badge = f"<em class='alert-badge'>{pool_review_count}</em>"
+        nav_parts.append(
+            f"<button class='nav-entry {'active' if slug == active_view else ''}' data-view-target='{slug}' data-view-title='{h(label)}'><span>{number}</span><b>{h(label)}</b>{badge}</button>"
+        )
+    nav_html = "".join(nav_parts)
 
-    dashboard_section = f"""<section class='page-view {'active' if active_view == 'dashboard' else ''}' data-view='dashboard'><div class='section-head'><div><span class='eyebrow'>CANLI FİNANS ÖZETİ</span><h2>Varlık ve Operasyon Merkezi</h2><p>Kullanıcı varlıkları, bekleyen çekimler ve günlük işlem akışı.</p></div><span class='pill'>Ledger eşleşmesi aktif</span></div><div class='summary-grid'><div class='summary-card'><span>Toplam kullanıcı</span><strong>{len(users)}</strong></div><div class='summary-card'><span>Aksiyon bekleyen</span><strong>{pending_count}</strong></div><div class='summary-card'><span>Bugün tamamlanan</span><strong>{completed_today}</strong></div></div><div class='dashboard-grid' style='margin-top:12px'>{asset_metrics}</div></section>""" if "dashboard" in allowed_views else ""
-    pool_section = f"""<section class='page-view {'active' if active_view == 'pool' else ''}' data-view='pool'>
-      <div class='section-head'><div><span class='eyebrow'>TRON HAZİNE OPERASYONLARI</span><h2>Havuz ve Otomatik Toplama</h2><p>Kullanıcı yatırma adreslerinden ana havuza taşınan TRX ve TRC20 USDT hareketleri.</p></div><span class='pill {'danger-pill' if pool_review_count else ''}'>{'İnceleme: ' + str(pool_review_count) if pool_review_count else 'Akış normal'}</span></div>
-      <div class='summary-grid pool-summary'>
-        <div class='summary-card'><span>Havuz TRX</span><strong>{h(fmt(pool_snapshot.get('trx', '0'), 'TRX'))}</strong><small>{h(pool_snapshot.get('checked_at') or 'Henüz ölçülmedi')}</small></div>
-        <div class='summary-card'><span>Havuz USDT</span><strong>{h(fmt(pool_snapshot.get('usdt', '0'), 'USDT'))}</strong><small>TRC20 ana havuz bakiyesi</small></div>
-        <div class='summary-card'><span>Aktif sweep</span><strong>{pool_queue_count}</strong><small>Sırada veya ağ onayında</small></div>
+    dashboard_section = f"""<section class='page-view {'active' if active_view == 'dashboard' else ''}' data-view='dashboard'>
+      <div class='command-hero'>
+        <div class='hero-copy'><span>NERLO TREASURY CONTROL</span><h2>Finans operasyonlarının canlı görünümü</h2><p>Yükümlülükler, işlem kuyrukları, blockchain havuzu ve kullanıcı risklerini tek ekrandan izleyin.</p></div>
+        <div class='hero-date'><small>Rapor tarihi</small><strong>{h(today())}</strong><span>Türkiye saati</span></div>
       </div>
-      <div class='panel-card pool-address-card'><div><span>ANA TRON HAVUZ ADRESİ</span><code>{h(pool_address or 'TRON_POOL_ADDRESS tanımlı değil')}</code><small>{h(pool_error or 'Bakiye bilgisi signer servisi tarafından güncellenir.')}</small></div>{f"<button type='button' class='copy-control' data-copy='{h(pool_address)}'>Adresi Kopyala</button>" if pool_address else ''}</div>
-      <div class='panel-card' style='margin-top:12px'><div class='section-head'><div><span class='eyebrow'>SON HAREKETLER</span><h3>Sweep Operasyon Günlüğü</h3></div><p>Gas yükleme, token taşıma ve kalan TRX geri toplama adımları</p></div><div class='table-wrap'><table><thead><tr><th>Sweep</th><th>Varlık</th><th>Kullanıcı</th><th>Kaynak</th><th>Tutar</th><th>Durum</th><th>TXID / Hata</th><th>Güncelleme</th></tr></thead><tbody>{render_sweep_rows(pool_snapshot)}</tbody></table></div></div>
+      <div class='kpi-grid'>
+        <div class='kpi'><span>Toplam kullanıcı</span><strong>{len(users)}</strong><small>{frozen_users} dondurulmuş hesap</small></div>
+        <div class='kpi attention'><span>Aksiyon bekleyen</span><strong>{pending_count}</strong><small>{status_counts.get('pending',0)} bekliyor · {status_counts.get('processing',0)} işleniyor</small></div>
+        <div class='kpi'><span>Bugün tamamlanan</span><strong>{completed_today}</strong><small>Başarılı işlem kaydı</small></div>
+        <div class='kpi {'attention' if locked_users else ''}'><span>Çekimi kilitli</span><strong>{locked_users}</strong><small>Kullanıcı güvenlik kontrolü</small></div>
+      </div>
+      <div class='section-title'><div><span>FİNANSAL YÜKÜMLÜLÜKLER</span><h3>Varlık görünümü</h3></div><p>Kullanıcı kullanılabilir bakiyeleri ve açık çekim yükümlülükleri</p></div>
+      <div class='asset-grid'>{asset_cards}</div>
+      <div class='dashboard-split'>
+        <section class='surface'><div class='surface-head'><div><span>İŞLEM DAĞILIMI</span><h3>Operasyon kuyruğu</h3></div><small>Canlı kayıtlar</small></div>
+          <div class='pipeline'><div><span>Yatırım</span><strong>{type_counts.get('deposit',0)}</strong></div><div><span>Çekim</span><strong>{type_counts.get('withdraw',0)}</strong></div><div><span>Dönüşüm</span><strong>{type_counts.get('convert',0)}</strong></div><div><span>İnceleme</span><strong>{pool_review_count}</strong></div></div>
+          <div class='status-line'><span><i class='waiting'></i>Bekleyen {status_counts.get('pending',0)}</span><span><i class='working'></i>İşlenen {status_counts.get('processing',0)}</span><span><i class='done'></i>Tamamlanan {status_counts.get('completed',0)}</span><span><i class='declined'></i>Reddedilen {status_counts.get('rejected',0)}</span></div>
+        </section>
+        <section class='surface'><div class='surface-head'><div><span>SON AKIŞ</span><h3>Güncel hareketler</h3></div><button type='button' class='text-action' data-jump-view='requests'>Tüm talepler</button></div><div class='activity-list'>{recent_activity}</div></section>
+      </div>
+    </section>""" if "dashboard" in allowed_views else ""
+
+    pool_section = f"""<section class='page-view {'active' if active_view == 'pool' else ''}' data-view='pool'>
+      <div class='page-heading'><div><span>TRON HAZİNE OPERASYONLARI</span><h2>Havuz ve otomatik sweep</h2><p>Kullanıcı yatırma adreslerinden ana havuza taşınan TRX ve TRC20 USDT hareketleri.</p></div><span class='health-badge {'danger' if pool_review_count else ''}'>{'İnceleme gereken ' + str(pool_review_count) if pool_review_count else 'Akış normal'}</span></div>
+      <div class='treasury-layout'>
+        <div class='treasury-balance'><span>ANA HAVUZ</span><div class='treasury-values'><div><small>TRX</small><strong>{h(fmt(pool_snapshot.get('trx','0'),'TRX'))}</strong></div><div><small>USDT</small><strong>{h(fmt(pool_snapshot.get('usdt','0'),'USDT'))}</strong></div></div><p>{h(pool_snapshot.get('checked_at') or 'Henüz ölçülmedi')}</p></div>
+        <div class='treasury-state'><div><span>Aktif sweep</span><strong>{pool_queue_count}</strong></div><div><span>İnceleme</span><strong>{pool_review_count}</strong></div><div><span>Tamamlanan</span><strong>{int(pool_counts.get('confirmed',0) or 0)+int(pool_counts.get('covered',0) or 0)}</strong></div></div>
+      </div>
+      <div class='pool-address'><div><span>ANA TRON HAVUZ ADRESİ</span><code>{h(pool_address or 'TRON_POOL_ADDRESS tanımlı değil')}</code><small>{h(pool_error or 'Bakiye ve sweep bilgileri signer servisi tarafından güncellenir.')}</small></div>{f"<button type='button' class='copy-control' data-copy='{h(pool_address)}'>Adresi kopyala</button>" if pool_address else ''}</div>
+      <div class='flow-steps'><div><b>01</b><span>Yatırım algılanır</span></div><i></i><div><b>02</b><span>Ağ onayı tamamlanır</span></div><i></i><div><b>03</b><span>Sweep imzalanır</span></div><i></i><div><b>04</b><span>Ana havuza taşınır</span></div></div>
+      <section class='surface'><div class='surface-head'><div><span>SWEEP GÜNLÜĞÜ</span><h3>Son blockchain hareketleri</h3></div><small>Gas, token taşıma ve geri toplama adımları</small></div><div class='table-wrap'><table><thead><tr><th>Sweep</th><th>Varlık</th><th>Kullanıcı</th><th>Kaynak</th><th>Tutar</th><th>Durum</th><th>TXID / Hata</th><th>Güncelleme</th></tr></thead><tbody>{render_sweep_rows(pool_snapshot)}</tbody></table></div></section>
     </section>""" if "pool" in allowed_views else ""
-    requests_section = f"""<section class='page-view {'active' if active_view == 'requests' else ''}' data-view='requests'><div class='section-head'><div><span class='eyebrow'>ONAY VE İŞLEM AKIŞI</span><h2>İşlem Merkezi</h2><p>Her talebi tutar, ağ, hedef ve durum bilgileriyle hızlıca yönetin.</p></div></div><div class='panel-card'><form id='request-filter' class='toolbar'><input name='rq' value='{h(request_query)}' placeholder='İşlem no, kullanıcı ID veya kullanıcı adı'><select name='status'><option value='all'>Tüm durumlar</option>{''.join(f"<option value='{s}' {'selected' if status_filter == s else ''}>{status_label(s)}</option>" for s in ['pending','processing','completed','rejected'])}</select><select name='type'><option value='all'>Tüm işlem türleri</option>{''.join(f"<option value='{t}' {'selected' if type_filter == t else ''}>{request_type_label(t)}</option>" for t in ['deposit','withdraw','convert'])}</select><button class='btn primary'>Filtrele</button></form><div id='request-list' class='request-list'>{render_request_list(request_query, status_filter, type_filter)}</div></div></section>""" if "requests" in allowed_views else ""
-    users_section = f"""<section class='page-view {'active' if active_view == 'users' else ''}' data-view='users'><div class='section-head'><div><span class='eyebrow'>KULLANICI YÖNETİMİ</span><h2>ID ile Kullanıcı Aç</h2><p>Kullanıcı satırlarına tıklamadan doğrudan kimlik ile yönetin</p></div></div><div class='panel-card'><form id='user-lookup' class='lookup-bar'><input id='manage-user-id' name='uid' value='{h(manage_user_id)}' inputmode='numeric' placeholder='Telegram kullanıcı ID'><button class='btn primary'>Kullanıcıyı Getir</button></form><div id='user-management-result'>{render_user_management(manage_user_id)}</div></div><div class='panel-card' style='margin-top:10px'><div class='section-head'><div><span class='eyebrow'>SON KULLANICILAR</span><h3>Hızlı Referans</h3></div><p>ID değerleri bağlantı değildir</p></div><div class='table-wrap'><table><thead><tr><th>Kullanıcı ID</th><th>Kullanıcı adı</th><th>TL</th><th>USDT</th><th>LTC</th><th>TRX</th><th>Hesap</th><th>Son görülme</th></tr></thead><tbody>{user_rows}</tbody></table></div></div></section>""" if "users" in allowed_views else ""
-    broadcast_section = f"""<section class='page-view {'active' if active_view == 'broadcast' else ''}' data-view='broadcast'><div class='section-head'><div><span class='eyebrow'>İLETİŞİM</span><h2>Duyuru Gönder</h2><p>Bildirimleri açık kullanıcılara toplu mesaj gönderin</p></div></div><div class='broadcast-grid'><form method='post' class='panel-card'><input type='hidden' name='action' value='broadcast'><input type='hidden' name='return_to' value='/admin?view=broadcast'><label>Duyuru metni</label><textarea name='announcement_text' placeholder='Kullanıcılara gönderilecek mesajı yazın' required></textarea><button class='btn primary' style='width:100%;margin-top:10px'>Duyuruyu Gönder</button></form><div class='broadcast-note'><b style='color:#dce5ef'>Gönderim bilgisi</b><br><br>Duyuru yalnızca duyuru bildirimleri açık olan kullanıcılara iletilir. Gönderim sonucu yönetim kayıtlarına eklenir.</div></div></section>""" if "broadcast" in allowed_views else ""
-    settings_section = f"""<section class='page-view {'active' if active_view == 'settings' else ''}' data-view='settings'><div class='section-head'><div><span class='eyebrow'>SİSTEM</span><h2>Ayar Yönetimi</h2><p>Kur, limit, cüzdan, sistem ve bot mesajlarını yönetin</p></div></div><form method='post' class='panel-card'><input type='hidden' name='action' value='settings'><input type='hidden' name='return_to' value='/admin?view=settings'><div class='settings-nav'>{settings_tabs}</div>{''.join(settings_panes)}<div class='save-bar'><button class='btn primary'>Tüm Ayarları Kaydet</button></div></form></section>""" if "settings" in allowed_views else ""
-    logs_section = f"""<section class='page-view {'active' if active_view == 'logs' else ''}' data-view='logs'><div class='section-head'><div><span class='eyebrow'>DENETİM</span><h2>Yönetim Kayıtları</h2><p>Son 120 yönetici işlemi</p></div></div><div class='panel-card'><div class='table-wrap'><table><thead><tr><th>Tarih</th><th>İşlem</th><th>Kullanıcı</th><th>Detay</th></tr></thead><tbody>{logs}</tbody></table></div></div></section>""" if "logs" in allowed_views else ""
-    admins_section = f"""<section class='page-view {'active' if active_view == 'admins' else ''}' data-view='admins'><div class='section-head'><div><span class='eyebrow'>ERİŞİM YÖNETİMİ</span><h2>Panel Yetkilileri</h2><p>Yeni panel kullanıcısı oluşturun ve bölüm bazlı yetkilerini düzenleyin</p></div></div>{render_panel_user_management()}</section>""" if "admins" in allowed_views else ""
 
-    # UI_SENTINEL: NERLO_TREASURY_PANEL_V10_FRESH
-    panel_css = """
-    :root{
-      --bg:#070a0f;--rail:#0a0e15;--surface:#0d131c;--surface-2:#111925;--surface-3:#080d14;
-      --line:#1b2634;--line-soft:#131c27;--text:#f3f6fa;--muted:#8b98a8;--subtle:#5f6c7b;
-      --accent:#6ce2cd;--accent-2:#7bbdff;--success:#65d99f;--warning:#efc76c;--danger:#ff7f95;
-      --shadow:0 24px 70px rgba(0,0,0,.28);--radius:20px
-    }
-    *{box-sizing:border-box}
-    html{scroll-behavior:smooth}
-    body{margin:0;color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-      background:radial-gradient(circle at 90% -10%,rgba(108,226,205,.09),transparent 30%),linear-gradient(180deg,#080b11,#05080c)}
-    button,input,select,textarea{font:inherit}button{cursor:pointer}
-    .ops-shell{min-height:100vh;display:grid;grid-template-columns:268px minmax(0,1fr)}
-    .rail{position:sticky;top:0;height:100vh;padding:22px 16px;background:rgba(8,12,18,.97);
-      border-right:1px solid rgba(255,255,255,.06);display:flex;flex-direction:column;backdrop-filter:blur(18px)}
-    .rail-brand{display:flex;align-items:center;gap:12px;padding:4px 8px 24px}
-    .rail-logo{width:44px;height:44px;border-radius:15px;display:grid;place-items:center;font-size:19px;font-weight:950;
-      color:#031114;background:linear-gradient(135deg,var(--accent),var(--accent-2))}
-    .rail-brand strong{display:block;font-size:16px;letter-spacing:-.02em}.rail-brand small{display:block;color:var(--subtle);font-size:10px;letter-spacing:.09em;text-transform:uppercase;margin-top:2px}
-    .rail-label{padding:0 10px 8px;color:#4f5d6c;font-size:9px;font-weight:850;letter-spacing:.16em;text-transform:uppercase}
-    .nav{display:grid;gap:6px}.nav-item{width:100%;min-height:46px;display:flex;align-items:center;gap:11px;padding:8px 10px;
-      border:1px solid transparent;border-radius:13px;background:transparent;color:#93a0b0;text-align:left;font-weight:750}
-    .nav-item span{width:29px;height:29px;border-radius:9px;display:grid;place-items:center;background:#0e151f;color:#69788a;font-size:12px}
-    .nav-item b{font-size:12px}.nav-item:hover{background:#0e151f;border-color:#182433;color:#fff}
-    .nav-item.active{background:linear-gradient(135deg,rgba(108,226,205,.13),rgba(123,189,255,.06));
-      border-color:rgba(108,226,205,.18);color:#fff}.nav-item.active span{background:rgba(108,226,205,.15);color:var(--accent)}
-    .rail-footer{margin-top:auto;padding:16px 9px 2px;border-top:1px solid rgba(255,255,255,.055)}
-    .rail-user{display:flex;align-items:center;gap:10px}.avatar{width:34px;height:34px;border-radius:11px;display:grid;place-items:center;background:#111a25;color:var(--accent);font-weight:900}
-    .rail-user strong{display:block;font-size:11px}.rail-user small{display:block;color:var(--subtle);font-size:9px}.logout{display:inline-flex;margin-top:13px;color:#8d9aaa;text-decoration:none;font-size:10px}
-    .workspace{min-width:0}.masthead{position:sticky;top:0;z-index:8;display:flex;justify-content:space-between;align-items:center;gap:18px;
-      padding:19px clamp(20px,3vw,44px);border-bottom:1px solid rgba(255,255,255,.055);background:rgba(7,10,15,.86);backdrop-filter:blur(18px)}
-    .masthead h1{margin:2px 0 0;font-size:23px;letter-spacing:-.035em}.masthead .eyebrow{color:#617184}
-    .system-strip{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.system-chip{display:inline-flex;align-items:center;gap:7px;padding:7px 10px;
-      border:1px solid var(--line);border-radius:999px;background:#0a1018;color:#94a1b0;font-size:10px}
-    .system-chip i{width:7px;height:7px;border-radius:50%;background:var(--success);box-shadow:0 0 0 4px rgba(101,217,159,.09)}
-    .system-chip.warn i{background:var(--warning);box-shadow:0 0 0 4px rgba(239,199,108,.09)}
-    .content{padding:28px clamp(20px,3.2vw,46px) 56px;max-width:1700px;width:100%}
-    .page-view{display:none}.page-view.active{display:block;animation:fadeIn .18s ease}@keyframes fadeIn{from{opacity:.25;transform:translateY(4px)}to{opacity:1;transform:none}}
-    .section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin:0 0 17px}
-    .section-head h2,.section-head h3{margin:3px 0 0;letter-spacing:-.025em}.section-head h2{font-size:21px}.section-head h3{font-size:16px}
-    .section-head p{margin:5px 0 0;color:var(--muted);font-size:11px}.eyebrow{display:block;color:#68778a;font-size:9px;font-weight:850;letter-spacing:.15em;text-transform:uppercase}
-    .panel-card{background:linear-gradient(180deg,rgba(15,22,32,.96),rgba(9,14,21,.96));border:1px solid rgba(255,255,255,.07);
-      border-radius:var(--radius);padding:20px;box-shadow:var(--shadow)}.compact-card{padding:18px}
-    .pill{display:inline-flex;padding:6px 9px;border:1px solid var(--line);border-radius:999px;background:#111925;color:#bec8d4;font-size:9px;font-weight:800}.danger-pill{color:var(--danger)}
-    .summary-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:13px}
-    .summary-card{padding:18px;border:1px solid rgba(255,255,255,.065);border-radius:17px;background:linear-gradient(145deg,#0f1722,#0a1018)}
-    .summary-card span{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}.summary-card strong{display:block;font-size:27px;letter-spacing:-.04em;margin-top:7px}
-    .summary-card small{display:block;color:var(--subtle);font-size:9px;margin-top:5px}.pool-summary{grid-template-columns:repeat(3,minmax(0,1fr))}
-    .pool-address-card{display:flex;align-items:center;justify-content:space-between;gap:18px}.pool-address-card span,.pool-address-card small{display:block;color:var(--muted);font-size:9px}.pool-address-card code{display:block;margin:6px 0;color:#e5edf6;word-break:break-all}.address-cell,.tx-cell{display:block;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    .dashboard-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
-    .wallet-metric{min-height:128px;padding:17px;border:1px solid rgba(255,255,255,.065);border-radius:18px;background:linear-gradient(145deg,#0f1722,#090f17);display:flex;gap:12px;align-items:flex-start}
-    .asset-dot{width:37px;height:37px;flex:0 0 auto;border-radius:12px;display:grid;place-items:center;background:rgba(108,226,205,.11);color:var(--accent);font-size:12px;font-weight:950}
-    .wallet-metric span{display:block;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.075em}.wallet-metric strong{display:block;margin:8px 0 5px;font-size:19px;letter-spacing:-.03em;white-space:nowrap}.wallet-metric small{color:var(--subtle);font-size:9px}
-    .toolbar{display:grid;grid-template-columns:minmax(240px,2fr) repeat(2,minmax(150px,1fr)) auto;gap:10px;margin:0 0 16px;padding:5px;border:1px solid rgba(255,255,255,.055);border-radius:15px;background:#080d14}
-    input,select,textarea{width:100%;min-height:44px;border:1px solid #1c2938;border-radius:12px;background:#080d14;color:var(--text);padding:10px 12px;outline:none}
-    input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(108,226,205,.08)}textarea{min-height:112px;resize:vertical}
-    label{display:block;margin:0 0 6px;color:#a6b1bf;font-size:10px;font-weight:760;letter-spacing:.035em}
-    .btn{min-height:40px;border:1px solid transparent;border-radius:11px;padding:9px 14px;background:#172231;color:#dae3ed;font-weight:820;transition:.17s ease}
-    .btn:hover{transform:translateY(-1px);filter:brightness(1.06)}.btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#031014}
-    .btn.ghost{background:#101822;border-color:#213044}.btn.success{background:rgba(101,217,159,.12);border-color:rgba(101,217,159,.23);color:#8be9bb}
-    .btn.danger{background:rgba(255,127,149,.11);border-color:rgba(255,127,149,.22);color:#ff9aad}
-    .request-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.request-card{position:relative;overflow:hidden;border:1px solid rgba(255,255,255,.075);
-      border-radius:21px;background:linear-gradient(155deg,#0e151f,#080d14);padding:19px;box-shadow:0 20px 60px rgba(0,0,0,.16)}
-    .request-card:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:#445468}.request-card.request-deposit:before{background:var(--success)}
-    .request-card.request-withdraw:before{background:var(--accent-2)}.request-card.request-convert:before{background:var(--accent)}
-    .request-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}.request-kicker{color:var(--accent);font-size:9px;font-weight:900;letter-spacing:.13em;text-transform:uppercase}
-    .request-card-head h3{margin:5px 0 2px;font-size:16px;letter-spacing:-.02em}.request-card-head p{margin:0;color:var(--subtle);font-size:10px}
-    .status{display:inline-flex;align-items:center;gap:6px;min-height:28px;padding:5px 10px;border-radius:999px;font-size:9px;font-weight:900;white-space:nowrap}
-    .status i{width:6px;height:6px;border-radius:50%;background:currentColor}.status.waiting{background:rgba(239,199,108,.12);color:var(--warning)}
-    .status.working{background:rgba(123,189,255,.12);color:var(--accent-2)}.status.done{background:rgba(101,217,159,.12);color:var(--success)}.status.declined{background:rgba(255,127,149,.12);color:var(--danger)}
-    .request-money{margin:17px 0 12px;padding:16px;border:1px solid rgba(255,255,255,.06);border-radius:15px;background:rgba(255,255,255,.025)}
-    .request-money span{display:block;color:var(--muted);font-size:9px;text-transform:uppercase;letter-spacing:.08em}.request-money strong{display:block;margin:7px 0 5px;font-size:24px;letter-spacing:-.04em}.request-money small{color:var(--subtle);font-size:10px}
-    .request-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.request-fact{min-width:0;padding:10px 11px;border:1px solid rgba(255,255,255,.045);border-radius:11px;background:#0a1018}
-    .request-fact span{display:block;color:var(--subtle);font-size:8px;text-transform:uppercase;letter-spacing:.075em}.request-fact strong{display:block;margin-top:4px;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .destination-box{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:10px;padding:12px;border:1px solid rgba(123,189,255,.15);border-radius:13px;background:rgba(123,189,255,.055)}
-    .destination-box div{min-width:0}.destination-box span{display:block;color:#8394a8;font-size:8px;text-transform:uppercase;letter-spacing:.08em}.destination-box code{display:block;margin-top:5px;color:#d9e5f1;font:10px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere}
-    .copy-control{flex:0 0 auto;border:1px solid #26384b;border-radius:9px;background:#101b27;color:#9ec8ef;padding:7px 9px;font-size:9px;font-weight:800}
-    .operation-banner{display:flex;margin-top:11px;padding:11px 12px;border:1px solid rgba(239,199,108,.22);border-radius:12px;background:rgba(239,199,108,.075);color:var(--warning)}
-    .operation-banner.safe{border-color:rgba(101,217,159,.22);background:rgba(101,217,159,.07);color:#8ce7b9}.operation-banner.info{border-color:rgba(123,189,255,.22);background:rgba(123,189,255,.07);color:#9fcfff}
-    .operation-banner b{display:block;font-size:10px}.operation-banner span{display:block;margin-top:3px;font-size:9px;opacity:.9}
-    .request-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.05)}.request-actions .btn{min-height:36px;font-size:10px}.manual-txid-form{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-top:12px}.manual-txid-form input{min-width:0}
-    .lookup-bar{display:grid;grid-template-columns:minmax(240px,1fr) auto;gap:10px;margin-bottom:13px}.lookup-bar .btn{min-width:138px}
-    .user-profile-head{display:flex;justify-content:space-between;gap:15px;margin:1px 0 15px}.user-profile-head h2{margin:3px 0;font-size:20px}.user-profile-head p{margin:0;color:var(--muted);font-size:10px}
-    .profile-badges{display:flex;gap:7px;flex-wrap:wrap}.mini-balance-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-bottom:11px}
-    .mini-balance{padding:13px;border:1px solid rgba(255,255,255,.06);border-radius:14px;background:#0a1018}.mini-balance span{color:var(--muted);font-size:9px}.mini-balance strong{display:block;margin-top:8px;font-size:14px}.mini-balance small,.mini-pending{display:block;margin-top:7px;color:var(--subtle);font-size:8px}
-    .user-workspace{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-bottom:11px}.history-grid{align-items:start}
-    .form-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-items:end}.form-grid .wide{grid-column:span 2}.submit-cell{display:flex;align-items:flex-end}.submit-cell .btn{width:100%}
-    .balance-form{grid-template-columns:repeat(3,minmax(0,1fr))}.security-actions{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.security-actions .btn{width:100%}
-    .table-wrap{overflow:auto;border:1px solid rgba(255,255,255,.06);border-radius:14px}table{width:100%;border-collapse:collapse;min-width:720px}
-    th,td{padding:11px 12px;text-align:left;border-bottom:1px solid rgba(255,255,255,.045);font-size:10px;white-space:nowrap}th{background:#090f16;color:var(--subtle);font-size:8px;text-transform:uppercase;letter-spacing:.075em}
-    td{color:#c7d1dc}tbody tr:hover{background:rgba(255,255,255,.018)}tbody tr:last-child td{border-bottom:0}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.muted-cell{text-align:center;color:var(--muted)}
-    .broadcast-grid{display:grid;grid-template-columns:1.25fr .75fr;gap:11px}.broadcast-note{padding:17px;border:1px solid rgba(255,255,255,.06);border-radius:15px;background:#0a1018;color:var(--muted);font-size:11px;line-height:1.65}
-    .settings-nav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:13px;padding:5px;border:1px solid rgba(255,255,255,.055);border-radius:13px;background:#080d14}
-    .setting-tab{border:0;border-radius:9px;background:transparent;color:#8c9aaa;padding:8px 10px;font-size:9px;font-weight:850}.setting-tab.active{background:rgba(108,226,205,.11);color:var(--accent)}
-    .setting-pane{display:none}.setting-pane.active{display:block}.settings-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px}.field{min-width:0}.save-bar{display:flex;justify-content:flex-end;margin-top:14px}.save-bar .btn{min-width:190px}
-    .admin-account-list{display:grid;gap:11px;margin-top:11px}.admin-account{padding:17px;border:1px solid rgba(255,255,255,.065);border-radius:17px;background:#0a1018}
-    .root-account,.admin-account-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.admin-account h3{margin:3px 0;font-size:15px}.admin-account p{margin:0;color:var(--muted);font-size:9px}
-    .admin-account-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.permission-title{margin-top:13px}.permission-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}
-    .permission-option{display:flex;align-items:center;gap:8px;margin:0;padding:9px 10px;border:1px solid rgba(255,255,255,.05);border-radius:10px;background:#0d141d;color:#c4cfdb;font-size:9px;cursor:pointer}
-    .permission-option input{width:auto;min-height:0;margin:0;accent-color:var(--accent)}.admin-account-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
-    .empty-state{min-height:150px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:22px;border:1px dashed #273546;border-radius:15px;background:rgba(255,255,255,.012);color:var(--muted);text-align:center}
-    .empty-state b{color:#d6e0ea}.error-state{border-color:rgba(255,127,149,.28)}.toast{position:fixed;right:24px;top:20px;z-index:30;max-width:min(380px,calc(100vw - 34px));padding:12px 15px;border:1px solid rgba(101,217,159,.25);border-radius:13px;background:#10231c;color:#9aebc0;box-shadow:0 22px 65px rgba(0,0,0,.38);font-size:11px}.toast-error{background:#28131a;color:#ff9bad;border-color:rgba(255,127,149,.28)}
-    @media(max-width:1260px){.request-list{grid-template-columns:1fr}.dashboard-grid,.mini-balance-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-    @media(max-width:920px){.ops-shell{grid-template-columns:1fr}.rail{position:static;height:auto;padding:12px}.rail-brand{padding-bottom:12px}.rail-label,.rail-footer{display:none}.nav{grid-template-columns:repeat(4,minmax(0,1fr))}.nav-item{justify-content:center}.nav-item b{font-size:10px}.masthead{position:static}.user-workspace,.broadcast-grid{grid-template-columns:1fr}.toolbar{grid-template-columns:1fr 1fr}.toolbar input{grid-column:1/-1}}
-    @media(max-width:640px){.content{padding:18px 14px 40px}.masthead{padding:15px 14px;align-items:flex-start}.system-strip{display:none}.nav{grid-template-columns:repeat(2,minmax(0,1fr))}.dashboard-grid,.summary-grid,.mini-balance-grid,.request-facts,.settings-grid,.form-grid,.balance-form,.admin-account-grid,.permission-grid{grid-template-columns:1fr}.form-grid .wide{grid-column:auto}.toolbar,.lookup-bar{grid-template-columns:1fr}.request-actions,.admin-account-actions,.manual-txid-form{display:grid;grid-template-columns:1fr}.request-actions .btn,.admin-account-actions .btn{width:100%}.user-profile-head,.root-account,.admin-account-head{display:block}.profile-badges{margin-top:10px}.security-actions{grid-template-columns:1fr}.destination-box,.pool-address-card{align-items:flex-start;flex-direction:column}.copy-control{width:100%}}
+    requests_section = f"""<section class='page-view {'active' if active_view == 'requests' else ''}' data-view='requests'>
+      <div class='page-heading'><div><span>ONAY VE İŞLEM AKIŞI</span><h2>İşlem talepleri</h2><p>Her talebi açık tutar, hedef, ağ ve durum bilgileriyle yönetin.</p></div><div class='heading-metrics'><span>Bekleyen <b>{status_counts.get('pending',0)}</b></span><span>İşlenen <b>{status_counts.get('processing',0)}</b></span></div></div>
+      <form id='request-filter' class='command-filter'><div class='search-field'><span>⌕</span><input name='rq' value='{h(request_query)}' placeholder='İşlem no, kullanıcı ID veya kullanıcı adı'></div><select name='status'><option value='all'>Tüm durumlar</option>{''.join(f"<option value='{s}' {'selected' if status_filter == s else ''}>{status_label(s)}</option>" for s in ['pending','processing','completed','rejected'])}</select><select name='type'><option value='all'>Tüm işlem türleri</option>{''.join(f"<option value='{t}' {'selected' if type_filter == t else ''}>{request_type_label(t)}</option>" for t in ['deposit','withdraw','convert'])}</select><button class='btn primary'>Filtrele</button></form>
+      <div id='request-list' class='case-list'>{render_request_list(request_query, status_filter, type_filter)}</div>
+    </section>""" if "requests" in allowed_views else ""
+
+    users_section = f"""<section class='page-view {'active' if active_view == 'users' else ''}' data-view='users'>
+      <div class='page-heading'><div><span>KULLANICI OPERASYONLARI</span><h2>Kullanıcı kontrol masası</h2><p>Profil, bakiye, güvenlik ve işlem geçmişini tek görünümde yönetin.</p></div></div>
+      <form id='user-lookup' class='user-command'><div><label>Telegram kullanıcı ID</label><input id='manage-user-id' name='uid' value='{h(manage_user_id)}' inputmode='numeric' placeholder='Örn. 123456789'></div><button class='btn primary'>Kullanıcıyı aç</button></form>
+      <div id='user-management-result' class='user-result'>{render_user_management(manage_user_id)}</div>
+      <section class='surface'><div class='surface-head'><div><span>SON AKTİVİTE</span><h3>Yakın zamanda görülen kullanıcılar</h3></div><small>Son 25 kayıt</small></div><div class='table-wrap'><table><thead><tr><th>Kullanıcı ID</th><th>Kullanıcı adı</th><th>TL</th><th>USDT</th><th>TRX</th><th>Hesap</th><th>Son görülme</th></tr></thead><tbody>{user_rows}</tbody></table></div></section>
+    </section>""" if "users" in allowed_views else ""
+
+    broadcast_section = f"""<section class='page-view {'active' if active_view == 'broadcast' else ''}' data-view='broadcast'>
+      <div class='page-heading'><div><span>KULLANICI İLETİŞİMİ</span><h2>Duyuru merkezi</h2><p>Bildirim izni açık kullanıcılara kontrollü toplu mesaj gönderin.</p></div></div>
+      <div class='broadcast-layout'><form method='post' class='surface compose-card'><input type='hidden' name='action' value='broadcast'><input type='hidden' name='return_to' value='/admin?view=broadcast'><label>Duyuru metni</label><textarea name='announcement_text' placeholder='Kullanıcılara iletilecek mesajı yazın' required></textarea><div class='compose-foot'><small>Mesaj gönderim sonucu denetim kayıtlarına eklenir.</small><button class='btn primary'>Duyuruyu gönder</button></div></form><aside class='delivery-card'><span>GÖNDERİM KAPSAMI</span><strong>{len(users)}</strong><p>Kayıtlı kullanıcı</p><div><i></i>Yalnızca duyuru bildirimleri açık hesaplara gönderilir.</div></aside></div>
+    </section>""" if "broadcast" in allowed_views else ""
+
+    settings_section = f"""<section class='page-view {'active' if active_view == 'settings' else ''}' data-view='settings'>
+      <div class='page-heading'><div><span>SİSTEM YAPILANDIRMASI</span><h2>Ayar yönetimi</h2><p>Kur, komisyon, limit, cüzdan ve bot mesajlarını kontrollü biçimde yönetin.</p></div></div>
+      <form method='post' class='surface settings-surface'><input type='hidden' name='action' value='settings'><input type='hidden' name='return_to' value='/admin?view=settings'><div class='settings-nav'>{settings_tabs}</div>{''.join(settings_panes)}<div class='save-bar'><button class='btn primary'>Tüm ayarları kaydet</button></div></form>
+    </section>""" if "settings" in allowed_views else ""
+
+    logs_section = f"""<section class='page-view {'active' if active_view == 'logs' else ''}' data-view='logs'>
+      <div class='page-heading'><div><span>DENETİM VE İZLENEBİLİRLİK</span><h2>Yönetim kayıtları</h2><p>Son yönetici işlemlerini tarih, kullanıcı ve ayrıntı bazında inceleyin.</p></div></div>
+      <section class='surface'><div class='surface-head'><div><span>SON KAYITLAR</span><h3>Yönetici hareketleri</h3></div><small>Son 120 işlem</small></div><div class='table-wrap'><table><thead><tr><th>Tarih</th><th>İşlem</th><th>Kullanıcı</th><th>Detay</th></tr></thead><tbody>{logs}</tbody></table></div></section>
+    </section>""" if "logs" in allowed_views else ""
+
+    admins_section = f"""<section class='page-view {'active' if active_view == 'admins' else ''}' data-view='admins'>
+      <div class='page-heading'><div><span>ERİŞİM YÖNETİMİ</span><h2>Panel yetkilileri</h2><p>Rol, erişim ve hesap durumlarını bölüm bazında yönetin.</p></div></div>{render_panel_user_management()}
+    </section>""" if "admins" in allowed_views else ""
+
+    panel_css = r"""
+    :root{--bg:#070a0f;--sidebar:#0a0e14;--panel:#0e151f;--panel2:#111b27;--panel3:#091019;--line:#1e2a39;--line2:#172230;
+      --text:#f2f5f9;--muted:#8b98a9;--subtle:#5f6d7e;--blue:#6aa9ff;--mint:#68dfc1;--amber:#efc36b;--red:#ff7890;--green:#5ed29b;--radius:18px}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:linear-gradient(180deg,#070a0f,#05080c);color:var(--text);font:13px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    button,input,select,textarea{font:inherit}button{cursor:pointer}code{font-family:"SFMono-Regular",Consolas,monospace}
+    .control-shell{min-height:100vh;display:grid;grid-template-columns:286px minmax(0,1fr)}
+    .sidebar{position:sticky;top:0;height:100vh;padding:24px 17px 18px;background:linear-gradient(180deg,#0a0f16,#080c12);border-right:1px solid rgba(255,255,255,.055);display:flex;flex-direction:column;z-index:20}
+    .brand{display:flex;align-items:center;gap:12px;padding:0 8px 24px}.brand-mark{width:42px;height:42px;border-radius:13px;display:grid;place-items:center;background:#f3f6fa;color:#07111a;font-weight:950;font-size:17px}.brand strong{display:block;font-size:15px}.brand small{display:block;margin-top:2px;color:#5c697a;font-size:9px;letter-spacing:.13em;text-transform:uppercase}
+    .nav-scroll{overflow:auto;padding-right:2px}.nav-group-label{padding:18px 10px 7px;color:#4d5a6a;font-size:8px;font-weight:900;letter-spacing:.16em;text-transform:uppercase}.nav-group-label:first-child{padding-top:0}
+    .nav-entry{width:100%;min-height:44px;margin:3px 0;display:grid;grid-template-columns:31px 1fr auto;align-items:center;gap:10px;padding:6px 9px;border:1px solid transparent;border-radius:12px;background:transparent;color:#8f9cac;text-align:left}
+    .nav-entry>span{width:29px;height:29px;border-radius:9px;display:grid;place-items:center;background:#0e1620;color:#657487;font-size:9px;font-weight:900}.nav-entry b{font-size:11px}.nav-entry em{min-width:22px;height:20px;padding:0 6px;border-radius:999px;display:grid;place-items:center;background:rgba(239,195,107,.11);color:var(--amber);font-size:9px;font-style:normal}.nav-entry .alert-badge{background:rgba(255,120,144,.12);color:var(--red)}
+    .nav-entry:hover{background:#0e151e;color:#fff}.nav-entry.active{background:linear-gradient(90deg,rgba(106,169,255,.13),rgba(106,169,255,.035));border-color:rgba(106,169,255,.17);color:#fff}.nav-entry.active>span{background:rgba(106,169,255,.14);color:var(--blue)}
+    .sidebar-footer{margin-top:auto;padding:15px 8px 0;border-top:1px solid rgba(255,255,255,.055)}.operator{display:flex;align-items:center;gap:10px}.operator-avatar{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:#111b27;color:var(--mint);font-weight:900}.operator strong{display:block;font-size:10px}.operator small{display:block;color:#5f6c7d;font-size:8px}.signout{display:inline-flex;margin-top:12px;color:#788697;text-decoration:none;font-size:9px}
+    .workspace{min-width:0}.topbar{height:76px;position:sticky;top:0;z-index:15;display:flex;align-items:center;justify-content:space-between;gap:18px;padding:0 clamp(20px,3vw,42px);background:rgba(7,10,15,.86);border-bottom:1px solid rgba(255,255,255,.055);backdrop-filter:blur(18px)}
+    .topbar-left{display:flex;align-items:center;gap:13px}.menu-toggle{display:none;width:36px;height:36px;border:1px solid var(--line);border-radius:10px;background:#0d141d;color:#fff}.breadcrumbs span{display:block;color:#5d6b7c;font-size:8px;letter-spacing:.15em;text-transform:uppercase}.breadcrumbs h1{margin:2px 0 0;font-size:20px;letter-spacing:-.035em}.system-health{display:flex;align-items:center;gap:8px}.health-chip{display:flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid var(--line);border-radius:999px;background:#0a1017;color:#8593a4;font-size:9px}.health-chip i{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px rgba(94,210,155,.08)}.health-chip.warn i{background:var(--amber)}
+    .content{padding:30px clamp(20px,3vw,42px) 60px}.page-view{display:none}.page-view.active{display:block}
+    .command-hero{min-height:240px;padding:34px;display:flex;align-items:flex-end;justify-content:space-between;gap:24px;border:1px solid rgba(106,169,255,.15);border-radius:24px;background:radial-gradient(circle at 85% 10%,rgba(104,223,193,.13),transparent 30%),linear-gradient(135deg,#101a27,#0b121c);overflow:hidden}.hero-copy{max-width:760px}.hero-copy>span,.page-heading>div>span,.section-title>div>span,.surface-head>div>span,.treasury-balance>span,.delivery-card>span{color:var(--blue);font-size:9px;font-weight:900;letter-spacing:.14em;text-transform:uppercase}.hero-copy h2{margin:11px 0 13px;font-size:clamp(30px,4vw,48px);line-height:1.04;letter-spacing:-.055em}.hero-copy p{margin:0;max-width:690px;color:#94a2b2;font-size:14px;line-height:1.7}.hero-date{min-width:170px;padding:17px;border:1px solid rgba(255,255,255,.07);border-radius:15px;background:rgba(5,10,16,.5)}.hero-date small,.hero-date span{display:block;color:#667588;font-size:9px}.hero-date strong{display:block;margin:4px 0;font-size:18px}
+    .kpi-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:11px;margin-top:12px}.kpi{padding:20px;border:1px solid var(--line2);border-radius:17px;background:var(--panel)}.kpi>span{display:block;color:#8190a1;font-size:10px}.kpi strong{display:block;margin:8px 0 2px;font-size:28px;letter-spacing:-.04em}.kpi small{color:#5e6b7b;font-size:9px}.kpi.attention{border-color:rgba(239,195,107,.2);background:linear-gradient(180deg,rgba(239,195,107,.045),var(--panel))}
+    .section-title,.page-heading,.surface-head{display:flex;align-items:flex-end;justify-content:space-between;gap:20px}.section-title{margin:30px 0 13px}.section-title h3,.surface-head h3{margin:3px 0 0;font-size:17px}.section-title p,.page-heading p,.surface-head>small{margin:0;color:#718093;font-size:10px}.section-title.compact{margin:0 0 14px}.page-heading{margin-bottom:18px}.page-heading h2{margin:5px 0 7px;font-size:29px;letter-spacing:-.045em}.heading-metrics{display:flex;gap:8px}.heading-metrics span{padding:8px 11px;border:1px solid var(--line);border-radius:10px;background:#0a1017;color:#7d8b9c;font-size:9px}.heading-metrics b{color:#fff;margin-left:5px}
+    .asset-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.asset-card{padding:17px;border:1px solid var(--line2);border-radius:16px;background:#0c131c}.asset-head{display:flex;align-items:center;justify-content:space-between}.asset-symbol{min-width:38px;height:25px;padding:0 8px;border-radius:8px;display:grid;place-items:center;background:#121e2b;color:#b9c9da;font-size:9px;font-weight:900}.asset-head small{color:#596779;font-size:8px}.asset-card>strong{display:block;margin:14px 0 12px;font-size:17px}.asset-meta{display:flex;justify-content:space-between;gap:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.045);color:#657386;font-size:8px}.asset-meta b{color:#9ba9b9;font-size:9px}
+    .dashboard-split{display:grid;grid-template-columns:.92fr 1.08fr;gap:12px;margin-top:12px}.surface{padding:20px;border:1px solid var(--line2);border-radius:18px;background:var(--panel)}.surface-head{align-items:center;margin-bottom:16px}.text-action{border:0;background:transparent;color:var(--blue);font-size:9px;font-weight:800}.pipeline{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.pipeline>div{padding:13px;border:1px solid rgba(255,255,255,.05);border-radius:12px;background:#0a1119}.pipeline span{display:block;color:#687789;font-size:8px}.pipeline strong{display:block;margin-top:5px;font-size:18px}.status-line{display:flex;gap:12px;flex-wrap:wrap;margin-top:14px;color:#6f7e90;font-size:8px}.status-line span{display:flex;align-items:center;gap:6px}.status-line i,.activity-mark{width:7px;height:7px;border-radius:50%;background:#748296}.status-line i.waiting,.activity-mark.waiting{background:var(--amber)}.status-line i.working,.activity-mark.working{background:var(--blue)}.status-line i.done,.activity-mark.done{background:var(--green)}.status-line i.declined,.activity-mark.declined{background:var(--red)}
+    .activity-list{display:grid;gap:2px}.activity-row{display:grid;grid-template-columns:9px 1fr auto;align-items:center;gap:10px;padding:10px 4px;border-bottom:1px solid rgba(255,255,255,.045)}.activity-row:last-child{border-bottom:0}.activity-row strong{display:block;font-size:10px}.activity-row small{display:block;color:#627184;font-size:8px;margin-top:2px}.activity-row>b{font-size:9px;color:#b8c4d1}
+    .health-badge{padding:8px 11px;border:1px solid rgba(94,210,155,.2);border-radius:999px;background:rgba(94,210,155,.07);color:var(--green);font-size:9px}.health-badge.danger{border-color:rgba(255,120,144,.22);background:rgba(255,120,144,.07);color:var(--red)}
+    .treasury-layout{display:grid;grid-template-columns:1.25fr .75fr;gap:12px}.treasury-balance{padding:27px;border:1px solid rgba(104,223,193,.15);border-radius:21px;background:radial-gradient(circle at 90% 10%,rgba(104,223,193,.1),transparent 35%),#0e171f}.treasury-values{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:19px}.treasury-values div+div{border-left:1px solid rgba(255,255,255,.08);padding-left:18px}.treasury-values small{display:block;color:#6b798a;font-size:9px}.treasury-values strong{display:block;margin-top:5px;font-size:25px}.treasury-balance p{margin:20px 0 0;color:#627184;font-size:9px}.treasury-state{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:12px;border:1px solid var(--line2);border-radius:21px;background:var(--panel)}.treasury-state>div{display:flex;flex-direction:column;justify-content:center;align-items:center;border-right:1px solid rgba(255,255,255,.05)}.treasury-state>div:last-child{border:0}.treasury-state span{color:#6e7c8e;font-size:8px}.treasury-state strong{margin-top:7px;font-size:23px}.pool-address{display:flex;align-items:center;justify-content:space-between;gap:18px;margin:12px 0;padding:16px 18px;border:1px solid var(--line2);border-radius:15px;background:#0b121a}.pool-address span,.case-destination span{display:block;color:#647386;font-size:8px;letter-spacing:.09em;text-transform:uppercase}.pool-address code{display:block;margin:5px 0;color:#dce5ef;font-size:11px;word-break:break-all}.pool-address small{color:#657386;font-size:8px}.flow-steps{display:flex;align-items:center;gap:10px;margin:16px 0 12px;padding:16px;border:1px solid var(--line2);border-radius:15px;background:#0a1017}.flow-steps div{display:flex;align-items:center;gap:8px;white-space:nowrap}.flow-steps b{width:27px;height:27px;border-radius:8px;display:grid;place-items:center;background:#111c29;color:var(--blue);font-size:8px}.flow-steps span{color:#9ca9b8;font-size:9px}.flow-steps>i{height:1px;flex:1;background:#223043}
+    .command-filter{display:grid;grid-template-columns:minmax(280px,1fr) 180px 180px auto;gap:9px;margin-bottom:13px;padding:11px;border:1px solid var(--line2);border-radius:15px;background:#0b1119}.search-field{position:relative}.search-field span{position:absolute;left:12px;top:9px;color:#5f6e80;font-size:16px}.search-field input{padding-left:34px}.case-list{display:grid;gap:11px}.case-card{border:1px solid var(--line2);border-radius:19px;background:linear-gradient(180deg,#0e151f,#0b1119);overflow:hidden}.case-topline{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px 18px;border-bottom:1px solid rgba(255,255,255,.05)}.case-identity{display:flex;align-items:center;gap:10px}.case-type{padding:5px 8px;border-radius:8px;background:#111c28;color:#8fa1b4;font-size:8px;font-weight:900;text-transform:uppercase}.case-identity>strong{font-size:12px}.case-identity>small{color:#617083;font-size:8px}.case-body{display:grid;grid-template-columns:minmax(270px,.72fr) 1.28fr;gap:0}.case-amount{padding:23px 18px;border-right:1px solid rgba(255,255,255,.05)}.case-amount>span{color:#718094;font-size:9px;text-transform:uppercase}.case-amount>strong{display:block;margin:6px 0 15px;font-size:28px;letter-spacing:-.04em}.case-breakdown{display:flex;gap:12px;flex-wrap:wrap;color:#657487;font-size:8px}.case-breakdown b{color:#aab7c6}.case-information{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;padding:13px 8px}.case-detail{min-width:0;padding:10px 12px}.case-detail span{display:block;color:#5e6d80;font-size:8px;text-transform:uppercase}.case-detail strong{display:block;margin-top:4px;font-size:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.case-destination{display:flex;justify-content:space-between;align-items:center;gap:16px;margin:0 18px 14px;padding:13px 14px;border:1px solid rgba(106,169,255,.12);border-radius:12px;background:#09111a}.case-destination code{display:block;margin-top:4px;color:#cbd6e2;font-size:10px;word-break:break-all}.case-footer{padding:0 18px 17px}.case-complete-note{color:#59687a;font-size:8px}.case-actions{display:flex;justify-content:flex-end;gap:8px}.txid-command{display:grid;grid-template-columns:1fr auto;gap:8px;margin:9px 0}.case-alert{display:flex;flex-direction:column;gap:3px;margin:10px 0;padding:11px 13px;border:1px solid rgba(239,195,107,.17);border-radius:11px;background:rgba(239,195,107,.045)}.case-alert b{font-size:9px;color:#dec27d}.case-alert span{color:#7e8b9b;font-size:8px}.case-alert.safe{border-color:rgba(94,210,155,.17);background:rgba(94,210,155,.04)}.case-alert.safe b{color:var(--green)}.case-alert.info{border-color:rgba(106,169,255,.17);background:rgba(106,169,255,.04)}.case-alert.info b{color:var(--blue)}
+    .user-command{display:grid;grid-template-columns:1fr auto;align-items:end;gap:10px;padding:17px;border:1px solid var(--line2);border-radius:17px;background:var(--panel);margin-bottom:12px}.user-command label{margin-top:0}.user-result{margin-bottom:12px}.user-profile-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:22px;border:1px solid var(--line2);border-radius:18px;background:var(--panel)}.user-profile-head h2{margin:4px 0;font-size:23px}.user-profile-head p{margin:0;color:#697789;font-size:9px}.eyebrow{color:var(--blue);font-size:8px;letter-spacing:.14em;font-weight:900}.profile-badges{display:flex;gap:7px}.mini-balance-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:10px 0}.mini-balance{padding:14px;border:1px solid var(--line2);border-radius:14px;background:#0b121a}.mini-asset{display:flex;justify-content:space-between}.mini-asset span{color:#b7c4d2;font-size:9px;font-weight:900}.mini-asset small{color:#536173;font-size:8px}.mini-balance>strong{display:block;margin:10px 0 8px;font-size:13px}.mini-pending{padding-top:8px;border-top:1px solid rgba(255,255,255,.045);color:#617083;font-size:8px}.user-workspace{display:grid;grid-template-columns:1fr 1fr;gap:10px}.history-grid{margin-top:10px}.panel-card,.compact-card{padding:18px;border:1px solid var(--line2);border-radius:17px;background:var(--panel)}.section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:13px}.section-head h2,.section-head h3{margin:3px 0 0}.section-head p{margin:0;color:#697789;font-size:9px}.security-actions{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.security-actions form,.security-actions .btn{width:100%}
+    .broadcast-layout{display:grid;grid-template-columns:1.2fr .8fr;gap:12px}.compose-card textarea{min-height:220px}.compose-foot{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:12px}.compose-foot small{color:#627184;font-size:8px}.delivery-card{padding:25px;border:1px solid rgba(106,169,255,.15);border-radius:18px;background:linear-gradient(145deg,rgba(106,169,255,.07),#0d151f)}.delivery-card strong{display:block;margin:18px 0 2px;font-size:46px}.delivery-card p{margin:0;color:#718094}.delivery-card div{margin-top:28px;padding-top:16px;border-top:1px solid rgba(255,255,255,.06);color:#7e8c9d;font-size:9px}.delivery-card i{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--green);margin-right:7px}
+    .settings-surface{padding:18px}.settings-nav{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px;padding:5px;border:1px solid rgba(255,255,255,.05);border-radius:12px;background:#080e15}.setting-tab{border:0;border-radius:8px;background:transparent;color:#788698;padding:8px 11px;font-size:8px;font-weight:900}.setting-tab.active{background:#121e2b;color:var(--blue)}.setting-pane{display:none}.setting-pane.active{display:block}.settings-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.field{min-width:0}.save-bar{display:flex;justify-content:flex-end;margin-top:17px}
+    .admin-account-list{display:grid;gap:10px;margin-top:10px}.admin-account{padding:18px;border:1px solid var(--line2);border-radius:17px;background:var(--panel)}.root-account,.admin-account-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px}.admin-account h3{margin:4px 0}.admin-account p{margin:0;color:#687789;font-size:8px}.admin-account-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:12px}.permission-title{margin-top:14px}.permission-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}.permission-option{display:flex;align-items:center;gap:8px;margin:0;padding:9px;border:1px solid rgba(255,255,255,.05);border-radius:9px;background:#0b121a;color:#9eacbb;font-size:8px}.permission-option input{width:auto;min-height:0;margin:0;accent-color:var(--blue)}.admin-account-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+    label{display:block;margin:10px 0 6px;color:#8e9bac;font-size:8px;font-weight:850;text-transform:uppercase;letter-spacing:.04em}input,select,textarea{width:100%;min-height:40px;border:1px solid var(--line);border-radius:10px;background:#080e15;color:var(--text);padding:9px 11px;outline:none}textarea{resize:vertical}input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(106,169,255,.07)}
+    .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.form-grid .wide{grid-column:1/-1}.balance-form{grid-template-columns:repeat(3,minmax(0,1fr))}.balance-form .wide{grid-column:1/-1}.submit-cell{display:flex;align-items:flex-end}.btn{min-height:38px;padding:0 13px;border:1px solid var(--line);border-radius:10px;background:#101924;color:#c8d3df;font-size:9px;font-weight:900}.btn.primary{border-color:#f3f6fa;background:#f3f6fa;color:#07111a}.btn.positive,.btn.success{border-color:rgba(94,210,155,.25);background:rgba(94,210,155,.1);color:#78dfaa}.btn.negative,.btn.danger{border-color:rgba(255,120,144,.23);background:rgba(255,120,144,.08);color:#ff8fa2}.btn.subtle,.btn.ghost{background:#0d1620;color:#99a8b8}.copy-control{min-height:34px;padding:0 11px;border:1px solid var(--line);border-radius:9px;background:#101924;color:#aab8c7;font-size:8px;font-weight:850}
+    .pill{display:inline-flex;padding:6px 9px;border:1px solid rgba(94,210,155,.18);border-radius:999px;background:rgba(94,210,155,.06);color:var(--green);font-size:8px}.danger-pill{border-color:rgba(255,120,144,.2);background:rgba(255,120,144,.06);color:var(--red)}.status{display:inline-flex;align-items:center;gap:6px;padding:6px 8px;border:1px solid var(--line);border-radius:999px;background:#0b121a;color:#8d9aaa;font-size:8px}.status i{width:6px;height:6px;border-radius:50%;background:#748296}.status.waiting i{background:var(--amber)}.status.working i{background:var(--blue)}.status.done i{background:var(--green)}.status.declined i{background:var(--red)}
+    .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:760px}th,td{padding:11px 10px;border-bottom:1px solid rgba(255,255,255,.045);text-align:left;font-size:9px}th{color:#5d6b7c;font-size:8px;text-transform:uppercase;letter-spacing:.05em}td{color:#9eacbb}.muted-cell{text-align:center;color:#5f6d7e;padding:26px}.address-cell,.tx-cell{display:block;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .empty-state{min-height:140px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:20px;border:1px dashed #263446;border-radius:14px;background:rgba(255,255,255,.012);color:#647386;text-align:center}.empty-state b{color:#cbd5df}.compact-empty{min-height:100px}.error-state{border-color:rgba(255,120,144,.24)}.toast{position:fixed;right:22px;top:18px;z-index:60;max-width:min(390px,calc(100vw - 32px));padding:12px 15px;border:1px solid rgba(94,210,155,.24);border-radius:12px;background:#10231c;color:#8ce8b7;box-shadow:0 20px 70px rgba(0,0,0,.42);font-size:10px}.toast-error{border-color:rgba(255,120,144,.25);background:#281219;color:#ff96a8}
+    @media(max-width:1280px){.asset-grid,.mini-balance-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.case-information{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:980px){.control-shell{grid-template-columns:1fr}.sidebar{position:fixed;left:-300px;width:286px;transition:.22s left;box-shadow:20px 0 80px rgba(0,0,0,.42)}body.sidebar-open .sidebar{left:0}.menu-toggle{display:grid;place-items:center}.system-health .health-chip:not(:first-child){display:none}.dashboard-split,.treasury-layout,.broadcast-layout,.user-workspace{grid-template-columns:1fr}.command-filter{grid-template-columns:1fr 1fr}.search-field{grid-column:1/-1}.case-body{grid-template-columns:1fr}.case-amount{border-right:0;border-bottom:1px solid rgba(255,255,255,.05)}}
+    @media(max-width:640px){.content{padding:20px 13px 42px}.topbar{height:66px;padding:0 13px}.breadcrumbs h1{font-size:17px}.command-hero{min-height:auto;padding:24px;display:block}.hero-copy h2{font-size:33px}.hero-date{margin-top:24px}.kpi-grid,.asset-grid,.mini-balance-grid,.pipeline,.treasury-state,.settings-grid,.permission-grid,.security-actions,.balance-form,.form-grid{grid-template-columns:1fr}.treasury-values{grid-template-columns:1fr}.treasury-values div+div{border-left:0;border-top:1px solid rgba(255,255,255,.08);padding:14px 0 0}.flow-steps{display:grid;grid-template-columns:1fr}.flow-steps>i{display:none}.command-filter,.user-command{grid-template-columns:1fr}.case-identity{align-items:flex-start;flex-direction:column;gap:4px}.case-information{grid-template-columns:1fr}.case-destination,.pool-address,.compose-foot,.page-heading,.section-title,.surface-head,.user-profile-head,.root-account,.admin-account-head{align-items:flex-start;flex-direction:column}.case-actions,.admin-account-actions,.txid-command{display:grid;grid-template-columns:1fr}.case-actions .btn,.admin-account-actions .btn,.copy-control{width:100%}.heading-metrics{display:none}.admin-account-grid{grid-template-columns:1fr}}
     """
-    panel_script = """
-    const views=[...document.querySelectorAll('[data-view]')];
-    const navItems=[...document.querySelectorAll('[data-view-target]')];
-    const pageTitle=document.getElementById('page-title');
-    function openView(name,updateUrl=true){
-      views.forEach(view=>view.classList.toggle('active',view.dataset.view===name));
-      navItems.forEach(item=>item.classList.toggle('active',item.dataset.viewTarget===name));
-      const active=navItems.find(item=>item.dataset.viewTarget===name);
-      if(active&&pageTitle) pageTitle.textContent=active.dataset.viewTitle||'Operasyon Merkezi';
-      if(updateUrl){const url=new URL(location.href);url.searchParams.set('view',name);history.replaceState(null,'',url);}
-      window.scrollTo({top:0,behavior:'smooth'});
-    }
-    navItems.forEach(item=>item.addEventListener('click',()=>openView(item.dataset.viewTarget)));
 
-    const filterForm=document.getElementById('request-filter');
-    async function refreshRequests(){
-      if(!filterForm)return;
-      const params=new URLSearchParams(new FormData(filterForm));
-      try{
-        const response=await fetch('/admin/requests-fragment?'+params.toString(),{cache:'no-store'});
-        if(response.ok)document.getElementById('request-list').innerHTML=await response.text();
-      }catch(error){console.log('Talep yenileme hatası',error);}
+    panel_script = r"""
+    const views=[...document.querySelectorAll('[data-view]')];
+    const navEntries=[...document.querySelectorAll('[data-view-target]')];
+    const title=document.getElementById('page-title');
+    function openView(name,update=true){
+      views.forEach(v=>v.classList.toggle('active',v.dataset.view===name));
+      navEntries.forEach(n=>n.classList.toggle('active',n.dataset.viewTarget===name));
+      const current=navEntries.find(n=>n.dataset.viewTarget===name);
+      if(current&&title)title.textContent=current.dataset.viewTitle||'Kontrol Merkezi';
+      if(update){const url=new URL(location.href);url.searchParams.set('view',name);history.replaceState(null,'',url);}
+      document.body.classList.remove('sidebar-open');window.scrollTo({top:0,behavior:'smooth'});
     }
-    if(filterForm)filterForm.addEventListener('submit',event=>{event.preventDefault();refreshRequests();});
-    const requestView=document.querySelector('[data-view="requests"]');
-    setInterval(()=>{if(requestView&&requestView.classList.contains('active'))refreshRequests();},20000);
+    navEntries.forEach(n=>n.addEventListener('click',()=>openView(n.dataset.viewTarget)));
+    document.querySelectorAll('[data-jump-view]').forEach(b=>b.addEventListener('click',()=>openView(b.dataset.jumpView)));
+    const menu=document.getElementById('menu-toggle');if(menu)menu.addEventListener('click',()=>document.body.classList.toggle('sidebar-open'));
+
+    const filter=document.getElementById('request-filter');
+    async function refreshRequests(){if(!filter)return;const params=new URLSearchParams(new FormData(filter));try{const res=await fetch('/admin/requests-fragment?'+params.toString(),{cache:'no-store'});if(res.ok)document.getElementById('request-list').innerHTML=await res.text();}catch(e){console.log(e);}}
+    if(filter)filter.addEventListener('submit',e=>{e.preventDefault();refreshRequests();});
+    const requestView=document.querySelector('[data-view="requests"]');setInterval(()=>{if(requestView&&requestView.classList.contains('active'))refreshRequests();},20000);
     document.addEventListener('visibilitychange',()=>{if(!document.hidden&&requestView&&requestView.classList.contains('active'))refreshRequests();});
 
-    const userLookup=document.getElementById('user-lookup');
-    if(userLookup)userLookup.addEventListener('submit',async event=>{
-      event.preventDefault();
-      const uid=document.getElementById('manage-user-id').value.trim();
-      const result=document.getElementById('user-management-result');
-      result.innerHTML="<div class='empty-state'>Kullanıcı yükleniyor…</div>";
-      try{
-        const response=await fetch('/admin/user-fragment?uid='+encodeURIComponent(uid),{cache:'no-store'});
-        result.innerHTML=response.ok?await response.text():"<div class='empty-state error-state'>Kullanıcı bilgisi alınamadı.</div>";
-        const url=new URL(location.href);url.searchParams.set('view','users');
-        if(uid)url.searchParams.set('manage_user_id',uid);else url.searchParams.delete('manage_user_id');
-        history.replaceState(null,'',url);
-      }catch(error){result.innerHTML="<div class='empty-state error-state'>Bağlantı hatası oluştu.</div>";}
-    });
+    const lookup=document.getElementById('user-lookup');if(lookup)lookup.addEventListener('submit',async e=>{e.preventDefault();const uid=document.getElementById('manage-user-id').value.trim();const result=document.getElementById('user-management-result');result.innerHTML="<div class='empty-state'>Kullanıcı yükleniyor…</div>";try{const res=await fetch('/admin/user-fragment?uid='+encodeURIComponent(uid),{cache:'no-store'});result.innerHTML=res.ok?await res.text():"<div class='empty-state error-state'>Kullanıcı bilgisi alınamadı.</div>";const url=new URL(location.href);url.searchParams.set('view','users');if(uid)url.searchParams.set('manage_user_id',uid);else url.searchParams.delete('manage_user_id');history.replaceState(null,'',url);}catch(err){result.innerHTML="<div class='empty-state error-state'>Bağlantı hatası oluştu.</div>";}});
 
-    const settingTabs=[...document.querySelectorAll('[data-setting-target]')];
-    const settingPanes=[...document.querySelectorAll('[data-setting-pane]')];
-    settingTabs.forEach(tab=>tab.addEventListener('click',()=>{
-      settingTabs.forEach(item=>item.classList.toggle('active',item===tab));
-      settingPanes.forEach(pane=>pane.classList.toggle('active',pane.dataset.settingPane===tab.dataset.settingTarget));
-    }));
-
-    document.addEventListener('click',async event=>{
-      const button=event.target.closest('[data-copy]');
-      if(!button)return;
-      const value=button.dataset.copy||'';
-      try{
-        await navigator.clipboard.writeText(value);
-        const original=button.textContent;button.textContent='Kopyalandı';
-        setTimeout(()=>button.textContent=original,1300);
-      }catch(error){button.textContent='Kopyalanamadı';}
-    });
-
+    const tabs=[...document.querySelectorAll('[data-setting-target]')],panes=[...document.querySelectorAll('[data-setting-pane]')];tabs.forEach(tab=>tab.addEventListener('click',()=>{tabs.forEach(x=>x.classList.toggle('active',x===tab));panes.forEach(p=>p.classList.toggle('active',p.dataset.settingPane===tab.dataset.settingTarget));}));
+    document.addEventListener('click',async e=>{const button=e.target.closest('[data-copy]');if(!button)return;try{await navigator.clipboard.writeText(button.dataset.copy||'');const old=button.textContent;button.textContent='Kopyalandı';setTimeout(()=>button.textContent=old,1200);}catch(err){button.textContent='Kopyalanamadı';}});
     const toast=document.getElementById('admin-toast');if(toast)setTimeout(()=>toast.remove(),4300);
     """
+
     signer_online = bool(WITHDRAW_SIGNER_URL)
-    active_title = next((label for slug, label, symbol in nav_items if slug == active_view), "Operasyon Merkezi")
-    return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-    <meta name='color-scheme' content='dark'><title>Nerlo Operations · Pool V10</title><style>{panel_css}</style></head><body>{notice_html}
-    <div class='ops-shell'>
-      <aside class='rail'>
-        <div class='rail-brand'><div class='rail-logo'>N</div><div><strong>Nerlo Wallet</strong><small>Treasury Operations · V10</small></div></div>
-        <div class='rail-label'>Çalışma Alanı</div>
-        <nav class='nav'>{nav_html}</nav>
-        <div class='rail-footer'>
-          <div class='rail-user'><div class='avatar'>{h(current_panel_username()[:1].upper() or 'N')}</div><div><strong>{h(current_panel_username())}</strong><small>Yetkili oturum</small></div></div>
-          <a class='logout' href='/logout'>Güvenli çıkış</a>
-        </div>
+    active_title = next((label for slug, label, number, group in nav_items if slug == active_view), "Kontrol Merkezi")
+    return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='color-scheme' content='dark'>
+    <title>Nerlo Treasury Control · V11</title><style>{panel_css}</style></head><body>{notice_html}
+    <div class='control-shell'>
+      <aside class='sidebar'><div class='brand'><div class='brand-mark'>N</div><div><strong>Nerlo Wallet</strong><small>Treasury Control · V11</small></div></div><nav class='nav-scroll'>{nav_html}</nav>
+        <div class='sidebar-footer'><div class='operator'><div class='operator-avatar'>{h(current_panel_username()[:1].upper() or 'N')}</div><div><strong>{h(current_panel_username())}</strong><small>Yetkili operasyon hesabı</small></div></div><a class='signout' href='/logout'>Güvenli çıkış yap</a></div>
       </aside>
-      <section class='workspace'>
-        <header class='masthead'>
-          <div><span class='eyebrow'>NERLO OPERATIONS</span><h1 id='page-title'>{h(active_title)}</h1></div>
-          <div class='system-strip'>
-            <span class='system-chip'><i></i>Ledger aktif</span>
-            <span class='system-chip {'warn' if not signer_online else ''}'><i></i>{'Signer bağlı' if signer_online else 'Signer bekliyor'}</span>
-            <span class='system-chip'><i></i>Sistem çevrim içi</span>
-          </div>
-        </header>
-        <main class='content'>
-          {dashboard_section}
-          {pool_section}
-          {requests_section}
-          {users_section}
-          {broadcast_section}
-          {settings_section}
-          {logs_section}
-          {admins_section}
-        </main>
+      <section class='workspace'><header class='topbar'><div class='topbar-left'><button id='menu-toggle' class='menu-toggle' type='button'>☰</button><div class='breadcrumbs'><span>NERLO / OPERASYON</span><h1 id='page-title'>{h(active_title)}</h1></div></div><div class='system-health'><span class='health-chip'><i></i>Ledger aktif</span><span class='health-chip {'warn' if not signer_online else ''}'><i></i>{'Signer bağlı' if signer_online else 'Signer bekliyor'}</span><span class='health-chip'><i></i>Çevrim içi</span></div></header>
+        <main class='content'>{dashboard_section}{pool_section}{requests_section}{users_section}{broadcast_section}{settings_section}{logs_section}{admins_section}</main>
       </section>
-    </div>
-    <script>{panel_script}</script></body></html>"""
+    </div><script>{panel_script}</script></body></html>"""
 
 
 @app.route("/admin/user/<uid>")
