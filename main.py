@@ -86,10 +86,16 @@ WITHDRAW_SIGNER_TOKEN = os.getenv("WITHDRAW_SIGNER_TOKEN", "").strip()
 WITHDRAW_STATUS_URL = os.getenv("WITHDRAW_STATUS_URL", "").strip()
 EXCHANGE_INTERNAL_TOKEN = os.getenv("EXCHANGE_INTERNAL_TOKEN", "").strip()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
-BUILD_VERSION = "NERLO-2026-06-25-ENTERPRISE-PANEL-V7-FRESH"
+SERVICE_ROLE = os.getenv("SERVICE_ROLE", "app").strip().lower()
+if SERVICE_ROLE not in {"app", "signer"}:
+    raise RuntimeError("SERVICE_ROLE yalnızca app veya signer olabilir")
+SIGNER_STAGE = "SERVICE-SEPARATION-STAGE1"
+SIGNER_SUPPORTED_ASSETS = {"TRX", "USDT"}
+BUILD_VERSION = "NERLO-2026-06-25-SIGNER-STAGE1-V8-FRESH"
 PANEL_RELEASE = "ENTERPRISE-OPERATIONS-RAIL-V7"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V1"
-SOURCE_BASE_SHA256 = "6d7c16454463fa4c63a9952c21dc0f852b0957e4c135bbecd1b9294afb09dd89"
+SIGNER_RELEASE = "PRIVATE-SIGNER-SERVICE-SEPARATION-V1"
+SOURCE_BASE_SHA256 = "a5ff1e6310629420b16baa234abd18cf8bf336d361954b4cc5e3efbf1f17ad51"
 
 CONFIRMATION_THRESHOLDS = {
     "BTC": max(1, int(os.getenv("BTC_CONFIRMATIONS", "3"))),
@@ -303,6 +309,25 @@ def init_database():
     );
     CREATE INDEX IF NOT EXISTS idx_exchange_requests_user_created
         ON exchange_requests (user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS signer_requests (
+        request_id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        asset TEXT NOT NULL,
+        destination TEXT NOT NULL,
+        amount NUMERIC(50, 18) NOT NULL,
+        status TEXT NOT NULL DEFAULT 'prepared',
+        txid TEXT NOT NULL DEFAULT '',
+        payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+        response JSONB NOT NULL DEFAULT '{}'::jsonb,
+        last_error TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        broadcast_at TIMESTAMPTZ,
+        confirmed_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_signer_requests_status_updated
+        ON signer_requests (status, updated_at DESC);
     """
     with _db_connect() as conn:
         with conn.cursor() as cur:
@@ -2690,6 +2715,9 @@ def exchange_health_snapshot():
         "build_version": BUILD_VERSION,
         "panel_release": PANEL_RELEASE,
         "security_release": SECURITY_RELEASE,
+        "signer_release": SIGNER_RELEASE,
+        "signer_stage": SIGNER_STAGE,
+        "service_role": SERVICE_ROLE,
         "source_base_sha256": SOURCE_BASE_SHA256,
         "mode": EXCHANGE_MODE,
         "worker_id": EXCHANGE_WORKER_ID,
@@ -2719,14 +2747,30 @@ if _keccak256(b"").hex() != "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bf
 
 
 def validate_runtime_config():
-    required = {"BOT_TOKEN": TOKEN, "ADMIN_CHAT_ID": ADMIN_CHAT_ID, "PANEL_USERNAME": PANEL_USERNAME, "PANEL_PASSWORD": PANEL_PASSWORD, "FLASK_SECRET_KEY": app.secret_key}
-    missing = [k for k, v in required.items() if not str(v).strip()]
-    if missing:
-        raise RuntimeError("Eksik zorunlu ortam değişkenleri: " + ", ".join(missing))
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL tanımlı değil")
     if len(app.secret_key) < 32:
         raise RuntimeError("FLASK_SECRET_KEY en az 32 karakter olmalıdır")
+
+    if SERVICE_ROLE == "signer":
+        if len(WITHDRAW_SIGNER_TOKEN) < 32:
+            raise RuntimeError("Signer servisi için WITHDRAW_SIGNER_TOKEN en az 32 karakter olmalıdır")
+        if len(EXCHANGE_INTERNAL_TOKEN) < 32:
+            raise RuntimeError("Signer callback işlemleri için EXCHANGE_INTERNAL_TOKEN en az 32 karakter olmalıdır")
+        return
+
+    required = {
+        "BOT_TOKEN": TOKEN,
+        "ADMIN_CHAT_ID": ADMIN_CHAT_ID,
+        "PANEL_USERNAME": PANEL_USERNAME,
+        "PANEL_PASSWORD": PANEL_PASSWORD,
+    }
+    missing = [key for key, value in required.items() if not str(value).strip()]
+    if missing:
+        raise RuntimeError("Eksik zorunlu ortam değişkenleri: " + ", ".join(missing))
     if len(PANEL_PASSWORD) < 12:
         raise RuntimeError("PANEL_PASSWORD en az 12 karakter olmalıdır")
+
     allowed_address_types = {"p2pkh", "p2wpkh", "bech32", "p2sh-p2wpkh", "nested-segwit"}
     if BTC_ADDRESS_TYPE not in allowed_address_types or LTC_ADDRESS_TYPE not in allowed_address_types:
         raise RuntimeError("BTC_ADDRESS_TYPE/LTC_ADDRESS_TYPE geçersiz")
@@ -2746,8 +2790,8 @@ def validate_runtime_config():
         parsed = urlparse(WITHDRAW_SIGNER_URL)
         if parsed.scheme != "https" and parsed.hostname not in ("localhost", "127.0.0.1"):
             raise RuntimeError("WITHDRAW_SIGNER_URL production ortamında HTTPS olmalıdır")
-        if not WITHDRAW_SIGNER_TOKEN:
-            raise RuntimeError("WITHDRAW_SIGNER_URL kullanılırken WITHDRAW_SIGNER_TOKEN zorunludur")
+        if len(WITHDRAW_SIGNER_TOKEN) < 32:
+            raise RuntimeError("WITHDRAW_SIGNER_URL kullanılırken WITHDRAW_SIGNER_TOKEN en az 32 karakter olmalıdır")
         if len(EXCHANGE_INTERNAL_TOKEN) < 32:
             raise RuntimeError("Otomatik signer için EXCHANGE_INTERNAL_TOKEN en az 32 karakter olmalıdır")
         if PUBLIC_BASE_URL:
@@ -2766,8 +2810,20 @@ def csrf_token():
 
 
 @app.before_request
+def enforce_service_role():
+    signer_paths = {"/", "/version", "/health/signer", "/internal/signer/withdraw"}
+    if SERVICE_ROLE == "signer" and request.path not in signer_paths:
+        return {"ok": False, "error": "not_found"}, 404
+    if SERVICE_ROLE == "app" and request.path.startswith("/internal/signer/"):
+        return {"ok": False, "error": "not_found"}, 404
+    return None
+
+
+@app.before_request
 def enforce_csrf():
     if request.method == "POST":
+        if request.path.startswith("/internal/signer/"):
+            return None
         if request.path.startswith("/internal/exchange/"):
             supplied_internal = request.headers.get("X-Exchange-Token", "") or request.headers.get("Authorization", "").removeprefix("Bearer ")
             if EXCHANGE_INTERNAL_TOKEN and secrets.compare_digest(supplied_internal, EXCHANGE_INTERNAL_TOKEN):
@@ -4893,17 +4949,23 @@ def security_headers(response):
     return response
 
 @app.route("/")
-def home(): return f"Nerlo Wallet aktif ✅ · {BUILD_VERSION}"
+def home():
+    if SERVICE_ROLE == "signer":
+        return f"Nerlo Private Signer hazır · {BUILD_VERSION}"
+    return f"Nerlo Wallet aktif ✅ · {BUILD_VERSION}"
 
 
 @app.route("/version")
 def version_info():
     return {
         "build_version": BUILD_VERSION,
+        "service_role": SERVICE_ROLE,
         "withdraw_guard": True,
         "crypto_manual_complete_blocked": True,
         "panel_release": PANEL_RELEASE,
         "security_release": SECURITY_RELEASE,
+        "signer_release": SIGNER_RELEASE,
+        "signer_stage": SIGNER_STAGE,
         "source_base_sha256": SOURCE_BASE_SHA256,
     }
 
@@ -4915,6 +4977,150 @@ def exchange_health():
     dead_jobs = int((snapshot.get("jobs") or {}).get("dead") or 0)
     snapshot["status"] = "degraded" if mismatch_count or dead_jobs else "ok"
     return snapshot
+
+
+def _signer_supplied_token():
+    auth_header = str(request.headers.get("Authorization") or "")
+    if auth_header.lower().startswith("bearer "):
+        return auth_header[7:].strip()
+    return str(request.headers.get("X-Signer-Token") or "").strip()
+
+
+def _signer_request_row(request_id):
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT request_id,idempotency_key,asset,destination,amount,status,txid,response,last_error,created_at,updated_at
+                FROM signer_requests WHERE request_id=%s
+                """,
+                (str(request_id),),
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "request_id": row[0], "idempotency_key": row[1], "asset": row[2],
+        "destination": row[3], "amount": str(row[4]), "status": row[5],
+        "txid": row[6], "response": row[7] or {}, "last_error": row[8],
+        "created_at": row[9].isoformat() if row[9] else "",
+        "updated_at": row[10].isoformat() if row[10] else "",
+    }
+
+
+@app.route("/health/signer")
+def signer_health():
+    if SERVICE_ROLE != "signer":
+        return {"ok": False, "error": "not_found"}, 404
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status,COUNT(*) FROM signer_requests GROUP BY status")
+            request_counts = {row[0]: row[1] for row in cur.fetchall()}
+    return {
+        "ok": True,
+        "service_role": SERVICE_ROLE,
+        "build_version": BUILD_VERSION,
+        "signer_release": SIGNER_RELEASE,
+        "stage": SIGNER_STAGE,
+        "supported_assets": sorted(SIGNER_SUPPORTED_ASSETS),
+        "broadcast_enabled": False,
+        "private_keys_loaded": False,
+        "requests": request_counts,
+    }
+
+
+@app.route("/internal/signer/withdraw", methods=["POST"])
+def signer_prepare_withdrawal():
+    if SERVICE_ROLE != "signer":
+        return {"ok": False, "error": "not_found"}, 404
+    supplied = _signer_supplied_token()
+    if not supplied or not secrets.compare_digest(supplied, WITHDRAW_SIGNER_TOKEN):
+        return {"ok": False, "error": "unauthorized"}, 401
+
+    payload = request.get_json(silent=True) or {}
+    request_id = str(payload.get("request_id") or "").strip()
+    idempotency_key = str(request.headers.get("Idempotency-Key") or payload.get("idempotency_key") or "").strip()
+    asset = str(payload.get("asset") or "").strip().upper()
+    destination = str(payload.get("address") or "").strip()
+    amount = D(payload.get("amount"))
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{3,100}", request_id):
+        return {"ok": False, "error": "invalid_request_id"}, 400
+    expected_idempotency = f"withdraw:{request_id}"
+    if not idempotency_key or not secrets.compare_digest(idempotency_key, expected_idempotency):
+        return {"ok": False, "error": "invalid_idempotency_key"}, 400
+    if asset not in SIGNER_SUPPORTED_ASSETS:
+        return {"ok": False, "error": "unsupported_asset", "supported_assets": sorted(SIGNER_SUPPORTED_ASSETS)}, 400
+    if amount <= 0:
+        return {"ok": False, "error": "invalid_amount"}, 400
+
+    try:
+        normalized_destination = ensure_external_withdraw_address(
+            str(payload.get("user_id") or ""), asset, destination
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": "invalid_destination", "detail": str(exc)}, 400
+    except RuntimeError as exc:
+        return {"ok": False, "error": "destination_check_unavailable", "detail": str(exc)}, 503
+
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s)::bigint)", (f"signer:{request_id}",))
+            cur.execute(
+                """
+                SELECT idempotency_key,asset,destination,amount,status,txid,response
+                FROM signer_requests WHERE request_id=%s FOR UPDATE
+                """,
+                (request_id,),
+            )
+            existing = cur.fetchone()
+            if existing:
+                same_request = (
+                    secrets.compare_digest(str(existing[0]), idempotency_key)
+                    and str(existing[1]) == asset
+                    and secrets.compare_digest(_address_compare_key(asset, existing[2]), _address_compare_key(asset, normalized_destination))
+                    and D(existing[3]) == amount
+                )
+                if not same_request:
+                    conn.rollback()
+                    return {"ok": False, "error": "idempotency_conflict"}, 409
+                conn.commit()
+                if existing[5]:
+                    return {
+                        "ok": True, "request_id": request_id, "status": existing[4],
+                        "txid": existing[5], "idempotent_replay": True,
+                    }
+                return {
+                    "ok": False,
+                    "request_id": request_id,
+                    "status": existing[4],
+                    "error": "broadcast_adapter_not_enabled",
+                    "stage": SIGNER_STAGE,
+                    "idempotent_replay": True,
+                }, 503
+
+            cur.execute(
+                """
+                INSERT INTO signer_requests(
+                    request_id,idempotency_key,asset,destination,amount,status,payload,response,last_error
+                ) VALUES (%s,%s,%s,%s,%s,'prepared',%s,%s,%s)
+                """,
+                (
+                    request_id, idempotency_key, asset, normalized_destination, amount,
+                    Jsonb(payload), Jsonb({"stage": SIGNER_STAGE}),
+                    "TRX/TRC20 broadcast adapter Stage 2'de etkinleştirilecek",
+                ),
+            )
+        conn.commit()
+
+    return {
+        "ok": False,
+        "request_id": request_id,
+        "status": "prepared",
+        "error": "broadcast_adapter_not_enabled",
+        "stage": SIGNER_STAGE,
+        "message": "Güvenli signer servisi hazır; blockchain yayın katmanı henüz etkin değil.",
+    }, 503
 
 
 @app.route("/internal/exchange/withdrawal", methods=["POST"])
@@ -6117,12 +6323,22 @@ _background_services_lock = threading.Lock()
 
 def start_background_services_once():
     global _background_services_started
-    if not BACKGROUND_SERVICES_ENABLED:
-        return
     with _background_services_lock:
         if _background_services_started:
             return
         validate_runtime_config()
+        if SERVICE_ROLE == "signer":
+            _background_services_started = True
+            print("BUILD VERSION:", BUILD_VERSION)
+            print("SERVICE ROLE: signer")
+            print("SIGNER STAGE:", SIGNER_STAGE)
+            print("SIGNER MODE: private service isolation active; blockchain broadcast disabled in Stage 1")
+            return
+        if not BACKGROUND_SERVICES_ENABLED:
+            _background_services_started = True
+            print("BUILD VERSION:", BUILD_VERSION)
+            print("SERVICE ROLE: app (background services disabled)")
+            return
         threading.Thread(
             target=_run_singleton_polling_service,
             args=("telegram-bot", bot_poll_once, 1),
@@ -6138,6 +6354,7 @@ def start_background_services_once():
         start_exchange_threads()
         _background_services_started = True
         print("BUILD VERSION:", BUILD_VERSION)
+        print("SERVICE ROLE: app")
         print("EXCHANGE HEALTH:", exchange_health_snapshot())
         print("WALLET MODE: PostgreSQL ledger + durable queue + watch-only HD addresses + blockchain indexers")
 
