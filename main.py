@@ -89,13 +89,22 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 SERVICE_ROLE = os.getenv("SERVICE_ROLE", "app").strip().lower()
 if SERVICE_ROLE not in {"app", "signer"}:
     raise RuntimeError("SERVICE_ROLE yalnızca app veya signer olabilir")
-SIGNER_STAGE = "SERVICE-SEPARATION-STAGE1"
+SIGNER_STAGE = "TRON-MAINNET-BROADCAST-STAGE2"
 SIGNER_SUPPORTED_ASSETS = {"TRX", "USDT"}
-BUILD_VERSION = "NERLO-2026-06-25-SIGNER-STAGE1-V8-FRESH"
+SIGNER_BROADCAST_ENABLED = os.getenv("SIGNER_BROADCAST_ENABLED", "0").strip() == "1"
+TRON_PRIVATE_KEY = os.getenv("TRON_PRIVATE_KEY", "").strip()
+TRON_HOT_WALLET_ADDRESS = os.getenv("TRON_HOT_WALLET_ADDRESS", "").strip()
+SIGNER_CALLBACK_URL = os.getenv("SIGNER_CALLBACK_URL", "").strip()
+SIGNER_CONFIRM_POLL_SECONDS = max(10, int(os.getenv("SIGNER_CONFIRM_POLL_SECONDS", "20")))
+SIGNER_EXPIRY_GRACE_SECONDS = max(60, int(os.getenv("SIGNER_EXPIRY_GRACE_SECONDS", "300")))
+TRON_TRX_MIN_RESERVE = Decimal(os.getenv("TRON_TRX_MIN_RESERVE", "5"))
+TRON_USDT_MIN_TRX_RESERVE = Decimal(os.getenv("TRON_USDT_MIN_TRX_RESERVE", "50"))
+TRON_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_USDT_FEE_LIMIT_SUN", "100000000")))
+BUILD_VERSION = "NERLO-2026-06-25-REAL-SIGNER-V9-FRESH"
 PANEL_RELEASE = "ENTERPRISE-OPERATIONS-RAIL-V7"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V1"
-SIGNER_RELEASE = "PRIVATE-SIGNER-SERVICE-SEPARATION-V1"
-SOURCE_BASE_SHA256 = "a5ff1e6310629420b16baa234abd18cf8bf336d361954b4cc5e3efbf1f17ad51"
+SIGNER_RELEASE = "TRON-TRX-USDT-MAINNET-SIGNER-V2"
+SOURCE_BASE_SHA256 = "de45961768de27748276a7d58d2c92a00d38d2e92b7e6a41627e6aa207bfc071"
 
 CONFIRMATION_THRESHOLDS = {
     "BTC": max(1, int(os.getenv("BTC_CONFIRMATIONS", "3"))),
@@ -2757,6 +2766,30 @@ def validate_runtime_config():
             raise RuntimeError("Signer servisi için WITHDRAW_SIGNER_TOKEN en az 32 karakter olmalıdır")
         if len(EXCHANGE_INTERNAL_TOKEN) < 32:
             raise RuntimeError("Signer callback işlemleri için EXCHANGE_INTERNAL_TOKEN en az 32 karakter olmalıdır")
+        if SIGNER_BROADCAST_ENABLED:
+            if not TRONGRID_KEY:
+                raise RuntimeError("Gerçek TRON gönderimi için TRONGRID_KEY zorunludur")
+            if not SIGNER_CALLBACK_URL:
+                raise RuntimeError("Gerçek gönderim için SIGNER_CALLBACK_URL zorunludur")
+            callback = urlparse(SIGNER_CALLBACK_URL)
+            if callback.scheme != "https" and callback.hostname not in ("localhost", "127.0.0.1"):
+                raise RuntimeError("SIGNER_CALLBACK_URL HTTPS olmalıdır")
+            if not USDT_TRC20_CONTRACT:
+                raise RuntimeError("USDT gönderimi için USDT_TRC20_CONTRACT zorunludur")
+            valid_contract, normalized_contract, _ = validate_wallet_address("USDT", USDT_TRC20_CONTRACT)
+            if not valid_contract:
+                raise RuntimeError("USDT_TRC20_CONTRACT geçersiz TRON adresidir")
+            if normalized_contract != USDT_TRC20_CONTRACT:
+                raise RuntimeError("USDT_TRC20_CONTRACT normalize edilemedi")
+            derived_address = _tron_address_from_private_key()
+            if not TRON_HOT_WALLET_ADDRESS:
+                raise RuntimeError("TRON_HOT_WALLET_ADDRESS zorunludur")
+            valid_hot, normalized_hot, _ = validate_wallet_address("TRX", TRON_HOT_WALLET_ADDRESS)
+            if not valid_hot or not secrets.compare_digest(derived_address, normalized_hot):
+                raise RuntimeError("TRON_PRIVATE_KEY ile TRON_HOT_WALLET_ADDRESS eşleşmiyor")
+            secret_values = {TRON_PRIVATE_KEY.lower().removeprefix("0x"), WITHDRAW_SIGNER_TOKEN, EXCHANGE_INTERNAL_TOKEN, app.secret_key}
+            if len(secret_values) != 4:
+                raise RuntimeError("Signer gizli değerleri birbirinden farklı olmalıdır")
         return
 
     required = {
@@ -5008,6 +5041,414 @@ def _signer_request_row(request_id):
     }
 
 
+def _tron_private_key_int():
+    value = re.sub(r"\s+", "", str(TRON_PRIVATE_KEY or ""))
+    if value.lower().startswith("0x"):
+        value = value[2:]
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+        raise ValueError("TRON_PRIVATE_KEY 64 karakter hexadecimal olmalıdır")
+    private_int = int(value, 16)
+    if not 1 <= private_int < _SECP_N:
+        raise ValueError("TRON_PRIVATE_KEY secp256k1 aralığında değil")
+    return private_int
+
+
+def _tron_address_from_private_key():
+    private_int = _tron_private_key_int()
+    point = _secp_mul(private_int)
+    if point is None:
+        raise ValueError("TRON private key public key üretemedi")
+    x, y = point
+    public_key = x.to_bytes(32, "big") + y.to_bytes(32, "big")
+    return _b58check_encode(b"\x41" + _keccak256(public_key)[-20:])
+
+
+def _rfc6979_nonce(private_int, digest, retry=0):
+    digest = bytes(digest)
+    if len(digest) != 32:
+        raise ValueError("İmzalanacak özet 32 byte olmalıdır")
+    private_bytes = int(private_int).to_bytes(32, "big")
+    seed = digest if retry == 0 else hashlib.sha256(digest + retry.to_bytes(4, "big")).digest()
+    key = b"\x00" * 32
+    value = b"\x01" * 32
+    key = hmac.new(key, value + b"\x00" + private_bytes + seed, hashlib.sha256).digest()
+    value = hmac.new(key, value, hashlib.sha256).digest()
+    key = hmac.new(key, value + b"\x01" + private_bytes + seed, hashlib.sha256).digest()
+    value = hmac.new(key, value, hashlib.sha256).digest()
+    while True:
+        value = hmac.new(key, value, hashlib.sha256).digest()
+        candidate = int.from_bytes(value, "big")
+        if 1 <= candidate < _SECP_N:
+            return candidate
+        key = hmac.new(key, value + b"\x00", hashlib.sha256).digest()
+        value = hmac.new(key, value, hashlib.sha256).digest()
+
+
+def _secp_sign_recoverable(private_int, digest):
+    private_int = int(private_int)
+    digest = bytes(digest)
+    z = int.from_bytes(digest, "big")
+    for retry in range(100):
+        nonce = _rfc6979_nonce(private_int, digest, retry)
+        point = _secp_mul(nonce)
+        if point is None:
+            continue
+        x, y = point
+        r = x % _SECP_N
+        if r == 0:
+            continue
+        s = (pow(nonce, -1, _SECP_N) * (z + r * private_int)) % _SECP_N
+        if s == 0:
+            continue
+        recovery_id = (y & 1) | (2 if x >= _SECP_N else 0)
+        if s > _SECP_N // 2:
+            s = _SECP_N - s
+            recovery_id ^= 1
+        return r.to_bytes(32, "big") + s.to_bytes(32, "big") + bytes([recovery_id])
+    raise RuntimeError("ECDSA imzası üretilemedi")
+
+
+def _secp_recover_public_key(digest, signature):
+    digest = bytes(digest)
+    signature = bytes(signature)
+    if len(signature) != 65:
+        raise ValueError("Recoverable signature 65 byte olmalıdır")
+    r = int.from_bytes(signature[:32], "big")
+    s = int.from_bytes(signature[32:64], "big")
+    recovery_id = signature[64]
+    if not (1 <= r < _SECP_N and 1 <= s < _SECP_N and 0 <= recovery_id <= 3):
+        raise ValueError("ECDSA signature bileşenleri geçersiz")
+    x = r + (recovery_id // 2) * _SECP_N
+    if x >= _SECP_P:
+        raise ValueError("ECDSA recovery X koordinatı geçersiz")
+    alpha = (pow(x, 3, _SECP_P) + 7) % _SECP_P
+    beta = pow(alpha, (_SECP_P + 1) // 4, _SECP_P)
+    y = beta if (beta & 1) == (recovery_id & 1) else _SECP_P - beta
+    point_r = (x, y)
+    z = int.from_bytes(digest, "big") % _SECP_N
+    r_inv = pow(r, -1, _SECP_N)
+    return _secp_add(
+        _secp_mul((s * r_inv) % _SECP_N, point_r),
+        _secp_mul((-z * r_inv) % _SECP_N, _SECP_G),
+    )
+
+
+def _tron_signing_self_test():
+    digest = hashlib.sha256(b"nerlo-tron-signer-self-test").digest()
+    signature = _secp_sign_recoverable(1, digest)
+    recovered = _secp_recover_public_key(digest, signature)
+    if recovered != _SECP_G:
+        raise RuntimeError("TRON ECDSA recoverable signature self-test failed")
+
+
+def _tron_api_error(payload):
+    payload = payload or {}
+    message = str(payload.get("message") or payload.get("Error") or payload.get("error") or "").strip()
+    if message and re.fullmatch(r"[0-9a-fA-F]+", message) and len(message) % 2 == 0:
+        try:
+            decoded = bytes.fromhex(message).decode("utf-8", "replace").strip()
+            if decoded:
+                message = decoded
+        except ValueError:
+            pass
+    code = str(payload.get("code") or payload.get("result") or "").strip()
+    return " · ".join(part for part in (code, message) if part) or "TRON node bilinmeyen hata döndürdü"
+
+
+def _tron_api_post(path, payload, timeout=35):
+    response = requests.post(
+        f"{TRONGRID_BASE_URL}/{str(path).lstrip('/')}",
+        json=payload,
+        headers=_trongrid_headers(),
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    result = response.json()
+    if not isinstance(result, dict):
+        raise RuntimeError("TRON node geçersiz JSON döndürdü")
+    return result
+
+
+def _tron_address_payload(address):
+    payload = _b58check_decode(address)
+    if len(payload) != 21 or payload[0] != 0x41:
+        raise ValueError("Geçersiz TRON adresi")
+    return payload
+
+
+def _tron_abi_address(address):
+    return _tron_address_payload(address)[1:].hex().rjust(64, "0")
+
+
+def _tron_units(amount, decimals=6):
+    amount = D(amount)
+    factor = Decimal(10) ** int(decimals)
+    scaled = amount * factor
+    integral = scaled.to_integral_value(rounding=ROUND_DOWN)
+    if scaled != integral or integral <= 0:
+        raise ValueError(f"Tutar en fazla {decimals} ondalık basamak içermelidir")
+    return int(integral)
+
+
+def _tron_account(address):
+    return _tron_api_post("wallet/getaccount", {"address": address, "visible": True})
+
+
+def _tron_trx_balance_sun(address):
+    return int((_tron_account(address) or {}).get("balance") or 0)
+
+
+def _tron_trc20_balance_units(address):
+    result = _tron_api_post("wallet/triggerconstantcontract", {
+        "owner_address": address,
+        "contract_address": USDT_TRC20_CONTRACT,
+        "function_selector": "balanceOf(address)",
+        "parameter": _tron_abi_address(address),
+        "visible": True,
+    })
+    values = result.get("constant_result") or []
+    if not values:
+        detail = _tron_api_error(result.get("result") if isinstance(result.get("result"), dict) else result)
+        raise RuntimeError(f"USDT bakiyesi okunamadı: {detail}")
+    return int(str(values[0]), 16)
+
+
+def _tron_create_unsigned(asset, destination, amount):
+    asset = str(asset).upper()
+    owner = _tron_address_from_private_key()
+    units = _tron_units(amount, 6)
+    trx_balance = _tron_trx_balance_sun(owner)
+
+    if asset == "TRX":
+        reserve_sun = _tron_units(TRON_TRX_MIN_RESERVE, 6)
+        if trx_balance < units + reserve_sun:
+            raise RuntimeError(
+                f"Sıcak cüzdanda yetersiz TRX. Gerekli: {(Decimal(units + reserve_sun) / Decimal(10**6))} TRX"
+            )
+        transaction = _tron_api_post("wallet/createtransaction", {
+            "owner_address": owner,
+            "to_address": destination,
+            "amount": units,
+            "visible": True,
+        })
+        if transaction.get("Error") or not transaction.get("txID"):
+            raise RuntimeError(f"TRX işlemi oluşturulamadı: {_tron_api_error(transaction)}")
+        return transaction
+
+    if asset == "USDT":
+        reserve_sun = _tron_units(TRON_USDT_MIN_TRX_RESERVE, 6)
+        if trx_balance < reserve_sun:
+            raise RuntimeError(
+                f"USDT ağ ücretleri için en az {TRON_USDT_MIN_TRX_RESERVE} TRX sıcak cüzdan bakiyesi gerekli"
+            )
+        token_balance = _tron_trc20_balance_units(owner)
+        if token_balance < units:
+            raise RuntimeError(
+                f"Sıcak cüzdanda yetersiz USDT. Mevcut: {Decimal(token_balance) / Decimal(10**6)} USDT"
+            )
+        trigger = _tron_api_post("wallet/triggersmartcontract", {
+            "owner_address": owner,
+            "contract_address": USDT_TRC20_CONTRACT,
+            "function_selector": "transfer(address,uint256)",
+            "parameter": _tron_abi_address(destination) + int(units).to_bytes(32, "big").hex(),
+            "fee_limit": TRON_USDT_FEE_LIMIT_SUN,
+            "call_value": 0,
+            "visible": True,
+        })
+        trigger_result = trigger.get("result") or {}
+        if not trigger_result.get("result") or not trigger.get("transaction"):
+            raise RuntimeError(f"USDT işlemi oluşturulamadı: {_tron_api_error(trigger_result)}")
+        transaction = trigger["transaction"]
+        if not transaction.get("txID"):
+            raise RuntimeError("USDT işlemi txID içermiyor")
+        return transaction
+
+    raise ValueError("Signer yalnızca TRX ve USDT destekliyor")
+
+
+def _tron_sign_transaction(transaction):
+    transaction = dict(transaction or {})
+    txid = str(transaction.get("txID") or "").lower()
+    raw_hex = str(transaction.get("raw_data_hex") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", txid) or not re.fullmatch(r"[0-9a-fA-F]+", raw_hex):
+        raise RuntimeError("TRON node imzalanabilir işlem verisi döndürmedi")
+    raw_bytes = bytes.fromhex(raw_hex)
+    calculated = hashlib.sha256(raw_bytes).hexdigest()
+    if not secrets.compare_digest(calculated, txid):
+        raise RuntimeError("TRON işlem hash doğrulaması başarısız")
+    signature = _secp_sign_recoverable(_tron_private_key_int(), bytes.fromhex(txid))
+    if _secp_recover_public_key(bytes.fromhex(txid), signature) != _secp_mul(_tron_private_key_int()):
+        raise RuntimeError("TRON işlem imzası doğrulanamadı")
+    transaction["signature"] = [signature.hex()]
+    return transaction
+
+
+def _tron_broadcast_signed(transaction):
+    result = _tron_api_post("wallet/broadcasttransaction", transaction, timeout=45)
+    if result.get("result") is True:
+        return result
+    detail = _tron_api_error(result)
+    if "DUP_TRANSACTION_ERROR" in detail.upper() or "DUPLICATE" in detail.upper():
+        return {**result, "result": True, "duplicate": True}
+    raise RuntimeError(f"TRON broadcast reddedildi: {detail}")
+
+
+def _signer_callback(payload):
+    if not SIGNER_CALLBACK_URL:
+        raise RuntimeError("SIGNER_CALLBACK_URL tanımlı değil")
+    response = requests.post(
+        SIGNER_CALLBACK_URL,
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {EXCHANGE_INTERNAL_TOKEN}",
+            "Content-Type": "application/json",
+            "User-Agent": "Nerlo-Private-Signer/2.0",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    body = response.json()
+    if not body.get("ok"):
+        raise RuntimeError(f"Ana uygulama callback işlemini reddetti: {body}")
+    return body
+
+
+def _signer_merge_response(request_id, status=None, txid=None, response_patch=None, last_error=None, confirmed=False):
+    patch = dict(response_patch or {})
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE signer_requests
+                SET status=COALESCE(%s,status),
+                    txid=COALESCE(NULLIF(%s,''),txid),
+                    response=COALESCE(response,'{}'::jsonb) || %s,
+                    last_error=COALESCE(%s,last_error),
+                    updated_at=NOW(),
+                    broadcast_at=CASE WHEN COALESCE(%s,status) IN ('broadcast','broadcast_unknown') THEN COALESCE(broadcast_at,NOW()) ELSE broadcast_at END,
+                    confirmed_at=CASE WHEN %s THEN COALESCE(confirmed_at,NOW()) ELSE confirmed_at END
+                WHERE request_id=%s
+                """,
+                (status, txid or "", Jsonb(patch), last_error, status, bool(confirmed), str(request_id)),
+            )
+        conn.commit()
+
+
+def _signer_confirm_one(record):
+    request_id = str(record["request_id"])
+    asset = str(record["asset"])
+    txid = str(record["txid"] or "")
+    status = str(record["status"] or "")
+    response_data = dict(record.get("response") or {})
+
+    if status in ("confirmed", "failed", "expired_review"):
+        if response_data.get("callback_sent"):
+            return
+        callback_status = "confirmed" if status == "confirmed" else "failed"
+        refund = bool(response_data.get("refund", False))
+        payload = {
+            "request_id": request_id,
+            "status": callback_status,
+            "txid": txid,
+            "refund": refund,
+            "reason": response_data.get("failure_reason", ""),
+        }
+        try:
+            _signer_callback(payload)
+            _signer_merge_response(request_id, response_patch={"callback_sent": True, "callback_sent_at": now(), "callback_error": ""})
+        except Exception as exc:
+            _signer_merge_response(request_id, response_patch={"callback_sent": False, "callback_error": str(exc)[:500]}, last_error=str(exc)[:500])
+        return
+
+    if not txid:
+        return
+    info = _tron_api_post("walletsolidity/gettransactioninfobyid", {"value": txid})
+    if info.get("id"):
+        receipt_result = str((info.get("receipt") or {}).get("result") or "").upper()
+        if receipt_result and receipt_result != "SUCCESS":
+            reason = f"Zincir işlemi başarısız: {receipt_result}"
+            _signer_merge_response(
+                request_id,
+                status="failed",
+                response_patch={"chain_info": info, "refund": True, "failure_reason": reason, "callback_sent": False},
+                last_error=reason,
+            )
+        else:
+            _signer_merge_response(
+                request_id,
+                status="confirmed",
+                response_patch={"chain_info": info, "callback_sent": False},
+                last_error="",
+                confirmed=True,
+            )
+        return
+
+    signed_transaction = response_data.get("signed_transaction") or {}
+    expiration = int((signed_transaction.get("raw_data") or {}).get("expiration") or 0)
+    if expiration and int(time.time() * 1000) > expiration + SIGNER_EXPIRY_GRACE_SECONDS * 1000:
+        fullnode_tx = _tron_api_post("wallet/gettransactionbyid", {"value": txid})
+        if not fullnode_tx.get("txID"):
+            reason = "İşlem süresi doldu ancak zincir sonucu kesinleşmedi; otomatik iade yapılmadı"
+            _signer_merge_response(
+                request_id,
+                status="expired_review",
+                response_patch={"refund": False, "failure_reason": reason, "callback_sent": False},
+                last_error=reason,
+            )
+
+
+def signer_confirmation_once():
+    if SERVICE_ROLE != "signer" or not SIGNER_BROADCAST_ENABLED:
+        return
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT request_id,asset,status,txid,response
+                FROM signer_requests
+                WHERE status IN ('broadcast','broadcast_unknown','confirmed','failed','expired_review')
+                ORDER BY updated_at ASC
+                LIMIT 100
+                """
+            )
+            rows = cur.fetchall()
+    for row in rows:
+        try:
+            _signer_confirm_one({
+                "request_id": row[0], "asset": row[1], "status": row[2],
+                "txid": row[3], "response": row[4] or {},
+            })
+        except Exception as exc:
+            print("SIGNER CONFIRMATION ERROR:", row[0], exc)
+            _signer_merge_response(str(row[0]), last_error=str(exc)[:500])
+
+
+def _signer_runtime_state():
+    private_key_loaded = False
+    derived_address = ""
+    key_error = ""
+    try:
+        derived_address = _tron_address_from_private_key()
+        private_key_loaded = True
+    except Exception as exc:
+        key_error = str(exc)
+    address_matches = bool(
+        private_key_loaded and TRON_HOT_WALLET_ADDRESS
+        and secrets.compare_digest(derived_address, TRON_HOT_WALLET_ADDRESS)
+    )
+    ready = bool(
+        SIGNER_BROADCAST_ENABLED and private_key_loaded and address_matches
+        and TRONGRID_KEY and USDT_TRC20_CONTRACT and SIGNER_CALLBACK_URL
+    )
+    return {
+        "private_key_loaded": private_key_loaded,
+        "derived_address": derived_address,
+        "address_matches": address_matches,
+        "key_error": key_error,
+        "ready": ready,
+    }
+
+
 @app.route("/health/signer")
 def signer_health():
     if SERVICE_ROLE != "signer":
@@ -5016,6 +5457,7 @@ def signer_health():
         with conn.cursor() as cur:
             cur.execute("SELECT status,COUNT(*) FROM signer_requests GROUP BY status")
             request_counts = {row[0]: row[1] for row in cur.fetchall()}
+    runtime = _signer_runtime_state()
     return {
         "ok": True,
         "service_role": SERVICE_ROLE,
@@ -5023,8 +5465,12 @@ def signer_health():
         "signer_release": SIGNER_RELEASE,
         "stage": SIGNER_STAGE,
         "supported_assets": sorted(SIGNER_SUPPORTED_ASSETS),
-        "broadcast_enabled": False,
-        "private_keys_loaded": False,
+        "network": "TRON mainnet",
+        "broadcast_enabled": SIGNER_BROADCAST_ENABLED,
+        "private_keys_loaded": runtime["private_key_loaded"],
+        "hot_wallet_address": runtime["derived_address"] if runtime["private_key_loaded"] else "",
+        "address_matches": runtime["address_matches"],
+        "ready": runtime["ready"],
         "requests": request_counts,
     }
 
@@ -5036,6 +5482,12 @@ def signer_prepare_withdrawal():
     supplied = _signer_supplied_token()
     if not supplied or not secrets.compare_digest(supplied, WITHDRAW_SIGNER_TOKEN):
         return {"ok": False, "error": "unauthorized"}, 401
+    if not SIGNER_BROADCAST_ENABLED:
+        return {"ok": False, "error": "broadcast_disabled"}, 503
+
+    runtime = _signer_runtime_state()
+    if not runtime["ready"]:
+        return {"ok": False, "error": "signer_not_ready"}, 503
 
     payload = request.get_json(silent=True) or {}
     request_id = str(payload.get("request_id") or "").strip()
@@ -5063,13 +5515,15 @@ def signer_prepare_withdrawal():
     except RuntimeError as exc:
         return {"ok": False, "error": "destination_check_unavailable", "detail": str(exc)}, 503
 
-    with _db_connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s)::bigint)", (f"signer:{request_id}",))
+    lock_conn = _db_connect()
+    lock_conn.autocommit = True
+    try:
+        with lock_conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(hashtext(%s)::bigint)", (f"signer:{request_id}",))
             cur.execute(
                 """
                 SELECT idempotency_key,asset,destination,amount,status,txid,response
-                FROM signer_requests WHERE request_id=%s FOR UPDATE
+                FROM signer_requests WHERE request_id=%s
                 """,
                 (request_id,),
             )
@@ -5082,45 +5536,99 @@ def signer_prepare_withdrawal():
                     and D(existing[3]) == amount
                 )
                 if not same_request:
-                    conn.rollback()
                     return {"ok": False, "error": "idempotency_conflict"}, 409
-                conn.commit()
-                if existing[5]:
+                existing_status = str(existing[4])
+                existing_txid = str(existing[5] or "")
+                existing_response = dict(existing[6] or {})
+                if existing_status in ("broadcast", "confirmed") and existing_txid:
                     return {
-                        "ok": True, "request_id": request_id, "status": existing[4],
-                        "txid": existing[5], "idempotent_replay": True,
+                        "ok": True, "request_id": request_id, "status": existing_status,
+                        "txid": existing_txid, "idempotent_replay": True,
+                        "confirmed": existing_status == "confirmed",
                     }
-                return {
-                    "ok": False,
-                    "request_id": request_id,
-                    "status": existing[4],
-                    "error": "broadcast_adapter_not_enabled",
+                if existing_status == "expired_review":
+                    return {"ok": False, "error": "manual_review_required", "txid": existing_txid}, 409
+            else:
+                existing_status = "prepared"
+                existing_txid = ""
+                existing_response = {}
+                cur.execute(
+                    """
+                    INSERT INTO signer_requests(
+                        request_id,idempotency_key,asset,destination,amount,status,payload,response,last_error
+                    ) VALUES (%s,%s,%s,%s,%s,'prepared',%s,%s,'')
+                    """,
+                    (request_id, idempotency_key, asset, normalized_destination, amount, Jsonb(payload), Jsonb({"stage": SIGNER_STAGE})),
+                )
+
+        signed_transaction = existing_response.get("signed_transaction")
+        txid = existing_txid
+        if not signed_transaction:
+            unsigned_transaction = _tron_create_unsigned(asset, normalized_destination, amount)
+            signed_transaction = _tron_sign_transaction(unsigned_transaction)
+            txid = str(signed_transaction.get("txID") or "")
+            _signer_merge_response(
+                request_id,
+                status="signed",
+                txid=txid,
+                response_patch={
                     "stage": SIGNER_STAGE,
-                    "idempotent_replay": True,
-                }, 503
-
-            cur.execute(
-                """
-                INSERT INTO signer_requests(
-                    request_id,idempotency_key,asset,destination,amount,status,payload,response,last_error
-                ) VALUES (%s,%s,%s,%s,%s,'prepared',%s,%s,%s)
-                """,
-                (
-                    request_id, idempotency_key, asset, normalized_destination, amount,
-                    Jsonb(payload), Jsonb({"stage": SIGNER_STAGE}),
-                    "TRX/TRC20 broadcast adapter Stage 2'de etkinleştirilecek",
-                ),
+                    "signed_transaction": signed_transaction,
+                    "signed_at": now(),
+                    "hot_wallet_address": runtime["derived_address"],
+                },
+                last_error="",
             )
-        conn.commit()
 
-    return {
-        "ok": False,
-        "request_id": request_id,
-        "status": "prepared",
-        "error": "broadcast_adapter_not_enabled",
-        "stage": SIGNER_STAGE,
-        "message": "Güvenli signer servisi hazır; blockchain yayın katmanı henüz etkin değil.",
-    }, 503
+        try:
+            broadcast_result = _tron_broadcast_signed(signed_transaction)
+        except requests.RequestException as exc:
+            _signer_merge_response(
+                request_id,
+                status="broadcast_unknown",
+                txid=txid,
+                response_patch={"broadcast_error": str(exc)[:500]},
+                last_error=str(exc)[:500],
+            )
+            return {
+                "ok": False, "request_id": request_id, "status": "broadcast_unknown",
+                "txid": txid, "error": "broadcast_result_unknown",
+            }, 503
+        except Exception as exc:
+            _signer_merge_response(
+                request_id,
+                status="failed",
+                txid=txid,
+                response_patch={"broadcast_error": str(exc)[:500], "refund": False, "callback_sent": False},
+                last_error=str(exc)[:500],
+            )
+            return {"ok": False, "request_id": request_id, "status": "failed", "txid": txid, "error": str(exc)}, 502
+
+        _signer_merge_response(
+            request_id,
+            status="broadcast",
+            txid=txid,
+            response_patch={"broadcast_result": broadcast_result, "broadcast_at": now(), "callback_sent": False},
+            last_error="",
+        )
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "status": "broadcast",
+            "txid": txid,
+            "confirmed": False,
+            "idempotent_replay": bool(existing),
+        }
+    finally:
+        try:
+            with lock_conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(hashtext(%s)::bigint)", (f"signer:{request_id}",))
+        except Exception:
+            pass
+        lock_conn.close()
+
+
+_tron_signing_self_test()
 
 
 @app.route("/internal/exchange/withdrawal", methods=["POST"])
@@ -6328,11 +6836,21 @@ def start_background_services_once():
             return
         validate_runtime_config()
         if SERVICE_ROLE == "signer":
+            if SIGNER_BROADCAST_ENABLED:
+                threading.Thread(
+                    target=_run_singleton_polling_service,
+                    args=("signer-confirmations", signer_confirmation_once, SIGNER_CONFIRM_POLL_SECONDS),
+                    daemon=True,
+                    name="signer-confirmations",
+                ).start()
             _background_services_started = True
+            runtime = _signer_runtime_state()
             print("BUILD VERSION:", BUILD_VERSION)
             print("SERVICE ROLE: signer")
             print("SIGNER STAGE:", SIGNER_STAGE)
-            print("SIGNER MODE: private service isolation active; blockchain broadcast disabled in Stage 1")
+            print("SIGNER BROADCAST ENABLED:", SIGNER_BROADCAST_ENABLED)
+            print("SIGNER READY:", runtime.get("ready"))
+            print("SIGNER HOT WALLET:", runtime.get("derived_address") or "not-loaded")
             return
         if not BACKGROUND_SERVICES_ENABLED:
             _background_services_started = True
