@@ -7674,10 +7674,6 @@ def admin():
     nav_html = "".join(nav_parts)
 
     dashboard_section = f"""<section class='page-view {'active' if active_view == 'dashboard' else ''}' data-view='dashboard'>
-      <div class='command-hero'>
-        <div class='hero-copy'><span>NERLO TREASURY CONTROL</span><h2>Finans operasyonlarının canlı görünümü</h2><p>Yükümlülükler, işlem kuyrukları, blockchain havuzu ve kullanıcı risklerini tek ekrandan izleyin.</p></div>
-        <div class='hero-date'><small>Rapor tarihi</small><strong>{h(today())}</strong><span>Türkiye saati</span></div>
-      </div>
       <div class='kpi-grid'>
         <div class='kpi'><span>Toplam kullanıcı</span><strong>{len(users)}</strong><small>{frozen_users} dondurulmuş hesap</small></div>
         <div class='kpi attention'><span>Aksiyon bekleyen</span><strong>{pending_count}</strong><small>{status_counts.get('pending',0)} bekliyor · {status_counts.get('processing',0)} işleniyor</small></div>
