@@ -15,6 +15,7 @@ import contextlib
 import uuid
 import socket
 import traceback
+import unicodedata
 from urllib.parse import urlparse
 from collections import defaultdict, deque
 from datetime import datetime, date
@@ -89,7 +90,7 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 SERVICE_ROLE = os.getenv("SERVICE_ROLE", "app").strip().lower()
 if SERVICE_ROLE not in {"app", "signer"}:
     raise RuntimeError("SERVICE_ROLE yalnızca app veya signer olabilir")
-SIGNER_STAGE = "TRON-MAINNET-BROADCAST-STAGE2"
+SIGNER_STAGE = "TRON-POOL-SWEEP-AND-WITHDRAW-STAGE3"
 SIGNER_SUPPORTED_ASSETS = {"TRX", "USDT"}
 SIGNER_BROADCAST_ENABLED = os.getenv("SIGNER_BROADCAST_ENABLED", "0").strip() == "1"
 TRON_PRIVATE_KEY = os.getenv("TRON_PRIVATE_KEY", "").strip()
@@ -100,11 +101,29 @@ SIGNER_EXPIRY_GRACE_SECONDS = max(60, int(os.getenv("SIGNER_EXPIRY_GRACE_SECONDS
 TRON_TRX_MIN_RESERVE = Decimal(os.getenv("TRON_TRX_MIN_RESERVE", "5"))
 TRON_USDT_MIN_TRX_RESERVE = Decimal(os.getenv("TRON_USDT_MIN_TRX_RESERVE", "50"))
 TRON_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_USDT_FEE_LIMIT_SUN", "100000000")))
-BUILD_VERSION = "NERLO-2026-06-25-REAL-SIGNER-V9-FRESH"
-PANEL_RELEASE = "ENTERPRISE-OPERATIONS-RAIL-V7"
-SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V1"
-SIGNER_RELEASE = "TRON-TRX-USDT-MAINNET-SIGNER-V2"
-SOURCE_BASE_SHA256 = "de45961768de27748276a7d58d2c92a00d38d2e92b7e6a41627e6aa207bfc071"
+
+# TRON deposit-pool collection. These secrets are valid only in SERVICE_ROLE=signer.
+TRON_SWEEP_ENABLED = os.getenv("TRON_SWEEP_ENABLED", "0").strip() == "1"
+TRON_SWEEP_MNEMONIC = os.getenv("TRON_SWEEP_MNEMONIC", "").strip()
+TRON_SWEEP_MNEMONIC_PASSPHRASE = os.getenv("TRON_SWEEP_MNEMONIC_PASSPHRASE", "")
+TRON_SWEEP_ACCOUNT_XPRV = os.getenv("TRON_SWEEP_ACCOUNT_XPRV", "").strip()
+TRON_SWEEP_ACCOUNT_PATH = os.getenv("TRON_SWEEP_ACCOUNT_PATH", "m/44'/195'/0'").strip()
+TRON_SWEEP_POLL_SECONDS = max(10, int(os.getenv("TRON_SWEEP_POLL_SECONDS", "20")))
+TRON_SWEEP_BATCH_LIMIT = max(1, min(100, int(os.getenv("TRON_SWEEP_BATCH_LIMIT", "25"))))
+TRON_SWEEP_TRX_RESERVE = Decimal(os.getenv("TRON_SWEEP_TRX_RESERVE", "1.5"))
+TRON_SWEEP_MIN_TRX = Decimal(os.getenv("TRON_SWEEP_MIN_TRX", "2"))
+TRON_SWEEP_MIN_USDT = Decimal(os.getenv("TRON_SWEEP_MIN_USDT", "1"))
+TRON_SWEEP_USDT_GAS_TARGET = Decimal(os.getenv("TRON_SWEEP_USDT_GAS_TARGET", "50"))
+TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FEE_LIMIT_SUN", "100000000")))
+TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
+TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
+
+BUILD_VERSION = "NERLO-2026-06-25-TRON-POOL-V10-FRESH"
+PANEL_RELEASE = "ENTERPRISE-OPERATIONS-POOL-V10"
+SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
+SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
+SWEEP_RELEASE = "TRON-HD-DEPOSIT-SWEEP-V1"
+SOURCE_BASE_SHA256 = "1dec90192c4e2bbf7c1266738f9f74db2e2d89f265ef735134655b4cb81069d3"
 
 CONFIRMATION_THRESHOLDS = {
     "BTC": max(1, int(os.getenv("BTC_CONFIRMATIONS", "3"))),
@@ -115,7 +134,9 @@ CONFIRMATION_THRESHOLDS = {
     "XMR": max(1, int(os.getenv("XMR_CONFIRMATIONS", "10"))),
 }
 AUTO_DEPOSIT_ASSETS = {"BTC", "LTC", "ETH", "TRX", "USDT", "XMR"}
-AUTO_WITHDRAW_ASSETS = {"BTC", "LTC", "ETH", "TRX", "USDT"}
+AUTO_WITHDRAW_ASSETS = {"TRX", "USDT"}
+MANUAL_WITHDRAW_ASSETS = {"BTC", "LTC", "ETH"}
+WITHDRAW_ENABLED_ASSETS = {"TL"} | AUTO_WITHDRAW_ASSETS | MANUAL_WITHDRAW_ASSETS
 CHAIN_BY_ASSET = {"BTC": "BTC", "LTC": "LTC", "ETH": "ETH", "TRX": "TRON", "USDT": "TRON", "XMR": "XMR"}
 
 app = Flask(__name__)
@@ -337,6 +358,41 @@ def init_database():
     );
     CREATE INDEX IF NOT EXISTS idx_signer_requests_status_updated
         ON signer_requests (status, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS signer_sweeps (
+        sweep_id BIGSERIAL PRIMARY KEY,
+        event_id BIGINT NOT NULL UNIQUE,
+        user_id TEXT NOT NULL,
+        asset TEXT NOT NULL CHECK (asset IN ('TRX','USDT')),
+        source_address TEXT NOT NULL,
+        destination_address TEXT NOT NULL,
+        derivation_index BIGINT,
+        derivation_path TEXT NOT NULL DEFAULT '',
+        amount NUMERIC(50,18) NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'queued',
+        funding_txid TEXT NOT NULL DEFAULT '',
+        sweep_txid TEXT NOT NULL DEFAULT '',
+        cleanup_txid TEXT NOT NULL DEFAULT '',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+        response JSONB NOT NULL DEFAULT '{}'::jsonb,
+        last_error TEXT NOT NULL DEFAULT '',
+        available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        locked_at TIMESTAMPTZ,
+        locked_by TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        funded_at TIMESTAMPTZ,
+        broadcast_at TIMESTAMPTZ,
+        cleanup_at TIMESTAMPTZ,
+        confirmed_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_signer_sweeps_claim
+        ON signer_sweeps (status, available_at, sweep_id);
+    CREATE INDEX IF NOT EXISTS idx_signer_sweeps_source
+        ON signer_sweeps (source_address, asset, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_signer_sweeps_funding_txid
+        ON signer_sweeps (funding_txid) WHERE funding_txid<>'';
     """
     with _db_connect() as conn:
         with conn.cursor() as cur:
@@ -748,6 +804,165 @@ def _derive_tron_address(xpub, index, branch=0):
     return _b58check_encode(b"\x41" + _keccak256(uncompressed)[-20:])
 
 
+def _tron_address_from_private_int(private_int):
+    private_int = int(private_int)
+    if not 1 <= private_int < _SECP_N:
+        raise ValueError("TRON private key secp256k1 aralığında değil")
+    point = _secp_mul(private_int)
+    if point is None:
+        raise ValueError("TRON private key public key üretemedi")
+    x, y = point
+    public_key = x.to_bytes(32, "big") + y.to_bytes(32, "big")
+    return _b58check_encode(b"\x41" + _keccak256(public_key)[-20:])
+
+
+def _parse_bip32_path(path, allow_relative=False):
+    text = str(path or "").strip()
+    if not text:
+        return []
+    parts = text.split("/")
+    if parts[0] in ("m", "M"):
+        parts = parts[1:]
+    elif not allow_relative:
+        raise ValueError("BIP32 yolu m/ ile başlamalıdır")
+    result = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            raise ValueError("BIP32 yolunda boş bölüm var")
+        hardened = part[-1:] in ("'", "h", "H")
+        number_text = part[:-1] if hardened else part
+        if not number_text.isdigit():
+            raise ValueError("BIP32 yolu geçersiz")
+        index = int(number_text)
+        if not 0 <= index < 0x80000000:
+            raise ValueError("BIP32 child index aralık dışında")
+        result.append(index + (0x80000000 if hardened else 0))
+    return result
+
+
+def _bip39_seed(mnemonic, passphrase=""):
+    words = " ".join(str(mnemonic or "").strip().split())
+    if len(words.split()) not in (12, 15, 18, 21, 24):
+        raise ValueError("TRON_SWEEP_MNEMONIC 12/15/18/21/24 kelime olmalıdır")
+    normalized_mnemonic = unicodedata.normalize("NFKD", words)
+    normalized_salt = unicodedata.normalize("NFKD", "mnemonic" + str(passphrase or ""))
+    return hashlib.pbkdf2_hmac(
+        "sha512",
+        normalized_mnemonic.encode("utf-8"),
+        normalized_salt.encode("utf-8"),
+        2048,
+        dklen=64,
+    )
+
+
+def _bip32_master_private(seed):
+    digest = hmac.new(b"Bitcoin seed", bytes(seed), hashlib.sha512).digest()
+    private_int = int.from_bytes(digest[:32], "big")
+    if not 1 <= private_int < _SECP_N:
+        raise ValueError("BIP32 master private key üretilemedi")
+    return {"private_key": private_int, "chain_code": digest[32:]}
+
+
+def _ckd_priv(node, index):
+    private_int = int(node["private_key"])
+    chain_code = bytes(node["chain_code"])
+    index = int(index)
+    if not 0 <= index <= 0xFFFFFFFF:
+        raise ValueError("BIP32 child index geçersiz")
+    if index >= 0x80000000:
+        data = b"\x00" + private_int.to_bytes(32, "big") + index.to_bytes(4, "big")
+    else:
+        data = _secp_compress(_secp_mul(private_int)) + index.to_bytes(4, "big")
+    digest = hmac.new(chain_code, data, hashlib.sha512).digest()
+    tweak = int.from_bytes(digest[:32], "big")
+    if tweak >= _SECP_N:
+        raise ValueError("BIP32 child tweak aralık dışında")
+    child_private = (private_int + tweak) % _SECP_N
+    if child_private == 0:
+        raise ValueError("BIP32 child private key sıfır oldu")
+    return {"private_key": child_private, "chain_code": digest[32:]}
+
+
+def _derive_private_node(node, path_indexes):
+    current = {"private_key": int(node["private_key"]), "chain_code": bytes(node["chain_code"])}
+    for index in path_indexes:
+        current = _ckd_priv(current, index)
+    return current
+
+
+def _parse_xprv(xprv):
+    payload = _b58check_decode(str(xprv or "").strip())
+    if len(payload) != 78:
+        raise ValueError("Extended private key 78 byte olmalıdır")
+    key_data = payload[45:78]
+    if len(key_data) != 33 or key_data[0] != 0:
+        raise ValueError("Geçerli bir account XPRV bekleniyor")
+    private_int = int.from_bytes(key_data[1:], "big")
+    if not 1 <= private_int < _SECP_N:
+        raise ValueError("XPRV private key aralık dışında")
+    return {
+        "version": payload[:4],
+        "depth": payload[4],
+        "parent_fingerprint": payload[5:9],
+        "child_number": int.from_bytes(payload[9:13], "big"),
+        "chain_code": payload[13:45],
+        "private_key": private_int,
+    }
+
+
+_sweep_account_cache = None
+_sweep_account_cache_lock = threading.Lock()
+
+
+def _sweep_account_private_node(force=False):
+    global _sweep_account_cache
+    with _sweep_account_cache_lock:
+        if _sweep_account_cache is not None and not force:
+            return dict(_sweep_account_cache)
+        if bool(TRON_SWEEP_MNEMONIC) == bool(TRON_SWEEP_ACCOUNT_XPRV):
+            raise ValueError("Sweep için yalnızca TRON_SWEEP_MNEMONIC veya TRON_SWEEP_ACCOUNT_XPRV tanımlanmalıdır")
+        if TRON_SWEEP_ACCOUNT_XPRV:
+            parsed = _parse_xprv(TRON_SWEEP_ACCOUNT_XPRV)
+            node = {"private_key": parsed["private_key"], "chain_code": parsed["chain_code"]}
+        else:
+            seed = _bip39_seed(TRON_SWEEP_MNEMONIC, TRON_SWEEP_MNEMONIC_PASSPHRASE)
+            master = _bip32_master_private(seed)
+            node = _derive_private_node(master, _parse_bip32_path(TRON_SWEEP_ACCOUNT_PATH))
+        _sweep_account_cache = dict(node)
+        return dict(node)
+
+
+def _sweep_account_xpub_matches():
+    if not TRON_XPUB:
+        return False
+    account = _sweep_account_private_node()
+    parsed = _parse_xpub(TRON_XPUB)
+    public_key = _secp_compress(_secp_mul(account["private_key"]))
+    return (
+        secrets.compare_digest(public_key, parsed["public_key"])
+        and secrets.compare_digest(bytes(account["chain_code"]), bytes(parsed["chain_code"]))
+    )
+
+
+def _sweep_private_for_address(derivation_index, derivation_path, expected_address):
+    account = _sweep_account_private_node()
+    relative_path = str(derivation_path or "").strip()
+    if relative_path:
+        indexes = _parse_bip32_path(relative_path)
+    else:
+        if derivation_index is None:
+            raise ValueError("Sweep adresinin derivation index bilgisi eksik")
+        indexes = [int(_xpub_branch_for_chain("TRON")), int(derivation_index)]
+    if any(index >= 0x80000000 for index in indexes):
+        raise ValueError("XPUB altındaki sweep yolu hardened child içeremez")
+    child = _derive_private_node(account, indexes)
+    derived_address = _tron_address_from_private_int(child["private_key"])
+    if not secrets.compare_digest(derived_address, str(expected_address or "")):
+        raise ValueError("Sweep private key kaynak yatırma adresiyle eşleşmiyor")
+    return int(child["private_key"])
+
+
 def _tron_hex_to_base58(value):
     text = str(value or "").strip()
     if not text:
@@ -1039,6 +1254,11 @@ def ensure_external_withdraw_address(uid, asset, address):
     valid, normalized, address_error = validate_wallet_address(asset, address)
     if not valid:
         raise ValueError(address_error)
+    if asset in ("TRX", "USDT") and TRON_POOL_ADDRESS:
+        if secrets.compare_digest(_address_compare_key(asset, normalized), _address_compare_key(asset, TRON_POOL_ADDRESS)):
+            if lang_of(uid) == "en":
+                raise ValueError("Withdrawals cannot be sent to the Nerlo treasury pool address.")
+            raise ValueError("Çekim Nerlo ana havuz adresine gönderilemez.")
     internal = find_internal_deposit_address(asset, normalized)
     if internal:
         if lang_of(uid) == "en":
@@ -1341,6 +1561,26 @@ def refresh_request_cache():
         fresh[str(rid)] = item
     requests_db.clear()
     requests_db.update(fresh)
+
+
+def exchange_get_request(rid):
+    rid = str(rid or "").strip()
+    if not rid:
+        return None
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT payload,status,automatic FROM exchange_requests WHERE request_id=%s",
+                (rid,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    record = dict(row[0] or {})
+    record["id"] = rid
+    record["status"] = row[1]
+    record["automatic"] = bool(row[2])
+    return record
 
 
 def exchange_account(user_id, asset, conn=None, lock=False):
@@ -1762,6 +2002,24 @@ def exchange_fail_job(job, exc):
                 except Exception:
                     pass
     print("EXCHANGE JOB ERROR:", job.get("job_type"), error)
+
+
+def exchange_is_internal_tron_funding(txid, recipient_address):
+    txid = str(txid or "").strip()
+    recipient_address = str(recipient_address or "").strip()
+    if not txid or not recipient_address:
+        return False
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM signer_sweeps
+                WHERE funding_txid=%s AND source_address=%s
+                LIMIT 1
+                """,
+                (txid, recipient_address),
+            )
+            return cur.fetchone() is not None
 
 
 def exchange_record_chain_event(chain, asset, txid, event_index, address, user_id, amount, block_height=0, confirmations=0, raw=None, removed=False):
@@ -2207,6 +2465,9 @@ def tron_indexer_once():
                 if recipient != address:
                     continue
                 amount = Decimal(int(value.get("amount", 0))) / Decimal(10 ** 6)
+                if exchange_is_internal_tron_funding(tx.get("txID"), address):
+                    print("INTERNAL TRON GAS FUNDING SKIPPED:", tx.get("txID"), address, amount)
+                    continue
                 exchange_record_chain_event(
                     "TRON", "TRX", tx.get("txID"), f"trx:{contract_index}", address, uid, amount,
                     int(tx.get("blockNumber") or 0), _chain_confirmation_threshold("TRX"), tx,
@@ -2367,6 +2628,66 @@ def exchange_refund_withdrawal(rid, reason=""):
     return requests_db.get(rid, record)
 
 
+def normalize_manual_withdraw_txid(asset, txid):
+    asset = str(asset or "").upper()
+    text = re.sub(r"\s+", "", str(txid or ""))
+    if asset in ("BTC", "LTC"):
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", text):
+            raise ValueError(f"Geçerli bir {asset} TXID giriniz")
+        return text.lower()
+    if asset == "ETH":
+        body = text[2:] if text.lower().startswith("0x") else text
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", body):
+            raise ValueError("Geçerli bir Ethereum TXID giriniz")
+        return "0x" + body.lower()
+    raise ValueError(f"{asset} manuel TXID tamamlama desteklenmiyor")
+
+
+def exchange_complete_manual_withdrawal(rid, txid, admin_username=""):
+    rid = str(rid or "").strip()
+    lock_conn = _db_connect()
+    lock_conn.autocommit = True
+    try:
+        with lock_conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_lock(hashtext(%s)::bigint)", (f"manual-withdraw:{rid}",))
+        record = exchange_get_request(rid)
+        if not record or record.get("type") != "withdraw":
+            raise ValueError("Çekim talebi bulunamadı")
+        asset = str(record.get("asset") or "").upper()
+        if asset not in MANUAL_WITHDRAW_ASSETS:
+            raise ValueError("Bu varlık manuel TXID iş akışını kullanmıyor")
+        normalized = normalize_manual_withdraw_txid(asset, txid)
+        if record.get("status") == "completed":
+            existing = str(record.get("broadcast_txid") or record.get("manual_txid") or "")
+            if existing and secrets.compare_digest(existing.lower(), normalized.lower()):
+                return record
+            raise ValueError("Tamamlanmış çekimin TXID değeri değiştirilemez")
+        if record.get("status") == "rejected":
+            raise ValueError("Reddedilmiş çekim tamamlanamaz")
+        if record.get("status") not in ("pending", "processing"):
+            raise ValueError("Çekim durumu manuel tamamlamaya uygun değil")
+        normalized_address = ensure_external_withdraw_address(
+            record.get("user_id", ""), asset, record.get("address", "")
+        )
+        exchange_update_request(rid, {
+            "address": normalized_address,
+            "internal_address_checked": True,
+            "manual_txid": normalized,
+            "broadcast_txid": normalized,
+            "manual_completed_by": str(admin_username or ""),
+            "manual_completed_at": now(),
+            "manual_status": "txid_recorded",
+        })
+        return exchange_finalize_withdrawal(rid, normalized)
+    finally:
+        try:
+            with lock_conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(hashtext(%s)::bigint)", (f"manual-withdraw:{rid}",))
+        except Exception:
+            pass
+        lock_conn.close()
+
+
 def _is_crypto_withdraw_record(record):
     """Kripto çekimlerini eski/yeni kayıt biçimlerinde güvenli şekilde tanır."""
     record = dict(record or {})
@@ -2405,21 +2726,28 @@ def exchange_admin_request_transition(rid, action):
                 is_crypto_withdraw = _is_crypto_withdraw_record(record)
                 if is_crypto_withdraw:
                     asset = str(record.get("asset") or "").upper()
-                    if asset not in AUTO_WITHDRAW_ASSETS:
-                        raise ValueError(f"{asset} otomatik çekim henüz desteklenmiyor")
                     record["address"] = ensure_external_withdraw_address(
                         record.get("user_id", ""), asset, record.get("address", "")
                     )
                     record["internal_address_checked"] = True
-                    if not record.get("signer_enabled") or not WITHDRAW_SIGNER_URL:
-                        raise ValueError("Otomatik gönderim servisi bağlı değil")
-                    record.update({
-                        "status": "processing",
-                        "broadcast_locked": True,
-                        "signer_status": "queued",
-                        "broadcast_queued_at": now(),
-                    })
-                    should_enqueue_broadcast = True
+                    if asset in AUTO_WITHDRAW_ASSETS:
+                        if not record.get("signer_enabled") or not WITHDRAW_SIGNER_URL:
+                            raise ValueError("Otomatik gönderim servisi bağlı değil")
+                        record.update({
+                            "status": "processing",
+                            "broadcast_locked": True,
+                            "signer_status": "queued",
+                            "broadcast_queued_at": now(),
+                        })
+                        should_enqueue_broadcast = True
+                    elif asset in MANUAL_WITHDRAW_ASSETS:
+                        record.update({
+                            "status": "processing",
+                            "manual_status": "awaiting_txid",
+                            "manual_processing_at": now(),
+                        })
+                    else:
+                        raise ValueError(f"{asset} çekimi bu sürümde desteklenmiyor")
                 else:
                     record["status"] = "processing"
             elif action == "approve_request":
@@ -2720,6 +3048,11 @@ def exchange_health_snapshot():
             cur.execute("SELECT meta_value FROM exchange_meta WHERE meta_key='last-reconciliation'")
             reconciliation_row = cur.fetchone()
             reconciliation = reconciliation_row[0] if reconciliation_row else {}
+            cur.execute("SELECT status,COUNT(*) FROM signer_sweeps GROUP BY status")
+            sweeps = {row[0]: row[1] for row in cur.fetchall()}
+            cur.execute("SELECT meta_value FROM exchange_meta WHERE meta_key='tron-pool-snapshot'")
+            pool_row = cur.fetchone()
+            pool_snapshot = dict(pool_row[0] or {}) if pool_row else {}
     return {
         "build_version": BUILD_VERSION,
         "panel_release": PANEL_RELEASE,
@@ -2741,11 +3074,14 @@ def exchange_health_snapshot():
         "addresses": addresses,
         "events": events,
         "jobs": jobs,
+        "sweeps": sweeps,
+        "tron_pool": pool_snapshot,
         "reconciliation": reconciliation,
         "withdraw_guard": {
             "enabled": True,
-            "crypto_manual_complete_blocked": True,
-            "txid_required": True,
+            "automatic_assets": sorted(AUTO_WITHDRAW_ASSETS),
+            "manual_assets": sorted(MANUAL_WITHDRAW_ASSETS),
+            "manual_txid_required": True,
         },
     }
 
@@ -2790,7 +3126,39 @@ def validate_runtime_config():
             secret_values = {TRON_PRIVATE_KEY.lower().removeprefix("0x"), WITHDRAW_SIGNER_TOKEN, EXCHANGE_INTERNAL_TOKEN, app.secret_key}
             if len(secret_values) != 4:
                 raise RuntimeError("Signer gizli değerleri birbirinden farklı olmalıdır")
+
+            if TRON_SWEEP_ENABLED:
+                if not TRON_POOL_ADDRESS:
+                    raise RuntimeError("TRON sweep için TRON_POOL_ADDRESS zorunludur")
+                valid_pool, normalized_pool, _ = validate_wallet_address("TRX", TRON_POOL_ADDRESS)
+                if not valid_pool:
+                    raise RuntimeError("TRON_POOL_ADDRESS geçersizdir")
+                if not secrets.compare_digest(normalized_pool, normalized_hot):
+                    raise RuntimeError("TRON_POOL_ADDRESS ile TRON_HOT_WALLET_ADDRESS aynı havuz cüzdanı olmalıdır")
+                if not TRON_XPUB:
+                    raise RuntimeError("Sweep private key eşleşmesi için signer servisinde TRON_XPUB zorunludur")
+                if bool(TRON_SWEEP_MNEMONIC) == bool(TRON_SWEEP_ACCOUNT_XPRV):
+                    raise RuntimeError("Yalnızca TRON_SWEEP_MNEMONIC veya TRON_SWEEP_ACCOUNT_XPRV tanımlanmalıdır")
+                _parse_bip32_path(TRON_SWEEP_ACCOUNT_PATH)
+                if not _sweep_account_xpub_matches():
+                    raise RuntimeError("Sweep mnemonic/XPRV, TRON_XPUB ile eşleşmiyor")
+                internal_pool = find_internal_deposit_address("TRX", normalized_pool)
+                if internal_pool:
+                    raise RuntimeError("TRON havuz adresi kullanıcı yatırma adreslerinden biri olamaz")
+                sweep_secret = TRON_SWEEP_ACCOUNT_XPRV or TRON_SWEEP_MNEMONIC
+                if sweep_secret in {WITHDRAW_SIGNER_TOKEN, EXCHANGE_INTERNAL_TOKEN, app.secret_key}:
+                    raise RuntimeError("Sweep anahtarı diğer signer gizli değerleriyle aynı olamaz")
+                if TRON_SWEEP_TRX_RESERVE < 0 or TRON_SWEEP_MIN_TRX <= 0 or TRON_SWEEP_MIN_USDT <= 0:
+                    raise RuntimeError("Sweep minimum ve rezerv değerleri geçersiz")
+                if TRON_SWEEP_USDT_GAS_TARGET <= TRON_SWEEP_TRX_RESERVE:
+                    raise RuntimeError("TRON_SWEEP_USDT_GAS_TARGET, TRON_SWEEP_TRX_RESERVE değerinden büyük olmalıdır")
+                configured_gas_sun = int((TRON_SWEEP_USDT_GAS_TARGET * Decimal(10 ** 6)).to_integral_value(rounding=ROUND_DOWN))
+                if configured_gas_sun > TRON_SWEEP_USDT_FEE_LIMIT_SUN:
+                    raise RuntimeError("TRON_SWEEP_USDT_GAS_TARGET, TRON_SWEEP_USDT_FEE_LIMIT_SUN sınırını aşamaz")
         return
+
+    if TRON_SWEEP_MNEMONIC or TRON_SWEEP_ACCOUNT_XPRV or TRON_PRIVATE_KEY:
+        raise RuntimeError("Private key, mnemonic veya XPRV ana uygulama servisinde bulunamaz; yalnızca signer servisine ekleyiniz")
 
     required = {
         "BOT_TOKEN": TOKEN,
@@ -2833,6 +3201,10 @@ def validate_runtime_config():
                 raise RuntimeError("PUBLIC_BASE_URL production ortamında HTTPS olmalıdır")
     if EXCHANGE_INTERNAL_TOKEN and len(EXCHANGE_INTERNAL_TOKEN) < 32:
         raise RuntimeError("EXCHANGE_INTERNAL_TOKEN en az 32 karakter olmalıdır")
+    if TRON_POOL_ADDRESS:
+        valid_pool, _, _ = validate_wallet_address("TRX", TRON_POOL_ADDRESS)
+        if not valid_pool:
+            raise RuntimeError("TRON_POOL_ADDRESS geçersiz TRON adresidir")
 
 
 def csrf_token():
@@ -4274,7 +4646,7 @@ def begin_withdraw(chat_id):
     if u.get("withdraw_locked"):
         send(chat_id, msg(uid, "withdraw_locked"), reply_keyboard(uid))
         return
-    assets = active_balances(chat_id)
+    assets = [asset for asset in active_balances(chat_id) if asset in WITHDRAW_ENABLED_ASSETS]
     if not assets:
         send(chat_id, msg(uid, "no_balance"), reply_keyboard(uid))
         return
@@ -4895,6 +5267,7 @@ def bot_loop():
 
 PANEL_PERMISSION_LABELS = {
     "dashboard": "Genel bakış",
+    "pool": "Havuz ve sweep işlemleri",
     "requests": "İşlem talepleri",
     "users": "Kullanıcı yönetimi",
     "broadcast": "Duyuru gönderme",
@@ -4908,6 +5281,7 @@ ACTION_PERMISSIONS = {
     "settings": "settings",
     "process_request": "requests",
     "approve_request": "requests",
+    "complete_manual_crypto": "requests",
     "reject_request": "requests",
     "adjust_balance": "users",
     "update_user_profile": "users",
@@ -4994,10 +5368,13 @@ def version_info():
         "build_version": BUILD_VERSION,
         "service_role": SERVICE_ROLE,
         "withdraw_guard": True,
-        "crypto_manual_complete_blocked": True,
+        "automatic_withdraw_assets": sorted(AUTO_WITHDRAW_ASSETS),
+        "manual_withdraw_assets": sorted(MANUAL_WITHDRAW_ASSETS),
+        "manual_txid_required": True,
         "panel_release": PANEL_RELEASE,
         "security_release": SECURITY_RELEASE,
         "signer_release": SIGNER_RELEASE,
+        "sweep_release": SWEEP_RELEASE,
         "signer_stage": SIGNER_STAGE,
         "source_base_sha256": SOURCE_BASE_SHA256,
     }
@@ -5008,7 +5385,8 @@ def exchange_health():
     snapshot = exchange_health_snapshot()
     mismatch_count = int((snapshot.get("reconciliation") or {}).get("mismatch_count") or 0)
     dead_jobs = int((snapshot.get("jobs") or {}).get("dead") or 0)
-    snapshot["status"] = "degraded" if mismatch_count or dead_jobs else "ok"
+    review_sweeps = int((snapshot.get("sweeps") or {}).get("review") or 0)
+    snapshot["status"] = "degraded" if mismatch_count or dead_jobs or review_sweeps else "ok"
     return snapshot
 
 
@@ -5054,13 +5432,7 @@ def _tron_private_key_int():
 
 
 def _tron_address_from_private_key():
-    private_int = _tron_private_key_int()
-    point = _secp_mul(private_int)
-    if point is None:
-        raise ValueError("TRON private key public key üretemedi")
-    x, y = point
-    public_key = x.to_bytes(32, "big") + y.to_bytes(32, "big")
-    return _b58check_encode(b"\x41" + _keccak256(public_key)[-20:])
+    return _tron_address_from_private_int(_tron_private_key_int())
 
 
 def _rfc6979_nonce(private_int, digest, retry=0):
@@ -5213,6 +5585,59 @@ def _tron_trc20_balance_units(address):
     return int(str(values[0]), 16)
 
 
+_tron_chain_parameter_cache = {"loaded_at": 0.0, "values": {}}
+
+
+def _tron_chain_parameters():
+    timestamp = time.monotonic()
+    cached = _tron_chain_parameter_cache.get("values") or {}
+    if cached and timestamp - float(_tron_chain_parameter_cache.get("loaded_at") or 0) < 300:
+        return dict(cached)
+    payload = _tron_api_post("wallet/getchainparameters", {})
+    values = {}
+    for item in payload.get("chainParameter", []) or []:
+        key = str(item.get("key") or "")
+        if key:
+            values[key] = int(item.get("value") or 0)
+    _tron_chain_parameter_cache["loaded_at"] = timestamp
+    _tron_chain_parameter_cache["values"] = dict(values)
+    return values
+
+
+def _tron_estimate_usdt_transfer_sun(owner, destination, token_units):
+    parameter = _tron_abi_address(destination) + int(token_units).to_bytes(32, "big").hex()
+    request_payload = {
+        "owner_address": owner,
+        "contract_address": USDT_TRC20_CONTRACT,
+        "function_selector": "transfer(address,uint256)",
+        "parameter": parameter,
+        "visible": True,
+    }
+    energy_required = 0
+    try:
+        estimate = _tron_api_post("wallet/estimateenergy", request_payload)
+        if (estimate.get("result") or {}).get("result"):
+            energy_required = int(estimate.get("energy_required") or 0)
+    except Exception:
+        energy_required = 0
+    if energy_required <= 0:
+        simulation = _tron_api_post("wallet/triggerconstantcontract", request_payload)
+        if not (simulation.get("result") or {}).get("result"):
+            raise RuntimeError(f"USDT transfer enerji tahmini başarısız: {_tron_api_error(simulation.get('result') or simulation)}")
+        energy_required = int(simulation.get("energy_used") or 0)
+    if energy_required <= 0:
+        return int((TRON_SWEEP_USDT_GAS_TARGET * Decimal(10 ** 6)).to_integral_value(rounding=ROUND_DOWN))
+    parameters = _tron_chain_parameters()
+    energy_price_sun = int(parameters.get("getEnergyFee") or 100)
+    estimated_sun = energy_required * energy_price_sun
+    # Add 30% execution margin plus 2 TRX for bandwidth/activation variance.
+    estimated_sun = int(Decimal(estimated_sun) * Decimal("1.30")) + 2_000_000
+    if estimated_sun > TRON_SWEEP_USDT_FEE_LIMIT_SUN:
+        raise RuntimeError("Tahmini USDT sweep maliyeti fee_limit değerini aşıyor")
+    configured_floor = int((TRON_SWEEP_USDT_GAS_TARGET * Decimal(10 ** 6)).to_integral_value(rounding=ROUND_DOWN))
+    return max(configured_floor, estimated_sun)
+
+
 def _tron_create_unsigned(asset, destination, amount):
     asset = str(asset).upper()
     owner = _tron_address_from_private_key()
@@ -5266,7 +5691,7 @@ def _tron_create_unsigned(asset, destination, amount):
     raise ValueError("Signer yalnızca TRX ve USDT destekliyor")
 
 
-def _tron_sign_transaction(transaction):
+def _tron_sign_transaction(transaction, private_int=None):
     transaction = dict(transaction or {})
     txid = str(transaction.get("txID") or "").lower()
     raw_hex = str(transaction.get("raw_data_hex") or "")
@@ -5276,8 +5701,9 @@ def _tron_sign_transaction(transaction):
     calculated = hashlib.sha256(raw_bytes).hexdigest()
     if not secrets.compare_digest(calculated, txid):
         raise RuntimeError("TRON işlem hash doğrulaması başarısız")
-    signature = _secp_sign_recoverable(_tron_private_key_int(), bytes.fromhex(txid))
-    if _secp_recover_public_key(bytes.fromhex(txid), signature) != _secp_mul(_tron_private_key_int()):
+    signing_key = int(private_int if private_int is not None else _tron_private_key_int())
+    signature = _secp_sign_recoverable(signing_key, bytes.fromhex(txid))
+    if _secp_recover_public_key(bytes.fromhex(txid), signature) != _secp_mul(signing_key):
         raise RuntimeError("TRON işlem imzası doğrulanamadı")
     transaction["signature"] = [signature.hex()]
     return transaction
@@ -5423,6 +5849,517 @@ def signer_confirmation_once():
             _signer_merge_response(str(row[0]), last_error=str(exc)[:500])
 
 
+
+def _tron_create_trx_unsigned_for_owner(owner, destination, amount_sun):
+    amount_sun = int(amount_sun)
+    if amount_sun <= 0:
+        raise ValueError("TRX sweep tutarı sıfır olamaz")
+    transaction = _tron_api_post("wallet/createtransaction", {
+        "owner_address": owner,
+        "to_address": destination,
+        "amount": amount_sun,
+        "visible": True,
+    })
+    if transaction.get("Error") or not transaction.get("txID"):
+        raise RuntimeError(f"TRX sweep işlemi oluşturulamadı: {_tron_api_error(transaction)}")
+    return transaction
+
+
+def _tron_create_usdt_unsigned_for_owner(owner, destination, token_units):
+    token_units = int(token_units)
+    if token_units <= 0:
+        raise ValueError("USDT sweep tutarı sıfır olamaz")
+    trigger = _tron_api_post("wallet/triggersmartcontract", {
+        "owner_address": owner,
+        "contract_address": USDT_TRC20_CONTRACT,
+        "function_selector": "transfer(address,uint256)",
+        "parameter": _tron_abi_address(destination) + token_units.to_bytes(32, "big").hex(),
+        "fee_limit": TRON_SWEEP_USDT_FEE_LIMIT_SUN,
+        "call_value": 0,
+        "visible": True,
+    })
+    trigger_result = trigger.get("result") or {}
+    if not trigger_result.get("result") or not trigger.get("transaction"):
+        raise RuntimeError(f"USDT sweep işlemi oluşturulamadı: {_tron_api_error(trigger_result)}")
+    transaction = trigger["transaction"]
+    if not transaction.get("txID"):
+        raise RuntimeError("USDT sweep işlemi txID içermiyor")
+    return transaction
+
+
+def _tron_transaction_state(txid):
+    txid = str(txid or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", txid):
+        return {"state": "missing", "info": {}, "transaction": {}}
+    info = _tron_api_post("walletsolidity/gettransactioninfobyid", {"value": txid})
+    if info.get("id"):
+        receipt = str((info.get("receipt") or {}).get("result") or "SUCCESS").upper()
+        if receipt and receipt != "SUCCESS":
+            return {"state": "failed", "reason": receipt, "info": info, "transaction": {}}
+        return {"state": "confirmed", "info": info, "transaction": {}}
+    transaction = _tron_api_post("wallet/gettransactionbyid", {"value": txid})
+    if transaction.get("txID"):
+        return {"state": "pending", "info": info, "transaction": transaction}
+    return {"state": "missing", "info": info, "transaction": transaction}
+
+
+def _signed_transaction_expired(transaction):
+    expiration = int(((transaction or {}).get("raw_data") or {}).get("expiration") or 0)
+    return bool(expiration and int(time.time() * 1000) > expiration + SIGNER_EXPIRY_GRACE_SECONDS * 1000)
+
+
+def _sweep_discover_candidates():
+    if not TRON_POOL_ADDRESS:
+        return 0
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO signer_sweeps(
+                    event_id,user_id,asset,source_address,destination_address,
+                    derivation_index,derivation_path,status,payload
+                )
+                SELECT e.id,e.user_id,e.asset,e.address,%s,a.derivation_index,a.derivation_path,'queued',
+                       jsonb_build_object('deposit_txid',e.txid,'event_index',e.event_index,'event_amount',e.amount,'generation',e.generation)
+                FROM exchange_chain_events e
+                JOIN exchange_addresses a ON a.chain='TRON' AND a.address=e.address AND a.user_id=e.user_id
+                WHERE e.chain='TRON' AND e.asset IN ('TRX','USDT') AND e.status='credited'
+                  AND a.status='active' AND a.source='xpub'
+                  AND e.address<>%s
+                  AND NOT EXISTS (SELECT 1 FROM signer_sweeps s WHERE s.event_id=e.id)
+                ORDER BY e.id
+                LIMIT %s
+                ON CONFLICT(event_id) DO NOTHING
+                RETURNING sweep_id
+                """,
+                (TRON_POOL_ADDRESS, TRON_POOL_ADDRESS, TRON_SWEEP_BATCH_LIMIT),
+            )
+            inserted = len(cur.fetchall())
+        conn.commit()
+    return inserted
+
+
+def _sweep_row(sweep_id):
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT sweep_id,event_id,user_id,asset,source_address,destination_address,
+                       derivation_index,derivation_path,amount,status,funding_txid,sweep_txid,
+                       cleanup_txid,attempts,payload,response,last_error,available_at
+                FROM signer_sweeps WHERE sweep_id=%s
+                """,
+                (int(sweep_id),),
+            )
+            row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "sweep_id": row[0], "event_id": row[1], "user_id": row[2], "asset": row[3],
+        "source_address": row[4], "destination_address": row[5], "derivation_index": row[6],
+        "derivation_path": row[7], "amount": D(row[8]), "status": row[9],
+        "funding_txid": row[10], "sweep_txid": row[11], "cleanup_txid": row[12],
+        "attempts": int(row[13] or 0), "payload": row[14] or {}, "response": row[15] or {},
+        "last_error": row[16], "available_at": row[17],
+    }
+
+
+def _sweep_update(sweep_id, *, status=None, amount=None, funding_txid=None, sweep_txid=None,
+                  cleanup_txid=None, response_patch=None, last_error=None, delay_seconds=0,
+                  funded=False, broadcast=False, cleanup=False, confirmed=False, reset_attempts=False):
+    patch = dict(response_patch or {})
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE signer_sweeps
+                SET status=COALESCE(%s,status),
+                    amount=COALESCE(%s,amount),
+                    funding_txid=COALESCE(NULLIF(%s,''),funding_txid),
+                    sweep_txid=COALESCE(NULLIF(%s,''),sweep_txid),
+                    cleanup_txid=COALESCE(NULLIF(%s,''),cleanup_txid),
+                    response=COALESCE(response,'{}'::jsonb) || %s,
+                    last_error=COALESCE(%s,last_error),
+                    available_at=NOW()+(%s * INTERVAL '1 second'),
+                    locked_at=NULL,locked_by='',updated_at=NOW(),
+                    attempts=CASE WHEN %s THEN 0 ELSE attempts END,
+                    funded_at=CASE WHEN %s THEN COALESCE(funded_at,NOW()) ELSE funded_at END,
+                    broadcast_at=CASE WHEN %s THEN COALESCE(broadcast_at,NOW()) ELSE broadcast_at END,
+                    cleanup_at=CASE WHEN %s THEN COALESCE(cleanup_at,NOW()) ELSE cleanup_at END,
+                    confirmed_at=CASE WHEN %s THEN COALESCE(confirmed_at,NOW()) ELSE confirmed_at END
+                WHERE sweep_id=%s
+                """,
+                (
+                    status, amount, funding_txid or "", sweep_txid or "", cleanup_txid or "",
+                    Jsonb(patch), last_error, int(delay_seconds), bool(reset_attempts), bool(funded),
+                    bool(broadcast), bool(cleanup), bool(confirmed), int(sweep_id),
+                ),
+            )
+        conn.commit()
+
+
+def _sweep_fail(record, exc):
+    attempts = int(record.get("attempts") or 0) + 1
+    error = ("".join(traceback.format_exception_only(type(exc), exc))).strip()[:1500]
+    terminal = attempts >= TRON_SWEEP_MAX_RETRIES
+    delay = min(3600, max(15, 2 ** min(attempts, 10)))
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE signer_sweeps
+                SET attempts=%s,status=CASE WHEN %s THEN 'review' ELSE status END,
+                    last_error=%s,available_at=NOW()+(%s * INTERVAL '1 second'),
+                    locked_at=NULL,locked_by='',updated_at=NOW()
+                WHERE sweep_id=%s
+                """,
+                (attempts, terminal, error, delay, int(record["sweep_id"])),
+            )
+        conn.commit()
+    print("TRON SWEEP ERROR:", record.get("sweep_id"), record.get("source_address"), error)
+
+
+def _sweep_mark_event(record, status, txid=""):
+    details = {
+        "sweep_status": status,
+        "sweep_txid": str(txid or record.get("sweep_txid") or ""),
+        "sweep_id": int(record["sweep_id"]),
+        "pool_address": record.get("destination_address") or TRON_POOL_ADDRESS,
+        "swept_at": now() if status == "confirmed" else "",
+    }
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE exchange_chain_events SET raw=COALESCE(raw,'{}'::jsonb)||%s,updated_at=NOW() WHERE id=%s",
+                (Jsonb(details), int(record["event_id"])),
+            )
+            cur.execute(
+                """
+                UPDATE exchange_requests
+                SET payload=COALESCE(payload,'{}'::jsonb)||%s,updated_at=NOW()
+                WHERE request_id=(SELECT request_id FROM exchange_chain_events WHERE id=%s)
+                """,
+                (Jsonb(details), int(record["event_id"])),
+            )
+        conn.commit()
+
+
+def _sweep_is_covered(record):
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM signer_sweeps
+                WHERE source_address=%s AND asset=%s AND sweep_id<>%s
+                  AND status IN ('sweep_signed','broadcast','cleanup_pending','cleanup_signed','cleanup_broadcast','confirmed')
+                  AND created_at>=NOW()-INTERVAL '7 days'
+                LIMIT 1
+                """,
+                (record["source_address"], record["asset"], int(record["sweep_id"])),
+            )
+            return cur.fetchone() is not None
+
+
+def _sweep_prepare_source_transaction(record, private_int):
+    source = record["source_address"]
+    destination = record["destination_address"]
+    asset = record["asset"]
+    if secrets.compare_digest(source, destination):
+        raise ValueError("Sweep kaynak ve havuz adresi aynı olamaz")
+
+    if asset == "TRX":
+        balance_sun = _tron_trx_balance_sun(source)
+        reserve_sun = int((TRON_SWEEP_TRX_RESERVE * Decimal(10 ** 6)).to_integral_value(rounding=ROUND_DOWN))
+        min_sun = int((TRON_SWEEP_MIN_TRX * Decimal(10 ** 6)).to_integral_value(rounding=ROUND_DOWN))
+        send_sun = max(0, balance_sun - reserve_sun)
+        if send_sun < min_sun:
+            terminal = "covered" if _sweep_is_covered(record) else "below_minimum"
+            _sweep_update(record["sweep_id"], status=terminal, response_patch={"source_trx_sun": balance_sun}, last_error="")
+            _sweep_mark_event(record, terminal)
+            return
+        unsigned = _tron_create_trx_unsigned_for_owner(source, destination, send_sun)
+        signed = _tron_sign_transaction(unsigned, private_int)
+        amount = Decimal(send_sun) / Decimal(10 ** 6)
+        _sweep_update(
+            record["sweep_id"], status="sweep_signed", amount=amount, sweep_txid=signed["txID"],
+            response_patch={"sweep_signed_transaction": signed, "source_trx_sun": balance_sun},
+            last_error="", reset_attempts=True,
+        )
+        return
+
+    token_units = _tron_trc20_balance_units(source)
+    min_units = int((TRON_SWEEP_MIN_USDT * Decimal(10 ** 6)).to_integral_value(rounding=ROUND_DOWN))
+    if token_units < min_units:
+        terminal = "covered" if _sweep_is_covered(record) else "below_minimum"
+        _sweep_update(record["sweep_id"], status=terminal, response_patch={"source_usdt_units": token_units}, last_error="")
+        _sweep_mark_event(record, terminal)
+        return
+
+    source_trx_sun = _tron_trx_balance_sun(source)
+    gas_target_sun = _tron_estimate_usdt_transfer_sun(source, destination, token_units)
+    if source_trx_sun < gas_target_sun:
+        topup_sun = gas_target_sun - source_trx_sun
+        topup_amount = Decimal(topup_sun) / Decimal(10 ** 6)
+        unsigned = _tron_create_unsigned("TRX", source, topup_amount)
+        signed = _tron_sign_transaction(unsigned)
+        _sweep_update(
+            record["sweep_id"], status="funding_signed", funding_txid=signed["txID"],
+            response_patch={
+                "funding_signed_transaction": signed,
+                "funding_amount_trx": str(topup_amount),
+                "source_trx_before_sun": source_trx_sun,
+                "source_usdt_units": token_units,
+            },
+            last_error="", reset_attempts=True,
+        )
+        return
+
+    unsigned = _tron_create_usdt_unsigned_for_owner(source, destination, token_units)
+    signed = _tron_sign_transaction(unsigned, private_int)
+    amount = Decimal(token_units) / Decimal(10 ** 6)
+    _sweep_update(
+        record["sweep_id"], status="sweep_signed", amount=amount, sweep_txid=signed["txID"],
+        response_patch={"sweep_signed_transaction": signed, "source_usdt_units": token_units},
+        last_error="", reset_attempts=True,
+    )
+
+
+def _sweep_broadcast_stored(record, response_key, txid_field, next_status, timestamp_flag=None):
+    transaction = (record.get("response") or {}).get(response_key) or {}
+    if not transaction.get("txID"):
+        raise RuntimeError(f"{response_key} bulunamadı")
+    _tron_broadcast_signed(transaction)
+    kwargs = {
+        "status": next_status,
+        txid_field: transaction["txID"],
+        "response_patch": {f"{response_key}_broadcast_at": now()},
+        "last_error": "",
+        "reset_attempts": True,
+    }
+    if timestamp_flag:
+        kwargs[timestamp_flag] = True
+    _sweep_update(record["sweep_id"], **kwargs)
+
+
+def _sweep_wait_transaction(record, txid, signed_key, success_status, failed_label):
+    state = _tron_transaction_state(txid)
+    if state["state"] == "confirmed":
+        _sweep_update(
+            record["sweep_id"], status=success_status,
+            response_patch={f"{failed_label}_chain_info": state.get("info") or {}},
+            last_error="", reset_attempts=True,
+            funded=success_status == "funded",
+        )
+        return True
+    if state["state"] == "failed":
+        reason = f"{failed_label} zincir işlemi başarısız: {state.get('reason') or 'UNKNOWN'}"
+        _sweep_update(record["sweep_id"], status="review", response_patch={f"{failed_label}_chain_info": state.get("info") or {}}, last_error=reason)
+        _sweep_mark_event(record, "review", txid)
+        return False
+    signed = (record.get("response") or {}).get(signed_key) or {}
+    if state["state"] == "missing" and _signed_transaction_expired(signed):
+        reason = f"{failed_label} işleminin süresi doldu; otomatik yeniden üretim güvenlik nedeniyle durduruldu"
+        _sweep_update(record["sweep_id"], status="review", last_error=reason)
+        _sweep_mark_event(record, "review", txid)
+        return False
+    _sweep_update(record["sweep_id"], delay_seconds=TRON_SWEEP_POLL_SECONDS)
+    return False
+
+
+def _sweep_prepare_cleanup(record, private_int):
+    source = record["source_address"]
+    balance_sun = _tron_trx_balance_sun(source)
+    reserve_sun = int((TRON_SWEEP_TRX_RESERVE * Decimal(10 ** 6)).to_integral_value(rounding=ROUND_DOWN))
+    min_sun = int((TRON_SWEEP_MIN_TRX * Decimal(10 ** 6)).to_integral_value(rounding=ROUND_DOWN))
+    send_sun = max(0, balance_sun - reserve_sun)
+    if send_sun < min_sun:
+        _sweep_update(record["sweep_id"], status="confirmed", response_patch={"cleanup_source_trx_sun": balance_sun}, last_error="", confirmed=True)
+        _sweep_mark_event(record, "confirmed", record.get("sweep_txid"))
+        return
+    unsigned = _tron_create_trx_unsigned_for_owner(source, record["destination_address"], send_sun)
+    signed = _tron_sign_transaction(unsigned, private_int)
+    _sweep_update(
+        record["sweep_id"], status="cleanup_signed", cleanup_txid=signed["txID"],
+        response_patch={"cleanup_signed_transaction": signed, "cleanup_amount_trx": str(Decimal(send_sun) / Decimal(10 ** 6))},
+        last_error="", reset_attempts=True,
+    )
+
+
+def _process_sweep_record(record):
+    private_int = _sweep_private_for_address(
+        record.get("derivation_index"), record.get("derivation_path"), record.get("source_address")
+    )
+    status = str(record.get("status") or "queued")
+    if status == "queued":
+        _sweep_prepare_source_transaction(record, private_int)
+    elif status == "funding_signed":
+        _sweep_broadcast_stored(record, "funding_signed_transaction", "funding_txid", "funding_broadcast")
+    elif status == "funding_broadcast":
+        _sweep_wait_transaction(record, record.get("funding_txid"), "funding_signed_transaction", "funded", "funding")
+    elif status == "funded":
+        _sweep_prepare_source_transaction(record, private_int)
+    elif status == "sweep_signed":
+        _sweep_broadcast_stored(record, "sweep_signed_transaction", "sweep_txid", "broadcast", "broadcast")
+    elif status == "broadcast":
+        state = _tron_transaction_state(record.get("sweep_txid"))
+        if state["state"] == "confirmed":
+            if record.get("asset") == "USDT":
+                _sweep_update(record["sweep_id"], status="cleanup_pending", response_patch={"sweep_chain_info": state.get("info") or {}}, last_error="", reset_attempts=True)
+            else:
+                _sweep_update(record["sweep_id"], status="confirmed", response_patch={"sweep_chain_info": state.get("info") or {}}, last_error="", confirmed=True, reset_attempts=True)
+                _sweep_mark_event(record, "confirmed", record.get("sweep_txid"))
+        elif state["state"] == "failed":
+            reason = f"Sweep zincir işlemi başarısız: {state.get('reason') or 'UNKNOWN'}"
+            _sweep_update(record["sweep_id"], status="review", response_patch={"sweep_chain_info": state.get("info") or {}}, last_error=reason)
+            _sweep_mark_event(record, "review", record.get("sweep_txid"))
+        else:
+            signed = (record.get("response") or {}).get("sweep_signed_transaction") or {}
+            if state["state"] == "missing" and _signed_transaction_expired(signed):
+                reason = "Sweep işleminin süresi doldu; zincir sonucu belirsiz olduğu için manuel inceleme gerekli"
+                _sweep_update(record["sweep_id"], status="review", last_error=reason)
+                _sweep_mark_event(record, "review", record.get("sweep_txid"))
+            else:
+                _sweep_update(record["sweep_id"], delay_seconds=TRON_SWEEP_POLL_SECONDS)
+    elif status == "cleanup_pending":
+        _sweep_prepare_cleanup(record, private_int)
+    elif status == "cleanup_signed":
+        _sweep_broadcast_stored(record, "cleanup_signed_transaction", "cleanup_txid", "cleanup_broadcast", "cleanup")
+    elif status == "cleanup_broadcast":
+        state = _tron_transaction_state(record.get("cleanup_txid"))
+        if state["state"] == "confirmed":
+            _sweep_update(record["sweep_id"], status="confirmed", response_patch={"cleanup_chain_info": state.get("info") or {}}, last_error="", confirmed=True, reset_attempts=True)
+            _sweep_mark_event(record, "confirmed", record.get("sweep_txid"))
+        elif state["state"] == "failed":
+            reason = f"USDT sonrası TRX geri toplama başarısız: {state.get('reason') or 'UNKNOWN'}"
+            _sweep_update(record["sweep_id"], status="review", response_patch={"cleanup_chain_info": state.get("info") or {}}, last_error=reason)
+            _sweep_mark_event(record, "review", record.get("sweep_txid"))
+        else:
+            signed = (record.get("response") or {}).get("cleanup_signed_transaction") or {}
+            if state["state"] == "missing" and _signed_transaction_expired(signed):
+                reason = "TRX geri toplama işleminin süresi doldu; manuel inceleme gerekli"
+                _sweep_update(record["sweep_id"], status="review", last_error=reason)
+                _sweep_mark_event(record, "review", record.get("sweep_txid"))
+            else:
+                _sweep_update(record["sweep_id"], delay_seconds=TRON_SWEEP_POLL_SECONDS)
+
+
+def _refresh_tron_pool_meta():
+    snapshot = {
+        "address": TRON_POOL_ADDRESS,
+        "checked_at": now(),
+        "trx": "0",
+        "usdt": "0",
+        "error": "",
+        "sweep_enabled": TRON_SWEEP_ENABLED,
+    }
+    if TRON_POOL_ADDRESS and TRONGRID_KEY:
+        try:
+            snapshot["trx"] = str(Decimal(_tron_trx_balance_sun(TRON_POOL_ADDRESS)) / Decimal(10 ** 6))
+            snapshot["usdt"] = str(Decimal(_tron_trc20_balance_units(TRON_POOL_ADDRESS)) / Decimal(10 ** 6))
+        except Exception as exc:
+            snapshot["error"] = str(exc)[:500]
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT status,COUNT(*) FROM signer_sweeps GROUP BY status")
+            snapshot["sweeps"] = {row[0]: row[1] for row in cur.fetchall()}
+            cur.execute(
+                """
+                INSERT INTO exchange_meta(meta_key,meta_value) VALUES ('tron-pool-snapshot',%s)
+                ON CONFLICT(meta_key) DO UPDATE SET meta_value=EXCLUDED.meta_value,updated_at=NOW()
+                """,
+                (Jsonb(snapshot),),
+            )
+        conn.commit()
+    return snapshot
+
+
+def signer_sweep_once():
+    if SERVICE_ROLE != "signer" or not SIGNER_BROADCAST_ENABLED:
+        return
+    if not TRON_POOL_ADDRESS:
+        return
+    if not TRON_SWEEP_ENABLED:
+        _refresh_tron_pool_meta()
+        return
+    _sweep_discover_candidates()
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT s.sweep_id FROM signer_sweeps s
+                WHERE s.status IN ('queued','funding_signed','funding_broadcast','funded','sweep_signed','broadcast','cleanup_pending','cleanup_signed','cleanup_broadcast')
+                  AND s.available_at<=NOW()
+                  AND NOT EXISTS (
+                      SELECT 1 FROM signer_sweeps older
+                      WHERE older.source_address=s.source_address
+                        AND older.sweep_id<s.sweep_id
+                        AND older.status NOT IN ('confirmed','covered','below_minimum')
+                  )
+                ORDER BY s.sweep_id
+                LIMIT %s
+                """,
+                (TRON_SWEEP_BATCH_LIMIT,),
+            )
+            sweep_ids = [row[0] for row in cur.fetchall()]
+    for sweep_id in sweep_ids:
+        record = _sweep_row(sweep_id)
+        if not record:
+            continue
+        lock_key = f"tron-sweep-source:{record.get('source_address') or sweep_id}"
+        lock_conn = _db_connect()
+        lock_conn.autocommit = True
+        try:
+            with lock_conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_lock(hashtext(%s)::bigint)", (lock_key,))
+            record = _sweep_row(sweep_id)
+            if not record or record.get("status") in ("confirmed", "review", "covered", "below_minimum"):
+                continue
+            try:
+                _process_sweep_record(record)
+            except Exception as exc:
+                _sweep_fail(record, exc)
+        finally:
+            try:
+                with lock_conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(hashtext(%s)::bigint)", (lock_key,))
+            except Exception:
+                pass
+            lock_conn.close()
+    _refresh_tron_pool_meta()
+
+
+def tron_pool_snapshot():
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT meta_value FROM exchange_meta WHERE meta_key='tron-pool-snapshot'")
+            row = cur.fetchone()
+            snapshot = dict(row[0] or {}) if row else {}
+            cur.execute("SELECT status,COUNT(*) FROM signer_sweeps GROUP BY status")
+            counts = {status: count for status, count in cur.fetchall()}
+            cur.execute(
+                """
+                SELECT sweep_id,event_id,user_id,asset,source_address,amount,status,
+                       funding_txid,sweep_txid,cleanup_txid,last_error,created_at,updated_at
+                FROM signer_sweeps ORDER BY sweep_id DESC LIMIT 80
+                """
+            )
+            rows = cur.fetchall()
+    snapshot.setdefault("address", TRON_POOL_ADDRESS)
+    snapshot["sweeps"] = counts
+    snapshot["recent"] = [
+        {
+            "sweep_id": r[0], "event_id": r[1], "user_id": r[2], "asset": r[3],
+            "source_address": r[4], "amount": str(r[5]), "status": r[6],
+            "funding_txid": r[7], "sweep_txid": r[8], "cleanup_txid": r[9],
+            "last_error": r[10],
+            "created_at": r[11].strftime("%Y-%m-%d %H:%M:%S") if hasattr(r[11], "strftime") else str(r[11]),
+            "updated_at": r[12].strftime("%Y-%m-%d %H:%M:%S") if hasattr(r[12], "strftime") else str(r[12]),
+        }
+        for r in rows
+    ]
+    return snapshot
+
+
 def _signer_runtime_state():
     private_key_loaded = False
     derived_address = ""
@@ -5440,12 +6377,32 @@ def _signer_runtime_state():
         SIGNER_BROADCAST_ENABLED and private_key_loaded and address_matches
         and TRONGRID_KEY and USDT_TRC20_CONTRACT and SIGNER_CALLBACK_URL
     )
+
+    sweep_key_loaded = False
+    sweep_xpub_matches = False
+    sweep_key_error = ""
+    if TRON_SWEEP_ENABLED:
+        try:
+            _sweep_account_private_node()
+            sweep_key_loaded = True
+            sweep_xpub_matches = _sweep_account_xpub_matches()
+        except Exception as exc:
+            sweep_key_error = str(exc)
+    sweep_ready = bool(
+        TRON_SWEEP_ENABLED and ready and sweep_key_loaded and sweep_xpub_matches
+        and TRON_POOL_ADDRESS and secrets.compare_digest(TRON_POOL_ADDRESS, derived_address)
+    )
     return {
         "private_key_loaded": private_key_loaded,
         "derived_address": derived_address,
         "address_matches": address_matches,
         "key_error": key_error,
         "ready": ready,
+        "sweep_enabled": TRON_SWEEP_ENABLED,
+        "sweep_key_loaded": sweep_key_loaded,
+        "sweep_xpub_matches": sweep_xpub_matches,
+        "sweep_key_error": sweep_key_error,
+        "sweep_ready": sweep_ready,
     }
 
 
@@ -5457,12 +6414,18 @@ def signer_health():
         with conn.cursor() as cur:
             cur.execute("SELECT status,COUNT(*) FROM signer_requests GROUP BY status")
             request_counts = {row[0]: row[1] for row in cur.fetchall()}
+            cur.execute("SELECT status,COUNT(*) FROM signer_sweeps GROUP BY status")
+            sweep_counts = {row[0]: row[1] for row in cur.fetchall()}
+            cur.execute("SELECT meta_value FROM exchange_meta WHERE meta_key='tron-pool-snapshot'")
+            pool_row = cur.fetchone()
+            pool_snapshot = dict(pool_row[0] or {}) if pool_row else {}
     runtime = _signer_runtime_state()
     return {
         "ok": True,
         "service_role": SERVICE_ROLE,
         "build_version": BUILD_VERSION,
         "signer_release": SIGNER_RELEASE,
+        "sweep_release": SWEEP_RELEASE,
         "stage": SIGNER_STAGE,
         "supported_assets": sorted(SIGNER_SUPPORTED_ASSETS),
         "network": "TRON mainnet",
@@ -5471,7 +6434,13 @@ def signer_health():
         "hot_wallet_address": runtime["derived_address"] if runtime["private_key_loaded"] else "",
         "address_matches": runtime["address_matches"],
         "ready": runtime["ready"],
+        "sweep_enabled": runtime["sweep_enabled"],
+        "sweep_key_loaded": runtime["sweep_key_loaded"],
+        "sweep_xpub_matches": runtime["sweep_xpub_matches"],
+        "sweep_ready": runtime["sweep_ready"],
+        "pool": pool_snapshot,
         "requests": request_counts,
+        "sweeps": sweep_counts,
     }
 
 
@@ -5695,7 +6664,7 @@ def login():
 
     return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'>
     <meta name='viewport' content='width=device-width,initial-scale=1'>
-    <meta name='color-scheme' content='dark'><title>Nerlo Operations · V7</title><style>
+    <meta name='color-scheme' content='dark'><title>Nerlo Operations · Pool V10</title><style>
     :root{{--bg:#05080d;--card:#0d131c;--line:#1c2836;--text:#f6f8fb;--muted:#8190a3;--accent:#64e4ce;--accent2:#72bfff;--danger:#ff8095}}
     *{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;color:var(--text);
     font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
@@ -5787,6 +6756,7 @@ ADMIN_ACTION_LABELS = {
     "settings": "Ayarları güncelleme",
     "process_request": "İşlemi işleme alma",
     "approve_request": "İşlemi tamamlama",
+    "complete_manual_crypto": "Manuel kripto çekimini TXID ile tamamlama",
     "reject_request": "İşlemi reddetme",
     "adjust_balance": "Bakiye düzeltme",
     "update_user_profile": "Kullanıcı profilini güncelleme",
@@ -5958,6 +6928,57 @@ def message_field(key):
     return f"<div class='field'><label>{h(MESSAGE_LABELS.get(key, 'Bot mesajı'))}</label><textarea name='{h(key)}'>{h(messages.get(key, ''))}</textarea></div>"
 
 
+def sweep_status_label(value):
+    return {
+        "queued": "Sırada",
+        "funding_signed": "Gas imzalandı",
+        "funding_broadcast": "Gas gönderildi",
+        "funded": "Gas hazır",
+        "sweep_signed": "Sweep imzalandı",
+        "broadcast": "Ağ onayı",
+        "cleanup_pending": "TRX geri toplama",
+        "cleanup_signed": "Geri toplama imzalandı",
+        "cleanup_broadcast": "Geri toplama ağda",
+        "confirmed": "Tamamlandı",
+        "covered": "Toplu işlemle kapsandı",
+        "below_minimum": "Minimum altında",
+        "review": "İnceleme gerekli",
+    }.get(str(value or ""), str(value or "-"))
+
+
+def sweep_status_class(value):
+    return {
+        "confirmed": "done",
+        "covered": "done",
+        "review": "declined",
+        "below_minimum": "neutral",
+        "broadcast": "working",
+        "cleanup_broadcast": "working",
+        "funding_broadcast": "working",
+    }.get(str(value or ""), "waiting")
+
+
+def render_sweep_rows(snapshot):
+    rows = []
+    for item in (snapshot or {}).get("recent", []):
+        txid = item.get("sweep_txid") or item.get("funding_txid") or item.get("cleanup_txid") or "-"
+        error = str(item.get("last_error") or "")
+        details = error if error else txid
+        rows.append(
+            "<tr>"
+            f"<td><code>#{h(item.get('sweep_id'))}</code></td>"
+            f"<td>{h(item.get('asset'))}</td>"
+            f"<td><code>{h(item.get('user_id'))}</code></td>"
+            f"<td><code class='address-cell'>{h(item.get('source_address'))}</code></td>"
+            f"<td>{h(fmt(item.get('amount'), item.get('asset')))}</td>"
+            f"<td><span class='status {sweep_status_class(item.get('status'))}'><i></i>{h(sweep_status_label(item.get('status')))}</span></td>"
+            f"<td title='{h(details)}'><code class='tx-cell'>{h(details)}</code></td>"
+            f"<td>{h(item.get('updated_at'))}</td>"
+            "</tr>"
+        )
+    return "".join(rows) or "<tr><td colspan='8' class='muted-cell'>Henüz sweep kaydı bulunmuyor.</td></tr>"
+
+
 def reserve_totals():
     totals = {asset: Decimal("0") for asset in ASSETS}
     pending = {asset: Decimal("0") for asset in ASSETS}
@@ -6083,24 +7104,42 @@ def panel_request_card(rid, r):
     actions = ""
     if status in ("pending", "processing") and not r.get("automatic"):
         is_crypto_withdraw = _is_crypto_withdraw_record(r)
+        asset_upper = str(r.get("asset") or "").upper()
         if is_crypto_withdraw and r.get("broadcast_locked"):
             signer_state = h(r.get("signer_status") or "işleniyor")
             actions = (
                 "<div class='operation-banner info'><div><b>Blockchain gönderimi başlatıldı</b>"
                 f"<span>Signer durumu: {signer_state}. Ağ sonucu bekleniyor.</span></div></div>"
             )
+        elif is_crypto_withdraw and asset_upper in MANUAL_WITHDRAW_ASSETS:
+            process_button = "" if status == "processing" else "<button class='btn ghost' name='action' value='process_request'>İşleme Al</button>"
+            actions = (
+                "<div class='operation-banner warning'><div><b>Manuel blockchain gönderimi</b>"
+                "<span>Transferi harici cüzdandan hedef adrese gönderin. Gerçek TXID oluşunca aşağıya girin.</span></div></div>"
+                f"<form method='post' class='manual-txid-form'>"
+                f"<input type='hidden' name='rid' value='{h(rid)}'>"
+                f"<input type='hidden' name='return_to' value='/admin?view=requests'>"
+                f"<input name='manual_txid' autocomplete='off' placeholder='{h(asset_upper)} TXID' required>"
+                f"<button class='btn success' name='action' value='complete_manual_crypto'>TXID ile Tamamla</button>"
+                "</form>"
+                f"<form method='post' class='request-actions'>"
+                f"<input type='hidden' name='rid' value='{h(rid)}'>"
+                f"<input type='hidden' name='return_to' value='/admin?view=requests'>"
+                f"{process_button}<button class='btn danger' name='action' value='reject_request'>Reddet</button>"
+                "</form>"
+            )
         else:
             process_button = "" if status == "processing" else "<button class='btn ghost' name='action' value='process_request'>İşleme Al</button>"
             approve_button = "" if is_crypto_withdraw else "<button class='btn success' name='action' value='approve_request'>Tamamla</button>"
-            if is_crypto_withdraw and r.get("signer_enabled"):
+            if is_crypto_withdraw and asset_upper in AUTO_WITHDRAW_ASSETS and r.get("signer_enabled"):
                 warning = (
                     "<div class='operation-banner safe'><div><b>Otomatik gönderim hazır</b>"
-                    "<span>İşleme Al komutu transferi blockchain ağına gönderir.</span></div></div>"
+                    "<span>İşleme Al komutu transferi TRON ağına gönderir.</span></div></div>"
                 )
             elif is_crypto_withdraw:
                 warning = (
-                    "<div class='operation-banner warning'><div><b>Gönderim servisi bağlı değil</b>"
-                    "<span>Bu talep zincire gönderilmeden tamamlanamaz.</span></div></div>"
+                    "<div class='operation-banner warning'><div><b>Bu çekim akışı hazır değil</b>"
+                    "<span>Talep zincire gönderilmeden tamamlanamaz.</span></div></div>"
                 )
             else:
                 warning = ""
@@ -6397,6 +7436,21 @@ def admin():
                 save_json(FILES["messages"], messages)
                 add_admin_log("settings", "Ayrıntılı komisyon ve sistem ayarları güncellendi")
                 set_admin_notice("Ayarlar güvenli şekilde kaydedildi.")
+        elif action == "complete_manual_crypto":
+            rid = str(request.form.get("rid", "")).strip()
+            txid = str(request.form.get("manual_txid", "")).strip()
+            try:
+                updated = exchange_complete_manual_withdrawal(rid, txid, current_panel_username())
+                uid = str(updated.get("user_id") or "")
+                if uid:
+                    send(uid, receipt_text(rid, uid), reply_keyboard(uid))
+                add_admin_log("complete_manual_crypto", f"#{rid} · {updated.get('asset')} · {updated.get('broadcast_txid')}", uid)
+                set_admin_notice(f"#{rid} TXID kaydedilerek tamamlandı.")
+            except ValueError as exc:
+                set_admin_notice(str(exc), "error")
+            except Exception as exc:
+                print("MANUAL CRYPTO COMPLETE ERROR:", exc)
+                set_admin_notice("Manuel çekim güvenli biçimde tamamlanamadı.", "error")
         elif action in ("process_request", "approve_request", "reject_request"):
             rid = request.form.get("rid", "")
             try:
@@ -6551,6 +7605,15 @@ def admin():
     status_filter = request.args.get("status", "all")
     type_filter = request.args.get("type", "all")
     totals, pending = reserve_totals()
+    pool_snapshot = tron_pool_snapshot()
+    pool_counts = pool_snapshot.get("sweeps") or {}
+    pool_queue_count = sum(int(pool_counts.get(key, 0) or 0) for key in (
+        "queued", "funding_signed", "funding_broadcast", "funded", "sweep_signed",
+        "broadcast", "cleanup_pending", "cleanup_signed", "cleanup_broadcast",
+    ))
+    pool_review_count = int(pool_counts.get("review", 0) or 0)
+    pool_address = str(pool_snapshot.get("address") or TRON_POOL_ADDRESS or "")
+    pool_error = str(pool_snapshot.get("error") or "")
 
     asset_metrics = "".join(
         f"<div class='wallet-metric'><div class='asset-dot'>{h(a[0])}</div><div><span>{h(a)} toplam bakiye</span><strong>{h(fmt(totals[a], a))}</strong><small>Bekleyen çekim: {h(fmt(pending[a], a))}</small></div></div>"
@@ -6592,6 +7655,7 @@ def admin():
 
     nav_items = [
         ("dashboard", "Genel Bakış", "⌂"),
+        ("pool", "Havuz & Sweep", "◉"),
         ("requests", "İşlem Talepleri", "↗"),
         ("users", "Kullanıcılar", "◎"),
         ("broadcast", "Duyurular", "◫"),
@@ -6606,6 +7670,16 @@ def admin():
     )
 
     dashboard_section = f"""<section class='page-view {'active' if active_view == 'dashboard' else ''}' data-view='dashboard'><div class='section-head'><div><span class='eyebrow'>CANLI FİNANS ÖZETİ</span><h2>Varlık ve Operasyon Merkezi</h2><p>Kullanıcı varlıkları, bekleyen çekimler ve günlük işlem akışı.</p></div><span class='pill'>Ledger eşleşmesi aktif</span></div><div class='summary-grid'><div class='summary-card'><span>Toplam kullanıcı</span><strong>{len(users)}</strong></div><div class='summary-card'><span>Aksiyon bekleyen</span><strong>{pending_count}</strong></div><div class='summary-card'><span>Bugün tamamlanan</span><strong>{completed_today}</strong></div></div><div class='dashboard-grid' style='margin-top:12px'>{asset_metrics}</div></section>""" if "dashboard" in allowed_views else ""
+    pool_section = f"""<section class='page-view {'active' if active_view == 'pool' else ''}' data-view='pool'>
+      <div class='section-head'><div><span class='eyebrow'>TRON HAZİNE OPERASYONLARI</span><h2>Havuz ve Otomatik Toplama</h2><p>Kullanıcı yatırma adreslerinden ana havuza taşınan TRX ve TRC20 USDT hareketleri.</p></div><span class='pill {'danger-pill' if pool_review_count else ''}'>{'İnceleme: ' + str(pool_review_count) if pool_review_count else 'Akış normal'}</span></div>
+      <div class='summary-grid pool-summary'>
+        <div class='summary-card'><span>Havuz TRX</span><strong>{h(fmt(pool_snapshot.get('trx', '0'), 'TRX'))}</strong><small>{h(pool_snapshot.get('checked_at') or 'Henüz ölçülmedi')}</small></div>
+        <div class='summary-card'><span>Havuz USDT</span><strong>{h(fmt(pool_snapshot.get('usdt', '0'), 'USDT'))}</strong><small>TRC20 ana havuz bakiyesi</small></div>
+        <div class='summary-card'><span>Aktif sweep</span><strong>{pool_queue_count}</strong><small>Sırada veya ağ onayında</small></div>
+      </div>
+      <div class='panel-card pool-address-card'><div><span>ANA TRON HAVUZ ADRESİ</span><code>{h(pool_address or 'TRON_POOL_ADDRESS tanımlı değil')}</code><small>{h(pool_error or 'Bakiye bilgisi signer servisi tarafından güncellenir.')}</small></div>{f"<button type='button' class='copy-control' data-copy='{h(pool_address)}'>Adresi Kopyala</button>" if pool_address else ''}</div>
+      <div class='panel-card' style='margin-top:12px'><div class='section-head'><div><span class='eyebrow'>SON HAREKETLER</span><h3>Sweep Operasyon Günlüğü</h3></div><p>Gas yükleme, token taşıma ve kalan TRX geri toplama adımları</p></div><div class='table-wrap'><table><thead><tr><th>Sweep</th><th>Varlık</th><th>Kullanıcı</th><th>Kaynak</th><th>Tutar</th><th>Durum</th><th>TXID / Hata</th><th>Güncelleme</th></tr></thead><tbody>{render_sweep_rows(pool_snapshot)}</tbody></table></div></div>
+    </section>""" if "pool" in allowed_views else ""
     requests_section = f"""<section class='page-view {'active' if active_view == 'requests' else ''}' data-view='requests'><div class='section-head'><div><span class='eyebrow'>ONAY VE İŞLEM AKIŞI</span><h2>İşlem Merkezi</h2><p>Her talebi tutar, ağ, hedef ve durum bilgileriyle hızlıca yönetin.</p></div></div><div class='panel-card'><form id='request-filter' class='toolbar'><input name='rq' value='{h(request_query)}' placeholder='İşlem no, kullanıcı ID veya kullanıcı adı'><select name='status'><option value='all'>Tüm durumlar</option>{''.join(f"<option value='{s}' {'selected' if status_filter == s else ''}>{status_label(s)}</option>" for s in ['pending','processing','completed','rejected'])}</select><select name='type'><option value='all'>Tüm işlem türleri</option>{''.join(f"<option value='{t}' {'selected' if type_filter == t else ''}>{request_type_label(t)}</option>" for t in ['deposit','withdraw','convert'])}</select><button class='btn primary'>Filtrele</button></form><div id='request-list' class='request-list'>{render_request_list(request_query, status_filter, type_filter)}</div></div></section>""" if "requests" in allowed_views else ""
     users_section = f"""<section class='page-view {'active' if active_view == 'users' else ''}' data-view='users'><div class='section-head'><div><span class='eyebrow'>KULLANICI YÖNETİMİ</span><h2>ID ile Kullanıcı Aç</h2><p>Kullanıcı satırlarına tıklamadan doğrudan kimlik ile yönetin</p></div></div><div class='panel-card'><form id='user-lookup' class='lookup-bar'><input id='manage-user-id' name='uid' value='{h(manage_user_id)}' inputmode='numeric' placeholder='Telegram kullanıcı ID'><button class='btn primary'>Kullanıcıyı Getir</button></form><div id='user-management-result'>{render_user_management(manage_user_id)}</div></div><div class='panel-card' style='margin-top:10px'><div class='section-head'><div><span class='eyebrow'>SON KULLANICILAR</span><h3>Hızlı Referans</h3></div><p>ID değerleri bağlantı değildir</p></div><div class='table-wrap'><table><thead><tr><th>Kullanıcı ID</th><th>Kullanıcı adı</th><th>TL</th><th>USDT</th><th>LTC</th><th>TRX</th><th>Hesap</th><th>Son görülme</th></tr></thead><tbody>{user_rows}</tbody></table></div></div></section>""" if "users" in allowed_views else ""
     broadcast_section = f"""<section class='page-view {'active' if active_view == 'broadcast' else ''}' data-view='broadcast'><div class='section-head'><div><span class='eyebrow'>İLETİŞİM</span><h2>Duyuru Gönder</h2><p>Bildirimleri açık kullanıcılara toplu mesaj gönderin</p></div></div><div class='broadcast-grid'><form method='post' class='panel-card'><input type='hidden' name='action' value='broadcast'><input type='hidden' name='return_to' value='/admin?view=broadcast'><label>Duyuru metni</label><textarea name='announcement_text' placeholder='Kullanıcılara gönderilecek mesajı yazın' required></textarea><button class='btn primary' style='width:100%;margin-top:10px'>Duyuruyu Gönder</button></form><div class='broadcast-note'><b style='color:#dce5ef'>Gönderim bilgisi</b><br><br>Duyuru yalnızca duyuru bildirimleri açık olan kullanıcılara iletilir. Gönderim sonucu yönetim kayıtlarına eklenir.</div></div></section>""" if "broadcast" in allowed_views else ""
@@ -6613,7 +7687,7 @@ def admin():
     logs_section = f"""<section class='page-view {'active' if active_view == 'logs' else ''}' data-view='logs'><div class='section-head'><div><span class='eyebrow'>DENETİM</span><h2>Yönetim Kayıtları</h2><p>Son 120 yönetici işlemi</p></div></div><div class='panel-card'><div class='table-wrap'><table><thead><tr><th>Tarih</th><th>İşlem</th><th>Kullanıcı</th><th>Detay</th></tr></thead><tbody>{logs}</tbody></table></div></div></section>""" if "logs" in allowed_views else ""
     admins_section = f"""<section class='page-view {'active' if active_view == 'admins' else ''}' data-view='admins'><div class='section-head'><div><span class='eyebrow'>ERİŞİM YÖNETİMİ</span><h2>Panel Yetkilileri</h2><p>Yeni panel kullanıcısı oluşturun ve bölüm bazlı yetkilerini düzenleyin</p></div></div>{render_panel_user_management()}</section>""" if "admins" in allowed_views else ""
 
-    # UI_SENTINEL: NERLO_ENTERPRISE_PANEL_V7_FRESH
+    # UI_SENTINEL: NERLO_TREASURY_PANEL_V10_FRESH
     panel_css = """
     :root{
       --bg:#070a0f;--rail:#0a0e15;--surface:#0d131c;--surface-2:#111925;--surface-3:#080d14;
@@ -6661,6 +7735,8 @@ def admin():
     .summary-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:13px}
     .summary-card{padding:18px;border:1px solid rgba(255,255,255,.065);border-radius:17px;background:linear-gradient(145deg,#0f1722,#0a1018)}
     .summary-card span{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}.summary-card strong{display:block;font-size:27px;letter-spacing:-.04em;margin-top:7px}
+    .summary-card small{display:block;color:var(--subtle);font-size:9px;margin-top:5px}.pool-summary{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .pool-address-card{display:flex;align-items:center;justify-content:space-between;gap:18px}.pool-address-card span,.pool-address-card small{display:block;color:var(--muted);font-size:9px}.pool-address-card code{display:block;margin:6px 0;color:#e5edf6;word-break:break-all}.address-cell,.tx-cell{display:block;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .dashboard-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
     .wallet-metric{min-height:128px;padding:17px;border:1px solid rgba(255,255,255,.065);border-radius:18px;background:linear-gradient(145deg,#0f1722,#090f17);display:flex;gap:12px;align-items:flex-start}
     .asset-dot{width:37px;height:37px;flex:0 0 auto;border-radius:12px;display:grid;place-items:center;background:rgba(108,226,205,.11);color:var(--accent);font-size:12px;font-weight:950}
@@ -6692,7 +7768,7 @@ def admin():
     .operation-banner{display:flex;margin-top:11px;padding:11px 12px;border:1px solid rgba(239,199,108,.22);border-radius:12px;background:rgba(239,199,108,.075);color:var(--warning)}
     .operation-banner.safe{border-color:rgba(101,217,159,.22);background:rgba(101,217,159,.07);color:#8ce7b9}.operation-banner.info{border-color:rgba(123,189,255,.22);background:rgba(123,189,255,.07);color:#9fcfff}
     .operation-banner b{display:block;font-size:10px}.operation-banner span{display:block;margin-top:3px;font-size:9px;opacity:.9}
-    .request-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.05)}.request-actions .btn{min-height:36px;font-size:10px}
+    .request-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.05)}.request-actions .btn{min-height:36px;font-size:10px}.manual-txid-form{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-top:12px}.manual-txid-form input{min-width:0}
     .lookup-bar{display:grid;grid-template-columns:minmax(240px,1fr) auto;gap:10px;margin-bottom:13px}.lookup-bar .btn{min-width:138px}
     .user-profile-head{display:flex;justify-content:space-between;gap:15px;margin:1px 0 15px}.user-profile-head h2{margin:3px 0;font-size:20px}.user-profile-head p{margin:0;color:var(--muted);font-size:10px}
     .profile-badges{display:flex;gap:7px;flex-wrap:wrap}.mini-balance-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-bottom:11px}
@@ -6716,7 +7792,7 @@ def admin():
     .empty-state b{color:#d6e0ea}.error-state{border-color:rgba(255,127,149,.28)}.toast{position:fixed;right:24px;top:20px;z-index:30;max-width:min(380px,calc(100vw - 34px));padding:12px 15px;border:1px solid rgba(101,217,159,.25);border-radius:13px;background:#10231c;color:#9aebc0;box-shadow:0 22px 65px rgba(0,0,0,.38);font-size:11px}.toast-error{background:#28131a;color:#ff9bad;border-color:rgba(255,127,149,.28)}
     @media(max-width:1260px){.request-list{grid-template-columns:1fr}.dashboard-grid,.mini-balance-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
     @media(max-width:920px){.ops-shell{grid-template-columns:1fr}.rail{position:static;height:auto;padding:12px}.rail-brand{padding-bottom:12px}.rail-label,.rail-footer{display:none}.nav{grid-template-columns:repeat(4,minmax(0,1fr))}.nav-item{justify-content:center}.nav-item b{font-size:10px}.masthead{position:static}.user-workspace,.broadcast-grid{grid-template-columns:1fr}.toolbar{grid-template-columns:1fr 1fr}.toolbar input{grid-column:1/-1}}
-    @media(max-width:640px){.content{padding:18px 14px 40px}.masthead{padding:15px 14px;align-items:flex-start}.system-strip{display:none}.nav{grid-template-columns:repeat(2,minmax(0,1fr))}.dashboard-grid,.summary-grid,.mini-balance-grid,.request-facts,.settings-grid,.form-grid,.balance-form,.admin-account-grid,.permission-grid{grid-template-columns:1fr}.form-grid .wide{grid-column:auto}.toolbar,.lookup-bar{grid-template-columns:1fr}.request-actions,.admin-account-actions{display:grid}.request-actions .btn,.admin-account-actions .btn{width:100%}.user-profile-head,.root-account,.admin-account-head{display:block}.profile-badges{margin-top:10px}.security-actions{grid-template-columns:1fr}.destination-box{align-items:flex-start;flex-direction:column}.copy-control{width:100%}}
+    @media(max-width:640px){.content{padding:18px 14px 40px}.masthead{padding:15px 14px;align-items:flex-start}.system-strip{display:none}.nav{grid-template-columns:repeat(2,minmax(0,1fr))}.dashboard-grid,.summary-grid,.mini-balance-grid,.request-facts,.settings-grid,.form-grid,.balance-form,.admin-account-grid,.permission-grid{grid-template-columns:1fr}.form-grid .wide{grid-column:auto}.toolbar,.lookup-bar{grid-template-columns:1fr}.request-actions,.admin-account-actions,.manual-txid-form{display:grid;grid-template-columns:1fr}.request-actions .btn,.admin-account-actions .btn{width:100%}.user-profile-head,.root-account,.admin-account-head{display:block}.profile-badges{margin-top:10px}.security-actions{grid-template-columns:1fr}.destination-box,.pool-address-card{align-items:flex-start;flex-direction:column}.copy-control{width:100%}}
     """
     panel_script = """
     const views=[...document.querySelectorAll('[data-view]')];
@@ -6784,10 +7860,10 @@ def admin():
     signer_online = bool(WITHDRAW_SIGNER_URL)
     active_title = next((label for slug, label, symbol in nav_items if slug == active_view), "Operasyon Merkezi")
     return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
-    <meta name='color-scheme' content='dark'><title>Nerlo Operations · V7</title><style>{panel_css}</style></head><body>{notice_html}
+    <meta name='color-scheme' content='dark'><title>Nerlo Operations · Pool V10</title><style>{panel_css}</style></head><body>{notice_html}
     <div class='ops-shell'>
       <aside class='rail'>
-        <div class='rail-brand'><div class='rail-logo'>N</div><div><strong>Nerlo Wallet</strong><small>Enterprise Operations · V7</small></div></div>
+        <div class='rail-brand'><div class='rail-logo'>N</div><div><strong>Nerlo Wallet</strong><small>Treasury Operations · V10</small></div></div>
         <div class='rail-label'>Çalışma Alanı</div>
         <nav class='nav'>{nav_html}</nav>
         <div class='rail-footer'>
@@ -6806,6 +7882,7 @@ def admin():
         </header>
         <main class='content'>
           {dashboard_section}
+          {pool_section}
           {requests_section}
           {users_section}
           {broadcast_section}
@@ -6843,6 +7920,13 @@ def start_background_services_once():
                     daemon=True,
                     name="signer-confirmations",
                 ).start()
+                if TRON_POOL_ADDRESS:
+                    threading.Thread(
+                        target=_run_singleton_polling_service,
+                        args=("signer-sweeps", signer_sweep_once, TRON_SWEEP_POLL_SECONDS),
+                        daemon=True,
+                        name="signer-sweeps",
+                    ).start()
             _background_services_started = True
             runtime = _signer_runtime_state()
             print("BUILD VERSION:", BUILD_VERSION)
@@ -6851,6 +7935,8 @@ def start_background_services_once():
             print("SIGNER BROADCAST ENABLED:", SIGNER_BROADCAST_ENABLED)
             print("SIGNER READY:", runtime.get("ready"))
             print("SIGNER HOT WALLET:", runtime.get("derived_address") or "not-loaded")
+            print("TRON SWEEP ENABLED:", runtime.get("sweep_enabled"))
+            print("TRON SWEEP READY:", runtime.get("sweep_ready"))
             return
         if not BACKGROUND_SERVICES_ENABLED:
             _background_services_started = True
