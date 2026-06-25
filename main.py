@@ -118,7 +118,7 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-25-TREASURY-CONTROL-V11-FRESH"
+BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V12"
 PANEL_RELEASE = "TREASURY-CONTROL-CENTER-V11"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
@@ -134,7 +134,7 @@ CONFIRMATION_THRESHOLDS = {
     "XMR": max(1, int(os.getenv("XMR_CONFIRMATIONS", "10"))),
 }
 AUTO_DEPOSIT_ASSETS = {"BTC", "LTC", "ETH", "TRX", "USDT", "XMR"}
-AUTO_WITHDRAW_ASSETS = {"TRX", "USDT"}
+AUTO_WITHDRAW_ASSETS = {"TRX"}
 MANUAL_WITHDRAW_ASSETS = {"BTC", "LTC", "ETH"}
 WITHDRAW_ENABLED_ASSETS = {"TL"} | AUTO_WITHDRAW_ASSETS | MANUAL_WITHDRAW_ASSETS
 CHAIN_BY_ASSET = {"BTC": "BTC", "LTC": "LTC", "ETH": "ETH", "TRX": "TRON", "USDT": "TRON", "XMR": "XMR"}
@@ -7674,6 +7674,10 @@ def admin():
     nav_html = "".join(nav_parts)
 
     dashboard_section = f"""<section class='page-view {'active' if active_view == 'dashboard' else ''}' data-view='dashboard'>
+      <div class='command-hero'>
+        <div class='hero-copy'><span>NERLO TREASURY CONTROL</span><h2>Finans operasyonlarının canlı görünümü</h2><p>Yükümlülükler, işlem kuyrukları, blockchain havuzu ve kullanıcı risklerini tek ekrandan izleyin.</p></div>
+        <div class='hero-date'><small>Rapor tarihi</small><strong>{h(today())}</strong><span>Türkiye saati</span></div>
+      </div>
       <div class='kpi-grid'>
         <div class='kpi'><span>Toplam kullanıcı</span><strong>{len(users)}</strong><small>{frozen_users} dondurulmuş hesap</small></div>
         <div class='kpi attention'><span>Aksiyon bekleyen</span><strong>{pending_count}</strong><small>{status_counts.get('pending',0)} bekliyor · {status_counts.get('processing',0)} işleniyor</small></div>
