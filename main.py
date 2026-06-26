@@ -122,8 +122,8 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V21"
-PANEL_RELEASE = "TREASURY-CONTROL-CENTER-V15-R10-TICARET-SOURCE"
+BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V22"
+PANEL_RELEASE = "TREASURY-CONTROL-CENTER-V16-R10-TICARET-RELIABLE"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
 SWEEP_RELEASE = "TRON-HD-DEPOSIT-SWEEP-V1"
@@ -3427,7 +3427,7 @@ BOT_TEXTS = {
         "r10_verify": "R10 Doğrulama", "r10_link_question": "r10.net profil linkinizi gönderiniz.",
         "r10_invalid_link": "Geçerli bir r10.net profil linki gönderiniz.",
         "r10_fetch_failed": "r10 profili okunamadı. Linki kontrol edip tekrar deneyiniz.",
-        "r10_trade_unavailable": "R10 profilindeki Ticaret bilgisi okunamadı. Profildeki Ticaret bölümünün erişilebilir olduğundan emin olup tekrar deneyiniz.",
+        "r10_trade_unavailable": "R10 Ticaret bilgisi şu anda otomatik olarak okunamadı. Lütfen kısa bir süre sonra tekrar deneyiniz.",
         "r10_checking": "R10 profili kontrol ediliyor, lütfen bekleyiniz...",
         "r10_key_sent": "Hoş geldiniz {name}.\n\nTL işlemleri için son adım:\nBu doğrulama keyini r10.net üzerinden @nerlowallet hesabına PM gönderiniz.\n\nKey: {key}",
         "r10_corporate_key_sent": "Kurumsal r10 hesabınız algılandı.\n\nTL işlemleri için @nerlowallet hesabına PM gönderiniz:\nKey: {key}\nIBAN ad soyad: ...\n\nBu ad soyad onaydan sonra değiştirilemez.",
@@ -3491,7 +3491,7 @@ BOT_TEXTS = {
         "r10_verify": "R10 Verification", "r10_link_question": "Send your r10.net profile link.",
         "r10_invalid_link": "Send a valid r10.net profile link.",
         "r10_fetch_failed": "The r10 profile could not be read. Check the link and try again.",
-        "r10_trade_unavailable": "The Trade information on the R10 profile could not be read. Make sure the Trade section is accessible and try again.",
+        "r10_trade_unavailable": "The R10 Trade information could not be read automatically at this time. Please try again shortly.",
         "r10_checking": "Checking the R10 profile, please wait...",
         "r10_key_sent": "Welcome {name}.\n\nLast step for TRY transactions:\nSend this verification key to @nerlowallet on r10.net by PM.\n\nKey: {key}",
         "r10_corporate_key_sent": "Corporate r10 account detected.\n\nSend this to @nerlowallet by PM:\nKey: {key}\nIBAN full name: ...\n\nThis name cannot be changed after approval.",
@@ -4318,6 +4318,29 @@ def _r10_trade_count(text):
     return None
 
 
+def _r10_itrader_badge_count(text):
+    """Read the current iTrader score from R10's server-rendered badge page.
+
+    R10 loads the visible Ticaret card with JavaScript for many profiles, so a
+    normal HTTP request can receive only "Yükleniyor". The badge page exposes
+    the same iTrader score as progress values such as 18/50 or 143/250. Taking
+    the largest numerator preserves the current score across achieved tiers.
+    R10+ values are deliberately ignored.
+    """
+    source = str(text or "")
+    values = []
+    patterns = (
+        r"İlerleme\s*:?\s*([0-9][0-9.]*)\s*/\s*[0-9][0-9.]*\s*iTrader\b",
+        r"\(\s*([0-9][0-9.]*)\s*/\s*[0-9][0-9.]*\s*iTrader\s*\)",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, source, re.I):
+            value = _r10_int(match.group(1))
+            if value is not None:
+                values.append(value)
+    return max(values) if values else None
+
+
 def _r10_membership_months(day, month, year):
     try:
         joined = date(int(year), int(month), int(day))
@@ -4457,25 +4480,28 @@ def fetch_r10_profile_mask(profile_url):
         raise ValueError("name_not_found")
 
     profile_id_match = re.search(r"/profil/([0-9]+)-", canonical_url, re.I)
-    if parsed_name.get("trades") is None and profile_id_match:
-        trade_url = f"https://www.r10.net/itrader.php?u={profile_id_match.group(1)}"
-        trade_response = session_client.get(
-            trade_url,
+    if parsed_name.get("trades") is None:
+        # The Ticaret card is dynamically loaded on many R10 profiles. The
+        # public badge page is server-rendered and exposes the same iTrader
+        # score without relying on the obsolete itrader.php endpoint.
+        badge_url = canonical_url + "?tab=rozet"
+        badge_response = session_client.get(
+            badge_url,
             headers={**headers, "Referer": response.url},
             timeout=(7, 12),
             allow_redirects=True,
         )
-        trade_response.raise_for_status()
-        trade_host = urlparse(trade_response.url).netloc.lower().removeprefix("www.")
-        if trade_host != "r10.net":
+        badge_response.raise_for_status()
+        badge_host = urlparse(badge_response.url).netloc.lower().removeprefix("www.")
+        if badge_host != "r10.net":
             raise ValueError("invalid_link")
-        trade_lowered = trade_response.text.lower()
-        if "cf-chl-" in trade_lowered or "just a moment" in trade_lowered or "attention required" in trade_lowered:
+        badge_lowered = badge_response.text.lower()
+        if "cf-chl-" in badge_lowered or "just a moment" in badge_lowered or "attention required" in badge_lowered:
             raise RuntimeError("r10_access_challenge")
-        trade_count = _r10_trade_count(_r10_profile_text(trade_response.text))
+        trade_count = _r10_itrader_badge_count(_r10_profile_text(badge_response.text))
         if trade_count is not None:
             parsed_name["trades"] = trade_count
-            parsed_name["trade_source"] = "r10_trade_summary"
+            parsed_name["trade_source"] = "r10_itrader_badge"
 
     if parsed_name.get("months") is None or parsed_name.get("trades") is None:
         raise ValueError("profile_data_incomplete")
@@ -4616,7 +4642,7 @@ def _r10_complete_profile_check(chat_id, uid, profile_text, check_token, result_
                     "admin_notified_at": "",
                     "r10_months": int(parsed.get("months") or 0),
                     "r10_trades": int(parsed.get("trades") or 0),
-                    "trade_source": "r10_trade_summary",
+                    "trade_source": str(parsed.get("trade_source") or ""),
                     "membership_date": parsed.get("membership_date", ""),
                     "iban_owner": "",
                     "iban_owner_locked": False,
@@ -8686,7 +8712,7 @@ def render_r10_approval_detail(uid, user, info):
               <div><span>R10 kullanıcı adı</span><strong>{h(info.get('profile_slug') or '-')}</strong></div>
               <div><span>Profildeki hitap</span><strong>{h(info.get('company_title') or info.get('masked_name') or '-')}</strong></div>
               <div><span>Üyelik</span><strong>{h(str(info.get('r10_months', 0)))} ay</strong><small>{h(info.get('membership_date') or '-')}</small></div>
-              <div><span>Ticaret sayısı</span><strong>{h(str(info.get('r10_trades'))) if info.get('trade_source') == 'r10_trade_summary' and info.get('r10_trades') is not None else 'Doğrulanmadı'}</strong><small>Kaynak: R10 Ticaret bölümü</small></div>
+              <div><span>Ticaret sayısı</span><strong>{h(str(info.get('r10_trades'))) if info.get('trade_source') in ('r10_trade_summary','r10_itrader_badge') and info.get('r10_trades') is not None else 'Doğrulanmadı'}</strong><small>Kaynak: R10 Ticaret / iTrader verisi</small></div>
               <div><span>IBAN hesap sahibi</span><strong>{h(owner or '-')}</strong><small>{'Onay sonrası kilitli' if info.get('iban_owner_locked') else 'Henüz kilitlenmedi'}</small></div>
             </div>
             <a class='approval-profile-link approval-profile-button' href='{h(profile_url)}' target='_blank' rel='noopener'>R10 profilini yeni sekmede aç</a>
