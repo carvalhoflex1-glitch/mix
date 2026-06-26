@@ -3375,6 +3375,17 @@ BOT_TEXTS = {
         "sessions_closed": "Diğer oturum kayıtları kapatıldı.", "on": "Açık", "off": "Kapalı",
         "withdraw_summary_tl": "TL Çekim Özeti", "withdraw_summary": "{asset} Çekim Özeti", "recipient_gets": "Alıcıya Geçecek", "to_send": "Gönderilecek",
         "wallet_address": "Cüzdan Adresi", "deposit_pending_title": "Yükleme bildiriminiz alındı", "request_rejected": "İşleminiz reddedildi.",
+        "r10_verify": "R10 Doğrulama", "r10_link_question": "r10.net profil linkinizi gönderiniz.",
+        "r10_invalid_link": "Geçerli bir r10.net profil linki gönderiniz.",
+        "r10_fetch_failed": "r10 profili okunamadı. Linki kontrol edip tekrar deneyiniz.",
+        "r10_key_sent": "Hoş geldiniz {name}.\n\nTL işlemleri için son adım:\nBu doğrulama keyini r10.net üzerinden @nerlowallet hesabına PM gönderiniz.\n\nKey: {key}",
+        "r10_corporate_key_sent": "Kurumsal r10 hesabınız algılandı.\n\nTL işlemleri için @nerlowallet hesabına PM gönderiniz:\nKey: {key}\nIBAN ad soyad: ...\n\nBu ad soyad onaydan sonra değiştirilemez.",
+        "r10_hidden_name": "Lütfen r10 profilinizde ad soyad gizlemesini kapatıp tekrar deneyiniz.",
+        "r10_duplicate": "Bu r10 profili başka Telegram hesabına bağlı.",
+        "r10_rules_failed": "Bireysel hesap için en az 6 aylık üyelik ve en az 5 trade gerekir.",
+        "r10_pending": "R10 doğrulamanız admin onayı bekliyor.",
+        "r10_required": "TL işlemleri için önce R10 doğrulaması gerekir.",
+        "r10_name_mismatch": "Ad soyad R10 profilinizle uyuşmuyor.",
     },
     "en": {
         "choose_language": "Please select your preferred language.\n\nLütfen kullanmak istediğiniz dili seçin.",
@@ -3426,6 +3437,17 @@ BOT_TEXTS = {
         "sessions_closed": "Other session records were closed.", "on": "On", "off": "Off",
         "withdraw_summary_tl": "TRY Withdrawal Summary", "withdraw_summary": "{asset} Withdrawal Summary", "recipient_gets": "Recipient receives", "to_send": "Amount to send",
         "wallet_address": "Wallet Address", "deposit_pending_title": "Your deposit notification was received", "request_rejected": "Your transaction was rejected.",
+        "r10_verify": "R10 Verification", "r10_link_question": "Send your r10.net profile link.",
+        "r10_invalid_link": "Send a valid r10.net profile link.",
+        "r10_fetch_failed": "The r10 profile could not be read. Check the link and try again.",
+        "r10_key_sent": "Welcome {name}.\n\nLast step for TRY transactions:\nSend this verification key to @nerlowallet on r10.net by PM.\n\nKey: {key}",
+        "r10_corporate_key_sent": "Corporate r10 account detected.\n\nSend this to @nerlowallet by PM:\nKey: {key}\nIBAN full name: ...\n\nThis name cannot be changed after approval.",
+        "r10_hidden_name": "Please disable name hiding on your r10 profile and try again.",
+        "r10_duplicate": "This r10 profile is already linked to another Telegram account.",
+        "r10_rules_failed": "Personal accounts require at least 6 months membership and at least 5 trades.",
+        "r10_pending": "Your R10 verification is waiting for admin approval.",
+        "r10_required": "R10 verification is required for TRY transactions.",
+        "r10_name_mismatch": "The name does not match your R10 profile.",
     },
 }
 
@@ -3876,6 +3898,120 @@ def coin_fmt_lang(value, asset, lang="tr"):
 
 def ucoin(uid, value, asset):
     return coin_fmt_lang(value, asset, lang_of(uid))
+
+
+def _tr_lower(value):
+    table = str.maketrans("Iİ", "ıi")
+    return str(value or "").translate(table).lower()
+
+
+def _name_parts(value):
+    clean = re.sub(r"[^A-Za-zÇĞİÖŞÜçğıöşü\s]", " ", str(value or ""))
+    parts = [p for p in clean.split() if p]
+    return parts
+
+
+def r10_tl_ready(uid):
+    info = users.get(str(uid), {}).get("r10_verification", {})
+    return info.get("status") == "approved"
+
+
+def r10_required_text(uid):
+    info = users.get(str(uid), {}).get("r10_verification", {})
+    if info.get("status") == "pending":
+        return t(uid, "r10_pending")
+    return t(uid, "r10_required")
+
+
+def normalize_person_name(value):
+    return " ".join(_name_parts(value)).strip()
+
+
+def validate_r10_name(uid, full_name):
+    info = users.get(str(uid), {}).get("r10_verification", {})
+    if info.get("status") != "approved":
+        return False
+    if info.get("account_type") == "corporate":
+        saved = normalize_person_name(info.get("iban_owner", ""))
+        return bool(saved) and _tr_lower(normalize_person_name(full_name)) == _tr_lower(saved)
+    first = _tr_lower(info.get("first2", ""))
+    last = _tr_lower(info.get("last2", ""))
+    parts = _name_parts(full_name)
+    if len(parts) < 2 or not first or not last:
+        return False
+    return _tr_lower(parts[0]).startswith(first) and _tr_lower(parts[-1]).startswith(last)
+
+
+def normalize_r10_profile_url(profile_url):
+    parsed = urlparse(str(profile_url or "").strip())
+    host = parsed.netloc.lower().removeprefix("www.")
+    if parsed.scheme not in ("http", "https") or host != "r10.net":
+        raise ValueError("invalid_link")
+    slug = parsed.path.strip("/").split("/")[0].lower()
+    if not re.fullmatch(r"[a-z0-9_.-]{2,64}", slug or ""):
+        raise ValueError("invalid_link")
+    return f"https://www.r10.net/{slug}", slug
+
+
+def r10_profile_used_by(profile_slug, except_uid=""):
+    slug = str(profile_slug or "").lower().strip()
+    for other_uid, user in users.items():
+        if str(other_uid) == str(except_uid):
+            continue
+        info = (user or {}).get("r10_verification", {}) or {}
+        if slug and str(info.get("profile_slug", "")).lower() == slug and info.get("status") in ("pending", "approved"):
+            return str(other_uid)
+    return ""
+
+
+def r10_iban_owner_used_by(owner_key, except_uid=""):
+    key = _tr_lower(owner_key).strip()
+    if not key:
+        return ""
+    for other_uid, user in users.items():
+        if str(other_uid) == str(except_uid):
+            continue
+        info = (user or {}).get("r10_verification", {}) or {}
+        if info.get("status") == "approved" and _tr_lower(info.get("iban_owner", "")).strip() == key:
+            return str(other_uid)
+    return ""
+
+
+def parse_r10_profile_name(html):
+    text = re.sub(r"<[^>]+>", " ", str(html or ""))
+    text = re.sub(r"\s+", " ", text)
+    masked = re.search(r"\b([A-Za-zÇĞİÖŞÜçğıöşü]{2})\*{2,}\s+([A-Za-zÇĞİÖŞÜçğıöşü]{2})\*{2,}\b", text)
+    trade_match = re.search(r"(?:trade|ticaret|alışveriş)[^0-9]{0,20}([0-9]{1,6})", text, re.I)
+    trades = int(trade_match.group(1)) if trade_match else 0
+    month_match = re.search(r"([0-9]{1,3})\s*(?:ay|month)", text, re.I)
+    year_match = re.search(r"([0-9]{1,2})\s*(?:yıl|year)", text, re.I)
+    months = (int(year_match.group(1)) * 12 if year_match else 0) + (int(month_match.group(1)) if month_match else 0)
+    corporate = bool(re.search(r"\b(kurumsal|unvan|firma|şirket|company)\b", text, re.I))
+    if masked:
+        return {"masked": masked.group(0), "first2": masked.group(1), "last2": masked.group(2), "account_type": "corporate" if corporate else "personal", "trades": trades, "months": months}
+    if corporate:
+        title_match = re.search(r"(?:unvan|firma|şirket|company)\s*:?\s*([A-Za-zÇĞİÖŞÜçğıöşü0-9 .&-]{3,80})", text, re.I)
+        title = title_match.group(1).strip() if title_match else "Kurumsal hesap"
+        return {"masked": title, "first2": "", "last2": "", "account_type": "corporate", "trades": trades, "months": months}
+    return None
+
+
+def fetch_r10_profile_mask(profile_url):
+    canonical_url, slug = normalize_r10_profile_url(profile_url)
+    response = requests.get(canonical_url, headers={"User-Agent": "Mozilla/5.0 NerloBot"}, timeout=15)
+    response.raise_for_status()
+    parsed_name = parse_r10_profile_name(response.text)
+    if not parsed_name:
+        raise ValueError("name_not_found")
+    parsed_name["profile_url"] = canonical_url
+    parsed_name["profile_slug"] = slug
+    return parsed_name
+
+
+def begin_r10_verification(chat_id):
+    uid = str(chat_id)
+    user_state[uid] = {"flow": "r10_verify", "step": "profile_link"}
+    send(chat_id, t(uid, "r10_link_question"))
 
 def hash_pin(pin):
     return generate_password_hash(str(pin), method="scrypt")
@@ -4550,6 +4686,7 @@ def show_security(chat_id):
     )
     kb = {"inline_keyboard": [
         [inline_button(t(uid, "change_pin"), "security:set_pin")],
+        [inline_button(t(uid, "r10_verify"), "r10:start")],
         [inline_button(t(uid, "notification_preferences"), "security:notifications")],
         [inline_button(t(uid, "logout_sessions"), "security:logout_sessions")],
     ]}
@@ -4814,6 +4951,37 @@ def handle_text(chat_id, username, text):
         send(chat_id, t(uid, "menu_prompt"), reply_keyboard(uid)); return
     flow, step = state.get("flow"), state.get("step")
 
+    if flow == "r10_verify" and step == "profile_link":
+        try:
+            parsed = fetch_r10_profile_mask(text)
+        except ValueError as exc:
+            send(chat_id, t(uid, "r10_invalid_link") if str(exc) == "invalid_link" else (t(uid, "r10_hidden_name") if str(exc) == "name_not_found" else t(uid, "r10_fetch_failed")))
+            return
+        except Exception as exc:
+            print("R10 PROFILE FETCH ERROR:", exc)
+            send(chat_id, t(uid, "r10_fetch_failed"))
+            return
+        if r10_profile_used_by(parsed.get("profile_slug"), uid):
+            send(chat_id, t(uid, "r10_duplicate"), reply_keyboard(uid)); user_state.pop(uid, None); return
+        if parsed.get("account_type") == "personal" and (int(parsed.get("months") or 0) < 6 or int(parsed.get("trades") or 0) < 5):
+            send(chat_id, t(uid, "r10_rules_failed"), reply_keyboard(uid)); user_state.pop(uid, None); return
+        key = "NERLO-" + secrets.token_hex(3).upper()
+        users[uid]["r10_verification"] = {
+            "status": "pending", "profile_url": parsed.get("profile_url", text), "profile_slug": parsed.get("profile_slug", ""),
+            "masked_name": parsed["masked"], "account_type": parsed.get("account_type", "personal"),
+            "first2": parsed.get("first2", ""), "last2": parsed.get("last2", ""), "key": key,
+            "r10_months": int(parsed.get("months") or 0), "r10_trades": int(parsed.get("trades") or 0),
+            "iban_owner": "", "created_at": now(), "approved_at": "", "approved_by": "",
+        }
+        save_user_profile(uid)
+        add_admin_log("r10_verify_started", "R10 doğrulama başlatıldı", uid)
+        user_state.pop(uid, None)
+        if parsed.get("account_type") == "corporate":
+            send(chat_id, t(uid, "r10_corporate_key_sent", key=key), reply_keyboard(uid))
+        else:
+            send(chat_id, t(uid, "r10_key_sent", name=parsed["masked"], key=key), reply_keyboard(uid))
+        return
+
     if step == "set_pin":
         pin = text
         if not pin.isdigit() or not 4 <= len(pin) <= 6:
@@ -4932,6 +5100,8 @@ def handle_text(chat_id, username, text):
     if flow == "deposit" and step == "sender_name":
         if len(text) < 3 or not any(ch.isalpha() for ch in text):
             send(chat_id, t(uid, "sender_name_invalid")); return
+        if not validate_r10_name(uid, text):
+            send(chat_id, t(uid, "r10_name_mismatch")); return
         state["sender_name"] = text
         state["step"] = "tx_note"
         send(chat_id, t(uid, "reference_question")); return
@@ -4951,6 +5121,8 @@ def handle_text(chat_id, username, text):
     if flow == "withdraw" and step == "bank_name": state["bank_name"] = text; state["step"] = "iban"; send(chat_id, t(uid, "iban_question")); return
     if flow == "withdraw" and step == "iban": state["iban"] = text.replace(" ", "").upper(); state["step"] = "name"; send(chat_id, t(uid, "account_name_question")); return
     if flow == "withdraw" and step == "name":
+        if not validate_r10_name(uid, text):
+            send(chat_id, t(uid, "r10_name_mismatch")); return
         state["name"] = text
         state["preview"] = order_summary(t(uid, "withdraw_summary_tl"), [
             (t(uid, "amount"), ucoin(uid, state["amount"], state["asset"])),
@@ -5018,6 +5190,9 @@ def handle_callback(chat_id, username, data, cb_id):
         content = str(state.get("qr_content", "")).strip()
         if not content: send(chat_id, t(uid, "qr_missing")); return
         send_qr(chat_id, content, state.get("qr_caption", t(uid, "qr_caption"))); return
+    if data == "r10:start":
+        begin_r10_verification(chat_id)
+        return
     if data.startswith("detail:"):
         rid = data.split(":", 1)[1]
         if requests_db.get(rid, {}).get("user_id") == uid:
@@ -5027,6 +5202,9 @@ def handle_callback(chat_id, username, data, cb_id):
         asset = data.split(":", 1)[1]
         if asset not in ASSETS:
             send(chat_id, t(uid, "operation_failed"), reply_keyboard(uid))
+            return
+        if asset == "TL" and not r10_tl_ready(uid):
+            send(chat_id, r10_required_text(uid), {"inline_keyboard": [[inline_button(t(uid, "r10_verify"), "r10:start")], [inline_button(t(uid, "cancel"), "cancel")]]})
             return
         current = user_state.get(uid, {})
         idem = current.get("idempotency_key", secrets.token_urlsafe(24))
@@ -5074,6 +5252,9 @@ def handle_callback(chat_id, username, data, cb_id):
         return
     if data.startswith("withdraw_asset:"):
         asset = data.split(":", 1)[1]
+        if asset == "TL" and not r10_tl_ready(uid):
+            send(chat_id, r10_required_text(uid), {"inline_keyboard": [[inline_button(t(uid, "r10_verify"), "r10:start")], [inline_button(t(uid, "cancel"), "cancel")]]})
+            return
         available = balance(uid, asset)
         if available <= 0:
             send(chat_id, msg(uid, "no_balance"))
@@ -5270,6 +5451,7 @@ PANEL_PERMISSION_LABELS = {
     "pool": "Havuz ve sweep işlemleri",
     "requests": "İşlem talepleri",
     "users": "Kullanıcı yönetimi",
+    "approvals": "Kullanıcı onay menüsü",
     "broadcast": "Duyuru gönderme",
     "settings": "Ayar yönetimi",
     "logs": "Yönetim kayıtları",
@@ -5285,6 +5467,9 @@ ACTION_PERMISSIONS = {
     "reject_request": "requests",
     "adjust_balance": "users",
     "update_user_profile": "users",
+    "approve_r10_tl": "approvals",
+    "revoke_r10_tl": "approvals",
+    "request_r10_reverify": "approvals",
     "freeze_user": "users",
     "unfreeze_user": "users",
     "lock_withdraw": "users",
@@ -7208,6 +7393,15 @@ def render_user_management(uid):
         for t in txs
     ) or "<tr><td colspan='5' class='muted-cell'>Bakiye hareketi yok.</td></tr>"
 
+    r10 = u.get("r10_verification", {}) or {}
+    r10_status = r10.get("status") or "yok"
+    r10_action = ""
+    if r10.get("status") == "pending":
+        r10_action = (
+            f"<form method='post'><input type='hidden' name='user_id' value='{h(uid)}'>"
+            f"<input type='hidden' name='return_to' value='{return_to}'>"
+            f"<button class='btn primary' name='action' value='approve_r10_tl'>TL işlemlerini aç</button></form>"
+        )
     security_forms = []
     security_actions = [
         ("freeze_user", "Hesabı Dondur", "danger"),
@@ -7252,6 +7446,16 @@ def render_user_management(uid):
       </section>
     </div>
     <section class='panel-card compact-card'>
+      <div class='section-head'><div><span class='eyebrow'>R10</span><h3>TL Doğrulama</h3></div><p>Durum: {h(r10_status)}</p></div>
+      <div class='table-wrap'><table><tbody>
+        <tr><th>Profil</th><td>{('<a href="' + h(r10.get('profile_url')) + '" target="_blank">' + h(r10.get('profile_url')) + '</a>') if r10.get('profile_url') else '-'}</td></tr>
+        <tr><th>Gizli ad</th><td>{h(r10.get('masked_name') or '-')}</td></tr>
+        <tr><th>Key</th><td><b>{h(r10.get('key') or '-')}</b></td></tr>
+        <tr><th>Onay</th><td>{h(r10.get('approved_at') or '-')}</td></tr>
+      </tbody></table></div>
+      <div class='security-actions'>{r10_action}</div>
+    </section>
+    <section class='panel-card compact-card'>
       <div class='section-head'><div><span class='eyebrow'>GÜVENLİK</span><h3>Hesap Kontrolleri</h3></div><p>Çekim: {'Kilitli' if u.get('withdraw_locked') else 'Açık'} · PIN: {'Aktif' if u.get('pin_hash') else 'Ayarlanmamış'}</p></div>
       <div class='security-actions'>{''.join(security_forms)}</div>
     </section>
@@ -7260,6 +7464,26 @@ def render_user_management(uid):
       <section class='panel-card compact-card'><div class='section-head'><div><span class='eyebrow'>HAREKETLER</span><h3>Bakiye Defteri</h3></div></div><div class='table-wrap'><table><thead><tr><th>Tarih</th><th>İşlem</th><th>Tutar</th><th>Son bakiye</th><th>Not</th></tr></thead><tbody>{transaction_rows}</tbody></table></div></section>
     </div>
     """
+
+
+def render_r10_approval_menu():
+    rows = []
+    for uid, u in sorted(users.items(), key=lambda item: (item[1].get("r10_verification", {}) or {}).get("created_at", ""), reverse=True):
+        info = (u or {}).get("r10_verification", {}) or {}
+        if not info:
+            continue
+        owner_input = ""
+        if info.get("account_type") == "corporate" and info.get("status") == "pending":
+            owner_input = f"<input name='iban_owner' placeholder='Kurumsal IBAN ad soyad' required>"
+        actions = []
+        if info.get("status") == "pending":
+            actions.append(f"<form method='post' class='inline-form'><input type='hidden' name='action' value='approve_r10_tl'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='/admin?view=approvals'>{owner_input}<button class='btn primary'>Onayla</button></form>")
+        if info.get("status") == "approved":
+            actions.append(f"<form method='post' class='inline-form'><input type='hidden' name='action' value='revoke_r10_tl'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='/admin?view=approvals'><button class='btn danger'>Onayı kaldır</button></form>")
+            actions.append(f"<form method='post' class='inline-form'><input type='hidden' name='action' value='request_r10_reverify'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='/admin?view=approvals'><button class='btn ghost'>Yeniden doğrulama iste</button></form>")
+        rows.append(f"<tr><td>{h(uid)}<br><small>@{h(username_label(u.get('username')))}</small></td><td>{h(info.get('status') or '-')}</td><td>{h(info.get('account_type') or '-')}</td><td><a href='{h(info.get('profile_url') or '#')}' target='_blank'>{h(info.get('profile_slug') or info.get('profile_url') or '-')}</a></td><td>{h(info.get('masked_name') or '-')}<br><small>{h(str(info.get('r10_months', 0)))} ay · {h(str(info.get('r10_trades', 0)))} trade</small></td><td><b>{h(info.get('key') or '-')}</b><br><small>{h(info.get('iban_owner') or '-')}</small></td><td>{h(info.get('approved_by') or '-')}<br><small>{h(info.get('approved_at') or '-')}</small></td><td><div class='security-actions'>{''.join(actions)}</div></td></tr>")
+    body = ''.join(rows) or "<tr><td colspan='8' class='muted-cell'>R10 doğrulama kaydı yok.</td></tr>"
+    return f"<section class='surface'><div class='surface-head'><div><span>R10</span><h3>Kullanıcı onay menüsü</h3></div><small>PM key kontrolünden sonra manuel onay verin.</small></div><div class='table-wrap'><table><thead><tr><th>Kullanıcı</th><th>Durum</th><th>Tip</th><th>Profil</th><th>Bilgi</th><th>Key / IBAN adı</th><th>Onay</th><th>İşlem</th></tr></thead><tbody>{body}</tbody></table></div></section>"
 
 
 def permission_options(selected_permissions):
@@ -7473,6 +7697,53 @@ def admin():
                 set_admin_notice("Kullanıcı profili kaydedildi.")
             else:
                 set_admin_notice("Kullanıcı bulunamadı.", "error")
+        elif action == "approve_r10_tl":
+            uid = request.form.get("user_id", "")
+            if uid in users and users[uid].get("r10_verification", {}).get("status") == "pending":
+                info = users[uid]["r10_verification"]
+                if r10_profile_used_by(info.get("profile_slug"), uid):
+                    set_admin_notice("Bu r10 profili başka hesaba bağlı.", "error")
+                else:
+                    iban_owner = normalize_person_name(request.form.get("iban_owner", "")) if info.get("account_type") == "corporate" else ""
+                    if info.get("account_type") == "corporate" and len(_name_parts(iban_owner)) < 2:
+                        set_admin_notice("Kurumsal hesap için IBAN ad soyad zorunlu.", "error")
+                    elif iban_owner and r10_iban_owner_used_by(iban_owner, uid):
+                        set_admin_notice("Bu IBAN ad soyad başka hesapta kayıtlı.", "error")
+                    else:
+                        info["status"] = "approved"
+                        info["approved_at"] = now()
+                        info["approved_by"] = current_panel_username()
+                        if iban_owner:
+                            info["iban_owner"] = iban_owner
+                        save_user_profile(uid)
+                        add_admin_log("approve_r10_tl", f"R10 TL doğrulaması onaylandı · {info.get('profile_slug','')}", uid)
+                        set_admin_notice("TL işlemleri açıldı.")
+            else:
+                set_admin_notice("Onay bekleyen R10 doğrulaması yok.", "error")
+        elif action == "revoke_r10_tl":
+            uid = request.form.get("user_id", "")
+            if uid in users and users[uid].get("r10_verification"):
+                users[uid]["r10_verification"]["status"] = "revoked"
+                users[uid]["r10_verification"]["revoked_at"] = now()
+                users[uid]["r10_verification"]["revoked_by"] = current_panel_username()
+                save_user_profile(uid)
+                add_admin_log("revoke_r10_tl", "R10 TL onayı kaldırıldı", uid)
+                set_admin_notice("TL onayı kaldırıldı.")
+            else:
+                set_admin_notice("R10 doğrulama kaydı yok.", "error")
+        elif action == "request_r10_reverify":
+            uid = request.form.get("user_id", "")
+            if uid in users:
+                users[uid]["r10_verification"] = {"status": "reverify_required", "requested_at": now(), "requested_by": current_panel_username()}
+                save_user_profile(uid)
+                add_admin_log("request_r10_reverify", "Yeniden R10 doğrulama istendi", uid)
+                try:
+                    send(uid, "TL işlemleri için yeniden R10 doğrulaması yapmanız gerekiyor.", reply_keyboard(uid))
+                except Exception:
+                    pass
+                set_admin_notice("Yeniden doğrulama istendi.")
+            else:
+                set_admin_notice("Kullanıcı bulunamadı.", "error")
         elif action in ("freeze_user", "unfreeze_user", "lock_withdraw", "unlock_withdraw"):
             uid = request.form.get("user_id", "")
             if uid in users:
@@ -7650,10 +7921,11 @@ def admin():
         ("pool", "Havuz & Sweep", "02", "Operasyon"),
         ("requests", "İşlem Talepleri", "03", "Operasyon"),
         ("users", "Kullanıcılar", "04", "Yönetim"),
-        ("broadcast", "Duyurular", "05", "Yönetim"),
-        ("settings", "Sistem Ayarları", "06", "Sistem"),
-        ("logs", "Denetim Kayıtları", "07", "Sistem"),
-        ("admins", "Yetkililer", "08", "Sistem"),
+        ("approvals", "Kullanıcı Onay", "05", "Yönetim"),
+        ("broadcast", "Duyurular", "06", "Yönetim"),
+        ("settings", "Sistem Ayarları", "07", "Sistem"),
+        ("logs", "Denetim Kayıtları", "08", "Sistem"),
+        ("admins", "Yetkililer", "09", "Sistem"),
     ]
     nav_parts = []
     last_group = None
@@ -7718,6 +7990,11 @@ def admin():
       <div id='user-management-result' class='user-result'>{render_user_management(manage_user_id)}</div>
       <section class='surface'><div class='surface-head'><div><span>SON AKTİVİTE</span><h3>Yakın zamanda görülen kullanıcılar</h3></div><small>Son 25 kayıt</small></div><div class='table-wrap'><table><thead><tr><th>Kullanıcı ID</th><th>Kullanıcı adı</th><th>TL</th><th>USDT</th><th>TRX</th><th>Hesap</th><th>Son görülme</th></tr></thead><tbody>{user_rows}</tbody></table></div></section>
     </section>""" if "users" in allowed_views else ""
+
+    approvals_section = f"""<section class='page-view {'active' if active_view == 'approvals' else ''}' data-view='approvals'>
+      <div class='page-heading'><div><span>R10 VE TL ERİŞİMİ</span><h2>Kullanıcı onay menüsü</h2><p>R10 profili, key ve IBAN adı kontrolünü buradan yönetin.</p></div></div>
+      {render_r10_approval_menu()}
+    </section>""" if "approvals" in allowed_views else ""
 
     broadcast_section = f"""<section class='page-view {'active' if active_view == 'broadcast' else ''}' data-view='broadcast'>
       <div class='page-heading'><div><span>KULLANICI İLETİŞİMİ</span><h2>Duyuru merkezi</h2><p>Bildirim izni açık kullanıcılara kontrollü toplu mesaj gönderin.</p></div></div>
@@ -7815,7 +8092,7 @@ def admin():
         <div class='sidebar-footer'><div class='operator'><div class='operator-avatar'>{h(current_panel_username()[:1].upper() or 'N')}</div><div><strong>{h(current_panel_username())}</strong><small>Yetkili operasyon hesabı</small></div></div><a class='signout' href='/logout'>Güvenli çıkış yap</a></div>
       </aside>
       <section class='workspace'><header class='topbar'><div class='topbar-left'><button id='menu-toggle' class='menu-toggle' type='button'>☰</button><div class='breadcrumbs'><span>NERLO / OPERASYON</span><h1 id='page-title'>{h(active_title)}</h1></div></div><div class='system-health'><span class='health-chip'><i></i>Ledger aktif</span><span class='health-chip {'warn' if not signer_online else ''}'><i></i>{'Signer bağlı' if signer_online else 'Signer bekliyor'}</span><span class='health-chip'><i></i>Çevrim içi</span></div></header>
-        <main class='content'>{dashboard_section}{pool_section}{requests_section}{users_section}{broadcast_section}{settings_section}{logs_section}{admins_section}</main>
+        <main class='content'>{dashboard_section}{pool_section}{requests_section}{users_section}{approvals_section}{broadcast_section}{settings_section}{logs_section}{admins_section}</main>
       </section>
     </div><script>{panel_script}</script></body></html>"""
 
