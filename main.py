@@ -16,7 +16,12 @@ import uuid
 import socket
 import traceback
 import unicodedata
-from urllib.parse import urlparse
+import sys
+import subprocess
+import importlib
+import glob
+from urllib.parse import urlparse, urljoin
+from html.parser import HTMLParser
 from collections import defaultdict, deque
 from datetime import datetime, date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
@@ -56,7 +61,32 @@ WALLET_SCAN_SECONDS = max(30, int(os.getenv("WALLET_SCAN_SECONDS", "60")))
 R10_FETCH_HARD_TIMEOUT = max(10, min(60, int(os.getenv("R10_FETCH_HARD_TIMEOUT", "25"))))
 R10_KEY_VALID_HOURS = 24
 R10_KEY_EXPIRY_SCAN_SECONDS = max(60, int(os.getenv("R10_KEY_EXPIRY_SCAN_SECONDS", "60")))
-R10_CONTACT_PROFILE_URL = "https://www.r10.net/profil/212516-sorrymama.html"
+
+# R10 private-message auto verification. Login secrets remain only in the
+# hosting provider's secret variables and are never written to PostgreSQL/logs.
+R10_AUTO_KEY_ENABLED = os.getenv("R10_AUTO_KEY_ENABLED", "1").strip() == "1"
+R10_ACCOUNT_EMAIL = os.getenv("R10_ACCOUNT_EMAIL", "").strip()
+# Backward compatibility: an old R10_ACCOUNT_USERNAME value may still be used
+# as the login identity. New installations should enter R10_ACCOUNT_EMAIL.
+R10_ACCOUNT_USERNAME = os.getenv("R10_ACCOUNT_USERNAME", "").strip()
+R10_LOGIN_IDENTITY = R10_ACCOUNT_EMAIL or R10_ACCOUNT_USERNAME
+R10_ACCOUNT_PASSWORD = os.getenv("R10_ACCOUNT_PASSWORD", "")
+R10_ACCOUNT_TOTP_SECRET = os.getenv("R10_ACCOUNT_TOTP_SECRET", "").strip()
+R10_WEB_BASE_URL = os.getenv("R10_WEB_BASE_URL", "https://www.r10.net").strip().rstrip("/")
+R10_CONTACT_PROFILE_URL = os.getenv("R10_CONTACT_PROFILE_URL", "").strip() or "https://www.r10.net/profil/212516-sorrymama.html"
+R10_LOGIN_URL = os.getenv("R10_LOGIN_URL", "").strip() or f"{R10_WEB_BASE_URL}/"
+R10_INBOX_URL = os.getenv("R10_INBOX_URL", "").strip()
+R10_AUTO_KEY_POLL_SECONDS = max(60, int(os.getenv("R10_AUTO_KEY_POLL_SECONDS", "60")))
+R10_AUTO_MAX_THREADS = max(5, min(100, int(os.getenv("R10_AUTO_MAX_THREADS", "30"))))
+R10_AUTO_HTTP_TIMEOUT = max(10, min(60, int(os.getenv("R10_AUTO_HTTP_TIMEOUT", "25"))))
+# A normal Chromium browser is used so JavaScript-based Cloudflare checks can
+# finish naturally. No CAPTCHA solving or security-check bypass is attempted.
+R10_AUTO_BROWSER_ENABLED = os.getenv("R10_AUTO_BROWSER_ENABLED", "1").strip() == "1"
+R10_BROWSER_HEADLESS = os.getenv("R10_BROWSER_HEADLESS", "1").strip() == "1"
+R10_BROWSER_AUTO_INSTALL = os.getenv("R10_BROWSER_AUTO_INSTALL", "1").strip() == "1"
+R10_CLOUDFLARE_WAIT_SECONDS = max(10, min(90, int(os.getenv("R10_CLOUDFLARE_WAIT_SECONDS", "35"))))
+R10_BROWSER_INSTALL_TIMEOUT = max(120, min(900, int(os.getenv("R10_BROWSER_INSTALL_TIMEOUT", "600"))))
+R10_AUTO_KEY_CONFIGURED = bool(R10_AUTO_KEY_ENABLED and R10_LOGIN_IDENTITY and R10_ACCOUNT_PASSWORD)
 
 # Exchange core / blockchain infrastructure
 EXCHANGE_MODE = os.getenv("EXCHANGE_MODE", "on").strip().lower() == "on"
@@ -122,12 +152,12 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-26-R10-BIRTHDAY-REMOVED-V27"
-PANEL_RELEASE = "NERLO-CONTROL-CENTER-V19-R10-BIRTHDAY-REMOVED"
+BUILD_VERSION = "NERLO-2026-06-26-R10-BROWSER-AUTO-LOGIN-V29"
+PANEL_RELEASE = "NERLO-CONTROL-CENTER-V21-R10-BROWSER-AUTO"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
 SWEEP_RELEASE = "TRON-HD-DEPOSIT-SWEEP-V1"
-SOURCE_BASE_SHA256 = "16e7694b70fbce6a88c271675bb5832ddd503d05b4a92e76c77fdffa3c4c9d45"
+SOURCE_BASE_SHA256 = "ff98736b04ddb34beca2a5848380510a71dc08540d8421cd0a93ba84cb0d0ade"
 
 CONFIRMATION_THRESHOLDS = {
     "BTC": max(1, int(os.getenv("BTC_CONFIRMATIONS", "3"))),
@@ -404,6 +434,21 @@ def init_database():
         ON signer_sweeps (source_address, asset, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_signer_sweeps_funding_txid
         ON signer_sweeps (funding_txid) WHERE funding_txid<>'';
+
+    CREATE TABLE IF NOT EXISTS r10_auto_messages (
+        message_fingerprint TEXT PRIMARY KEY,
+        sender_slug TEXT NOT NULL DEFAULT '',
+        key_hash TEXT NOT NULL DEFAULT '',
+        user_id TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'processing',
+        detail TEXT NOT NULL DEFAULT '',
+        source_url_hash TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        processed_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_r10_auto_messages_status_updated
+        ON r10_auto_messages (status, updated_at DESC);
     """
     with _db_connect() as conn:
         with conn.cursor() as cur:
@@ -3084,6 +3129,9 @@ def exchange_health_snapshot():
             cur.execute("SELECT meta_value FROM exchange_meta WHERE meta_key='tron-pool-snapshot'")
             pool_row = cur.fetchone()
             pool_snapshot = dict(pool_row[0] or {}) if pool_row else {}
+            cur.execute("SELECT meta_value FROM exchange_meta WHERE meta_key='r10-auto-key-status'")
+            r10_auto_row = cur.fetchone()
+            r10_auto_snapshot = dict(r10_auto_row[0] or {}) if r10_auto_row else {}
     return {
         "build_version": BUILD_VERSION,
         "panel_release": PANEL_RELEASE,
@@ -3107,6 +3155,11 @@ def exchange_health_snapshot():
         "jobs": jobs,
         "sweeps": sweeps,
         "tron_pool": pool_snapshot,
+        "r10_auto_key": {
+            "enabled": bool(R10_AUTO_KEY_ENABLED),
+            "configured": bool(R10_AUTO_KEY_CONFIGURED),
+            "status": r10_auto_snapshot,
+        },
         "reconciliation": reconciliation,
         "withdraw_guard": {
             "enabled": True,
@@ -3127,6 +3180,18 @@ def validate_runtime_config():
         raise RuntimeError("DATABASE_URL tanımlı değil")
     if len(app.secret_key) < 32:
         raise RuntimeError("FLASK_SECRET_KEY en az 32 karakter olmalıdır")
+
+    if bool(R10_LOGIN_IDENTITY) != bool(R10_ACCOUNT_PASSWORD):
+        raise RuntimeError("R10 otomatik kontrol için e-posta ve parola birlikte girilmelidir")
+    if R10_AUTO_KEY_CONFIGURED:
+        for variable_name, value in (("R10_WEB_BASE_URL", R10_WEB_BASE_URL), ("R10_LOGIN_URL", R10_LOGIN_URL)):
+            parsed_r10_url = urlparse(value)
+            if parsed_r10_url.scheme != "https" or parsed_r10_url.hostname not in ("r10.net", "www.r10.net"):
+                raise RuntimeError(f"{variable_name} güvenli bir r10.net HTTPS adresi olmalıdır")
+        if R10_INBOX_URL:
+            parsed_r10_inbox = urlparse(R10_INBOX_URL)
+            if parsed_r10_inbox.scheme != "https" or parsed_r10_inbox.hostname not in ("r10.net", "www.r10.net"):
+                raise RuntimeError("R10_INBOX_URL güvenli bir r10.net HTTPS adresi olmalıdır")
 
     if SERVICE_ROLE == "signer":
         if len(WITHDRAW_SIGNER_TOKEN) < 32:
@@ -3506,6 +3571,213 @@ BOT_TEXTS = {
     },
 }
 
+
+# Sade, doğrudan ve tutarlı kullanıcı mesajları.
+PROFESSIONAL_DEFAULT_MESSAGES_TR = {
+    "welcome": "Nerlo Wallet'a hoş geldiniz. Bir işlem seçin.",
+    "wallet_title": "Cüzdan Bakiyeleri",
+    "deposit_menu": "Yüklemek istediğiniz varlığı seçin.",
+    "withdraw_menu": "Çekmek istediğiniz varlığı seçin.",
+    "convert_menu": "Dönüştürülebilir bakiyenizi seçin.",
+    "amount_question": "Tutarı girin.",
+    "pin_question": "İşlem PIN'inizi girin.",
+    "pin_set_question": "4-6 haneli bir işlem PIN'i oluşturun.",
+    "pin_wrong": "PIN hatalı. Tekrar deneyin.",
+    "pin_saved": "İşlem PIN'iniz kaydedildi.",
+    "pin_changed": "İşlem PIN'iniz değiştirildi. Diğer oturumlar kapatıldı.",
+    "insufficient_balance": "Yeterli bakiyeniz yok.",
+    "no_balance": "Kullanılabilir bakiye bulunmuyor.",
+    "request_created": "Talebiniz alındı.",
+    "request_cancelled": "İşlem iptal edildi.",
+    "support": "Destek için yöneticiyle iletişime geçin.",
+    "history_empty": "Henüz işleminiz bulunmuyor.",
+    "iban_warning": "Ödeme açıklamasına göndericinin T.C. kimlik numarasını yazın. Eksik ödemeler işleme alınmayabilir.",
+    "maintenance": "Sistem kısa süreli bakımda. Daha sonra tekrar deneyin.",
+    "frozen": "Hesabınız geçici olarak kısıtlandı. Destekle iletişime geçin.",
+    "withdraw_locked": "Para çekme işlemleriniz geçici olarak kapalı.",
+    "deposit_crypto_intro": "Yalnızca belirtilen ağı kullanın. Yanlış ağdaki transferler kaybolabilir.",
+    "deposit_received": "Yükleme bildiriminiz alındı. Onaydan sonra bakiyenize eklenecek.",
+    "r10_key_created_personal": "{hitap}, R10 profiliniz kontrol edildi.\n\nAşağıdaki Key'i 24 saat içinde NerloWallet R10 hesabına özel mesajla gönderin. Sistem mesajı otomatik kontrol eder.\n\nKey: {key}\nGeçerlilik: {expires_at}",
+    "r10_key_created_corporate": "{hitap}, kurumsal R10 profiliniz kontrol edildi.\n\nAşağıdaki bilgileri 24 saat içinde NerloWallet R10 hesabına özel mesajla gönderin. Sistem mesajı otomatik kontrol eder.\n\nKey: {key}\nIBAN sahibi: Ad Soyad\nGeçerlilik: {expires_at}",
+    "r10_key_sent_confirmation": "R10 mesajınız kontrol sırasına alındı. Sonuç size bildirilecek.",
+    "r10_pending_professional": "R10 mesajınız kontrol ediliyor.",
+    "r10_approved": "{hitap}, R10 doğrulamanız tamamlandı. TL işlemleri açıldı.",
+    "r10_rejected": "{hitap}, R10 doğrulamanız tamamlanamadı.\n\nNeden: {reason}",
+    "r10_reverify": "{hitap}, R10 doğrulamasını yenilemeniz gerekiyor.\n\nNeden: {reason}",
+    "r10_revoked": "{hitap}, R10 onayınız kaldırıldı. TL işlemleri kapatıldı.\n\nNeden: {reason}",
+    "r10_expired": "{hitap}, R10 doğrulama Key'inizin süresi doldu. Yeni doğrulama başlatın.",
+}
+
+PROFESSIONAL_DEFAULT_MESSAGES_EN = {
+    "welcome": "Welcome to Nerlo Wallet. Select an action.",
+    "wallet_title": "Wallet Balances",
+    "deposit_menu": "Select the asset to deposit.",
+    "withdraw_menu": "Select the asset to withdraw.",
+    "convert_menu": "Select an available balance to convert.",
+    "amount_question": "Enter the amount.",
+    "pin_question": "Enter your transaction PIN.",
+    "pin_set_question": "Create a 4-6 digit transaction PIN.",
+    "pin_wrong": "The PIN is incorrect. Try again.",
+    "pin_saved": "Your transaction PIN was saved.",
+    "pin_changed": "Your transaction PIN was changed. Other sessions were closed.",
+    "insufficient_balance": "You do not have enough balance.",
+    "no_balance": "No available balance was found.",
+    "request_created": "Your request was received.",
+    "request_cancelled": "The transaction was cancelled.",
+    "support": "Contact the administrator for support.",
+    "history_empty": "You do not have any transactions yet.",
+    "iban_warning": "Add the sender's Turkish ID number to the payment description. Incomplete payments may not be processed.",
+    "maintenance": "The system is under short maintenance. Try again later.",
+    "frozen": "Your account is temporarily restricted. Contact support.",
+    "withdraw_locked": "Withdrawals are temporarily disabled.",
+    "deposit_crypto_intro": "Use only the stated network. Transfers on the wrong network may be lost.",
+    "deposit_received": "Your deposit notice was received. It will be credited after approval.",
+    "r10_key_created_personal": "{hitap}, your R10 profile was checked.\n\nSend the Key below to the NerloWallet R10 account by private message within 24 hours. The message is checked automatically.\n\nKey: {key}\nExpires: {expires_at}",
+    "r10_key_created_corporate": "{hitap}, your corporate R10 profile was checked.\n\nSend the details below to the NerloWallet R10 account by private message within 24 hours. The message is checked automatically.\n\nKey: {key}\nIBAN holder: Full Name\nExpires: {expires_at}",
+    "r10_key_sent_confirmation": "Your R10 message was queued for checking. You will be notified of the result.",
+    "r10_pending_professional": "Your R10 message is being checked.",
+    "r10_approved": "{hitap}, your R10 verification is complete. TRY transactions are enabled.",
+    "r10_rejected": "{hitap}, your R10 verification could not be completed.\n\nReason: {reason}",
+    "r10_reverify": "{hitap}, you need to renew your R10 verification.\n\nReason: {reason}",
+    "r10_revoked": "{hitap}, your R10 approval was revoked. TRY transactions are disabled.\n\nReason: {reason}",
+    "r10_expired": "{hitap}, your R10 verification Key expired. Start a new verification.",
+}
+
+PROFESSIONAL_BOT_TEXTS_TR = {
+    "choose_language": "Kullanmak istediğiniz dili seçin.\n\nSelect your preferred language.",
+    "language_saved": "Dil Türkçe olarak kaydedildi.",
+    "menu_prompt": "Bir işlem seçin.",
+    "not_found": "Kayıt bulunamadı.",
+    "completed": "İşlem tamamlandı.",
+    "confirm_question": "İşlemi onaylıyor musunuz?",
+    "no_saved_address": "Kayıtlı adres bulunmuyor.",
+    "pin_digits": "PIN 4-6 rakamdan oluşmalıdır.",
+    "repeat_pin": "Yeni PIN'i tekrar girin.",
+    "pin_mismatch": "PIN'ler eşleşmedi. İşlemi yeniden başlatın.",
+    "new_pin": "Yeni işlem PIN'inizi girin.",
+    "pin_locked": "Üç hatalı deneme nedeniyle para çekme işlemleri geçici olarak kilitlendi.",
+    "valid_amount": "Geçerli bir tutar girin.",
+    "insufficient": "Yetersiz bakiye",
+    "daily_limit": "Günlük çekim limitiniz aşılıyor. Kalan limit: {amount}",
+    "bank_unavailable": "TL yükleme bilgileri şu anda kullanılamıyor. Daha sonra tekrar deneyin.",
+    "bank_name_question": "Banka adını girin.",
+    "iban_question": "IBAN'ı girin.",
+    "account_name_question": "Hesap sahibinin adını ve soyadını girin.",
+    "wallet_address_question": "Alıcı cüzdan adresini girin.",
+    "withdraw_address_select": "Çekim adresini seçin.",
+    "enter_new_address": "Yeni adres gir",
+    "all_balance_note": "Kullanılabilir bakiyenin tamamı dönüştürülecek.",
+    "rate_note": "Kur, son onayda yeniden hesaplanır. Kurlar 15 dakikada bir yenilenir.{updated}",
+    "sender_name_question": "Ödemeyi yapan kişinin adını ve soyadını girin.",
+    "sender_name_invalid": "Geçerli bir ad ve soyad girin.",
+    "reference_question": "Ödeme açıklamasını veya dekont referansını girin. Yoksa YOK yazın.",
+    "deposit_session_missing": "Yükleme oturumu bulunamadı. İşlemi yeniden başlatın.",
+    "session_missing": "İşlem oturumu bulunamadı. Yeniden başlayın.",
+    "qr_missing": "QR bilgisi bulunamadı.",
+    "available_balance": "Kullanılabilir bakiye",
+    "convert_available": "Kullanılabilir: {amount}",
+    "enter_or_all": "Tutarı girin veya tüm bakiyeyi seçin.",
+    "convert_session_missing": "Dönüşüm oturumu bulunamadı. Yeniden başlayın.",
+    "invalid_rate": "Kur bilgisi alınamadı. Daha sonra tekrar deneyin.",
+    "invalid_fee": "Komisyon bilgisi geçersiz.",
+    "invalid_net": "İşlem sonrası geçerli tutar oluşmadı.",
+    "already_confirmed": "Bu onay daha önce kullanıldı.",
+    "missing_convert": "Dönüşüm bilgileri eksik. İşlemi yeniden başlatın.",
+    "nothing_to_confirm": "Onaylanacak işlem bulunamadı.",
+    "operation_failed": "İşlem tamamlanamadı. Tekrar deneyin.",
+    "favorite_asset": "Adresin varlığını seçin.",
+    "favorite_label": "Adres için bir ad girin.",
+    "favorite_address": "Cüzdan adresini girin.",
+    "favorite_saved": "Adres kaydedildi.",
+    "current_pin": "Mevcut işlem PIN'inizi girin.",
+    "notifications_edit": "Bildirim tercihlerinizi seçin.",
+    "notification_updated": "Bildirim tercihi güncellendi.",
+    "sessions_closed": "Diğer oturumlar kapatıldı.",
+    "deposit_pending_title": "Yükleme bildirimi alındı",
+    "request_rejected": "İşleminiz reddedildi.",
+    "r10_link_question": "R10 profil bağlantınızı gönderin.",
+    "r10_invalid_link": "Geçerli bir r10.net profil bağlantısı gönderin.",
+    "r10_fetch_failed": "R10 profili okunamadı. Bağlantıyı kontrol edip tekrar deneyin.",
+    "r10_trade_unavailable": "R10 ticaret bilgisi okunamadı. Daha sonra tekrar deneyin.",
+    "r10_checking": "R10 profili kontrol ediliyor.",
+    "r10_hidden_name": "R10 profilinizde ad-soyad görünürlüğünü açıp tekrar deneyin.",
+    "r10_duplicate": "Bu R10 profili başka bir Telegram hesabına bağlı.",
+    "r10_rules_failed": "Bireysel hesap için en az 6 aylık üyelik ve 5 ticaret gerekir.",
+    "r10_pending": "R10 doğrulamanız kontrol ediliyor.",
+    "r10_required": "TL işlemleri için R10 doğrulaması gerekir.",
+    "r10_name_mismatch": "Ad-soyad R10 profilinizle eşleşmiyor.",
+}
+
+PROFESSIONAL_BOT_TEXTS_EN = {
+    "choose_language": "Select your preferred language.\n\nKullanmak istediğiniz dili seçin.",
+    "language_saved": "Language saved as English.",
+    "menu_prompt": "Select an action.",
+    "not_found": "No record was found.",
+    "completed": "Transaction completed.",
+    "confirm_question": "Do you confirm this transaction?",
+    "no_saved_address": "No saved address was found.",
+    "pin_digits": "The PIN must contain 4-6 digits.",
+    "repeat_pin": "Enter the new PIN again.",
+    "pin_mismatch": "The PINs do not match. Restart the transaction.",
+    "new_pin": "Enter your new transaction PIN.",
+    "pin_locked": "Withdrawals were temporarily locked after three failed attempts.",
+    "valid_amount": "Enter a valid amount.",
+    "insufficient": "Insufficient balance",
+    "daily_limit": "This exceeds your daily withdrawal limit. Remaining: {amount}",
+    "bank_unavailable": "TRY deposit details are unavailable. Try again later.",
+    "bank_name_question": "Enter the bank name.",
+    "iban_question": "Enter the IBAN.",
+    "account_name_question": "Enter the account holder's full name.",
+    "wallet_address_question": "Enter the recipient wallet address.",
+    "withdraw_address_select": "Select the withdrawal address.",
+    "enter_new_address": "Enter a new address",
+    "all_balance_note": "The full available balance will be converted.",
+    "rate_note": "The rate is recalculated at final approval. Rates refresh every 15 minutes.{updated}",
+    "sender_name_question": "Enter the payer's full name.",
+    "sender_name_invalid": "Enter a valid full name.",
+    "reference_question": "Enter the payment description or receipt reference. Enter NONE if unavailable.",
+    "deposit_session_missing": "The deposit session was not found. Restart the transaction.",
+    "session_missing": "The transaction session was not found. Start again.",
+    "qr_missing": "QR information was not found.",
+    "available_balance": "Available balance",
+    "convert_available": "Available: {amount}",
+    "enter_or_all": "Enter an amount or select the full balance.",
+    "convert_session_missing": "The conversion session was not found. Start again.",
+    "invalid_rate": "Rate information is unavailable. Try again later.",
+    "invalid_fee": "The fee information is invalid.",
+    "invalid_net": "No valid amount remains after the transaction.",
+    "already_confirmed": "This approval was already used.",
+    "missing_convert": "Conversion details are missing. Restart the transaction.",
+    "nothing_to_confirm": "There is no transaction to confirm.",
+    "operation_failed": "The transaction could not be completed. Try again.",
+    "favorite_asset": "Select the asset for this address.",
+    "favorite_label": "Enter a name for this address.",
+    "favorite_address": "Enter the wallet address.",
+    "favorite_saved": "Address saved.",
+    "current_pin": "Enter your current transaction PIN.",
+    "notifications_edit": "Select your notification preferences.",
+    "notification_updated": "Notification preference updated.",
+    "sessions_closed": "Other sessions were closed.",
+    "deposit_pending_title": "Deposit notice received",
+    "request_rejected": "Your transaction was rejected.",
+    "r10_link_question": "Send your R10 profile link.",
+    "r10_invalid_link": "Send a valid r10.net profile link.",
+    "r10_fetch_failed": "The R10 profile could not be read. Check the link and try again.",
+    "r10_trade_unavailable": "R10 trade details could not be read. Try again later.",
+    "r10_checking": "Checking the R10 profile.",
+    "r10_hidden_name": "Make your full name visible on R10 and try again.",
+    "r10_duplicate": "This R10 profile is linked to another Telegram account.",
+    "r10_rules_failed": "Personal accounts require at least 6 months of membership and 5 trades.",
+    "r10_pending": "Your R10 verification is being checked.",
+    "r10_required": "R10 verification is required for TRY transactions.",
+    "r10_name_mismatch": "The full name does not match your R10 profile.",
+}
+
+DEFAULT_MESSAGES.update(PROFESSIONAL_DEFAULT_MESSAGES_TR)
+EN_MESSAGES.update(PROFESSIONAL_DEFAULT_MESSAGES_EN)
+BOT_TEXTS["tr"].update(PROFESSIONAL_BOT_TEXTS_TR)
+BOT_TEXTS["en"].update(PROFESSIONAL_BOT_TEXTS_EN)
+
 MENU_ACTIONS = {
     "Cüzdanım": "wallet", "My Wallet": "wallet",
     "Bakiye Yükle": "deposit", "Deposit": "deposit",
@@ -3717,6 +3989,10 @@ if not str(settings.get("wallet_XMR", "")).strip():
     settings["wallet_XMR"] = DEFAULT_SETTINGS["wallet_XMR"]
 for k, v in DEFAULT_MESSAGES.items():
     messages.setdefault(k, v)
+BOT_MESSAGE_PRESET_VERSION = "2026-06-26-simple-professional-v28"
+if settings.get("_bot_message_preset_version") != BOT_MESSAGE_PRESET_VERSION:
+    messages.update(DEFAULT_MESSAGES)
+    settings["_bot_message_preset_version"] = BOT_MESSAGE_PRESET_VERSION
 rank_data_removed = False
 for existing_user in users.values():
     if "tier" in existing_user:
@@ -4985,6 +5261,915 @@ def _r10_other_profiles(cur, uid):
     return [(str(other_uid), dict(profile or {})) for other_uid, profile in cur.fetchall()]
 
 
+class _R10HTMLCollector(HTMLParser):
+    """Small dependency-free HTML collector for R10 login and inbox pages."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.forms = []
+        self.links = []
+        self.text_parts = []
+        self._form = None
+        self._link = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = {str(key).lower(): str(value or "") for key, value in attrs}
+        tag = str(tag).lower()
+        if tag == "form":
+            self._form = {
+                "action": attrs.get("action", ""),
+                "method": attrs.get("method", "post").lower(),
+                "inputs": [],
+                "text": [],
+            }
+            self.forms.append(self._form)
+        elif tag in ("input", "textarea", "select") and self._form is not None:
+            self._form["inputs"].append({
+                "name": attrs.get("name", ""),
+                "type": attrs.get("type", tag).lower(),
+                "value": attrs.get("value", ""),
+            })
+        elif tag == "a":
+            self._link = {"href": attrs.get("href", ""), "text": []}
+            self.links.append(self._link)
+
+    def handle_endtag(self, tag):
+        tag = str(tag).lower()
+        if tag == "form":
+            self._form = None
+        elif tag == "a":
+            self._link = None
+
+    def handle_data(self, data):
+        value = str(data or "")
+        if not value:
+            return
+        self.text_parts.append(value)
+        if self._form is not None:
+            self._form["text"].append(value)
+        if self._link is not None:
+            self._link["text"].append(value)
+
+
+def _r10_collect_html(html):
+    parser = _R10HTMLCollector()
+    try:
+        parser.feed(str(html or ""))
+    except Exception:
+        pass
+    return parser
+
+
+def _r10_web_challenge(html):
+    lowered = str(html or "").casefold()
+    markers = (
+        "cf-chl-", "challenge-platform", "just a moment", "attention required",
+        'name="captcha"', "name='captcha'", 'id="captcha"', "id='captcha'",
+        "güvenlik doğrulaması", "guvenlik dogrulamasi", "robot olmadığınızı",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+# Playwright is loaded only when R10 automatic checking is enabled. On a fresh
+# Railway container, the fixed Chromium runtime can be installed automatically.
+_r10_browser_driver = None
+_r10_browser = None
+_r10_browser_context = None
+_r10_browser_page = None
+_r10_browser_inbox_url = ""
+_r10_browser_lock = threading.RLock()
+
+
+def _r10_playwright_command(args, timeout):
+    completed = subprocess.run(
+        [sys.executable, "-m", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=timeout,
+        check=False,
+        env={**os.environ, "PIP_DISABLE_PIP_VERSION_CHECK": "1"},
+    )
+    if completed.returncode != 0:
+        detail = re.sub(r"\s+", " ", completed.stdout or "").strip()[-800:]
+        raise RuntimeError(f"R10 tarayıcı kurulumu başarısız: {detail or completed.returncode}")
+
+
+def _r10_sync_playwright_factory():
+    try:
+        from playwright.sync_api import sync_playwright
+        return sync_playwright
+    except ImportError:
+        if not R10_BROWSER_AUTO_INSTALL:
+            raise RuntimeError("Playwright bulunamadı; R10 tarayıcı kurulumu kapalı")
+        _r10_playwright_command(
+            ["pip", "install", "--no-input", "--no-cache-dir", "playwright==1.57.0"],
+            R10_BROWSER_INSTALL_TIMEOUT,
+        )
+        importlib.invalidate_caches()
+        try:
+            from playwright.sync_api import sync_playwright
+            return sync_playwright
+        except ImportError as exc:
+            raise RuntimeError("Playwright kurulmasına rağmen yüklenemedi") from exc
+
+
+def _r10_launch_playwright_browser():
+    global _r10_browser_driver, _r10_browser, _r10_browser_context, _r10_browser_page
+    factory = _r10_sync_playwright_factory()
+    _r10_browser_driver = factory().start()
+    launch_args = ["--disable-dev-shm-usage"]
+    launch_options = {"headless": R10_BROWSER_HEADLESS, "args": launch_args}
+    bundled_executable = str(getattr(_r10_browser_driver.chromium, "executable_path", "") or "")
+    executable_candidates = [bundled_executable]
+    executable_candidates.extend(glob.glob(os.path.expanduser("~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome")))
+    executable_candidates.extend(glob.glob(os.path.expanduser("~/.cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-linux*/chrome-headless-shell")))
+    executable_candidates.extend(filter(None, (shutil.which("chromium"), shutil.which("chromium-browser"), shutil.which("google-chrome"))))
+    existing_executable = next((item for item in executable_candidates if item and os.path.isfile(item) and os.access(item, os.X_OK)), "")
+    if existing_executable:
+        launch_options["executable_path"] = existing_executable
+    try:
+        _r10_browser = _r10_browser_driver.chromium.launch(**launch_options)
+    except Exception as first_error:
+        error_text = str(first_error).casefold()
+        if R10_BROWSER_AUTO_INSTALL and any(token in error_text for token in ("executable", "browser", "chromium")):
+            try:
+                _r10_playwright_command(
+                    ["playwright", "install", "--with-deps", "chromium"],
+                    R10_BROWSER_INSTALL_TIMEOUT,
+                )
+            except RuntimeError:
+                _r10_playwright_command(
+                    ["playwright", "install", "chromium"],
+                    R10_BROWSER_INSTALL_TIMEOUT,
+                )
+            launch_options.pop("executable_path", None)
+            _r10_browser = _r10_browser_driver.chromium.launch(**launch_options)
+        else:
+            raise RuntimeError(f"R10 Chromium başlatılamadı: {first_error}") from first_error
+    _r10_browser_context = _r10_browser.new_context(
+        locale="tr-TR",
+        timezone_id="Europe/Istanbul",
+        viewport={"width": 1365, "height": 768},
+        java_script_enabled=True,
+    )
+    _r10_browser_page = _r10_browser_context.new_page()
+    _r10_browser_page.set_default_timeout(R10_AUTO_HTTP_TIMEOUT * 1000)
+    return _r10_browser_page
+
+
+def _r10_close_playwright_browser():
+    global _r10_browser_driver, _r10_browser, _r10_browser_context, _r10_browser_page, _r10_browser_inbox_url
+    for item in (_r10_browser_page, _r10_browser_context, _r10_browser):
+        if item is not None:
+            try:
+                item.close()
+            except Exception:
+                pass
+    if _r10_browser_driver is not None:
+        try:
+            _r10_browser_driver.stop()
+        except Exception:
+            pass
+    _r10_browser_driver = None
+    _r10_browser = None
+    _r10_browser_context = None
+    _r10_browser_page = None
+    _r10_browser_inbox_url = ""
+
+
+def _r10_browser_html(page):
+    try:
+        return page.content()
+    except Exception as exc:
+        raise RuntimeError(f"R10 sayfası okunamadı: {exc}") from exc
+
+
+def _r10_browser_wait_for_cloudflare(page):
+    """Wait for the site's own JavaScript check; never solve or bypass it."""
+    deadline = time.monotonic() + R10_CLOUDFLARE_WAIT_SECONDS
+    while True:
+        html = _r10_browser_html(page)
+        if not _r10_web_challenge(html):
+            return html
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "R10 güvenlik doğrulaması tamamlanmadı. Otomatik onay verilmedi."
+            )
+        page.wait_for_timeout(1000)
+
+
+def _r10_browser_goto(page, url):
+    safe_url = _r10_same_host_url(R10_WEB_BASE_URL, url)
+    if not safe_url:
+        raise RuntimeError("R10 dışındaki bir adrese gidilmesi engellendi")
+    try:
+        page.goto(
+            safe_url,
+            wait_until="domcontentloaded",
+            timeout=R10_AUTO_HTTP_TIMEOUT * 1000,
+        )
+    except Exception as exc:
+        # Some pages keep background requests open. A loaded same-host document
+        # is still usable; only fail when no R10 page was reached.
+        current = urlparse(str(page.url or ""))
+        if current.hostname not in ("r10.net", "www.r10.net"):
+            raise RuntimeError(f"R10 sayfası açılamadı: {exc}") from exc
+    html = _r10_browser_wait_for_cloudflare(page)
+    return str(page.url), html
+
+
+def _r10_browser_authenticated(page, html=None):
+    html = html if html is not None else _r10_browser_html(page)
+    if _r10_web_challenge(html):
+        return False
+    collector = _r10_collect_html(html)
+    text = " ".join(collector.text_parts).casefold()
+    has_password = any(_r10_form_has_password(form) for form in collector.forms)
+    has_logout = any(
+        any(token in (link.get("href", "") + " " + " ".join(link.get("text", []))).casefold()
+            for token in ("logout", "çıkış", "cikis"))
+        for link in collector.links
+    )
+    has_member_area = any(
+        any(token in (link.get("href", "") + " " + " ".join(link.get("text", []))).casefold()
+            for token in ("private.php", "gelen kutusu", "özel mesaj", "ozel mesaj", "mesajlar"))
+        for link in collector.links
+    )
+    login_visible = "giriş yap" in text or "giris yap" in text
+    return bool(not has_password and (has_logout or has_member_area))
+
+
+def _r10_first_visible(page, selectors):
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            count = min(locator.count(), 10)
+            for index in range(count):
+                candidate = locator.nth(index)
+                if candidate.is_visible():
+                    return candidate
+        except Exception:
+            continue
+    return None
+
+
+def _r10_browser_submit_login(page):
+    # The login box may be hidden behind a modal trigger on the home page.
+    password = _r10_first_visible(page, [
+        'input[type="password"]',
+        'input[name*="password" i]',
+        'input[name*="sifre" i]',
+        'input[name*="parola" i]',
+    ])
+    if password is None:
+        for selector in (
+            'a:has-text("Giriş Yap")', 'button:has-text("Giriş Yap")',
+            'a:has-text("Giris Yap")', 'button:has-text("Giris Yap")',
+        ):
+            trigger = _r10_first_visible(page, [selector])
+            if trigger is not None:
+                try:
+                    trigger.click()
+                    page.wait_for_timeout(700)
+                except Exception:
+                    pass
+                password = _r10_first_visible(page, ['input[type="password"]'])
+                if password is not None:
+                    break
+    if password is None:
+        raise RuntimeError("R10 giriş formundaki parola alanı bulunamadı")
+
+    identity = _r10_first_visible(page, [
+        'input[type="email"]',
+        'input[name*="email" i]',
+        'input[name*="username" i]',
+        'input[name*="kullanici" i]',
+        'input[name*="login" i]',
+        'input[type="text"]',
+    ])
+    if identity is None:
+        raise RuntimeError("R10 giriş formundaki e-posta alanı bulunamadı")
+    identity.fill(R10_LOGIN_IDENTITY)
+    password.fill(R10_ACCOUNT_PASSWORD)
+
+    remember = _r10_first_visible(page, [
+        'input[type="checkbox"][name*="cookie" i]',
+        'input[type="checkbox"][name*="remember" i]',
+    ])
+    if remember is not None:
+        try:
+            remember.check()
+        except Exception:
+            pass
+
+    submitted = False
+    try:
+        form = password.locator("xpath=ancestor::form[1]")
+        if form.count():
+            button = _r10_first_visible(form, [
+                'button[type="submit"]', 'input[type="submit"]', 'button:not([type])',
+            ])
+            if button is not None:
+                button.click()
+                submitted = True
+    except Exception:
+        submitted = False
+    if not submitted:
+        password.press("Enter")
+    page.wait_for_timeout(1500)
+    html = _r10_browser_wait_for_cloudflare(page)
+
+    otp = _r10_first_visible(page, [
+        'input[name*="otp" i]', 'input[name*="totp" i]',
+        'input[name*="twofactor" i]', 'input[name*="authcode" i]',
+        'input[name*="securitycode" i]',
+    ])
+    if otp is not None:
+        if not R10_ACCOUNT_TOTP_SECRET:
+            raise RuntimeError("R10 iki aşamalı doğrulama istiyor; TOTP anahtarı girilmedi")
+        otp.fill(_r10_totp(R10_ACCOUNT_TOTP_SECRET))
+        try:
+            otp.press("Enter")
+        except Exception:
+            submit = _r10_first_visible(page, ['button[type="submit"]', 'input[type="submit"]'])
+            if submit is None:
+                raise RuntimeError("R10 iki aşamalı doğrulama gönderilemedi")
+            submit.click()
+        page.wait_for_timeout(1200)
+        html = _r10_browser_wait_for_cloudflare(page)
+
+    if not _r10_browser_authenticated(page, html):
+        raise RuntimeError("R10 e-posta veya parola ile giriş doğrulanamadı")
+    return html
+
+
+def _r10_browser_find_inbox(page, current_url, html):
+    global _r10_browser_inbox_url
+    if R10_INBOX_URL:
+        final_url, inbox_html = _r10_browser_goto(page, R10_INBOX_URL)
+        if not _r10_browser_authenticated(page, inbox_html):
+            raise RuntimeError("R10 gelen kutusu oturumu doğrulanamadı")
+        _r10_browser_inbox_url = final_url
+        return final_url, inbox_html
+
+    collector = _r10_collect_html(html)
+    ranked = []
+    for link in collector.links:
+        absolute = _r10_same_host_url(current_url, link.get("href"))
+        if not absolute:
+            continue
+        marker = (absolute + " " + " ".join(link.get("text", []))).casefold()
+        score = sum(token in marker for token in ("özel mesaj", "ozel mesaj", "private", "inbox", "mesajlar", "conversation"))
+        if score and not any(token in marker for token in ("compose", "newmessage", "sendmessage", "yeni-mesaj")):
+            ranked.append((score, absolute))
+    ranked.sort(key=lambda item: (-item[0], len(item[1])))
+    candidates = [url for _, url in ranked]
+    candidates.extend([
+        f"{R10_WEB_BASE_URL}/private.php",
+        f"{R10_WEB_BASE_URL}/private.php?folderid=0",
+        f"{R10_WEB_BASE_URL}/ozel-mesajlar/",
+        f"{R10_WEB_BASE_URL}/mesajlar/",
+    ])
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            final_url, candidate_html = _r10_browser_goto(page, candidate)
+            if not _r10_browser_authenticated(page, candidate_html):
+                continue
+            page_text = _r10_profile_text(candidate_html).casefold()
+            if any(token in page_text for token in ("mesaj", "gelen kutusu", "inbox", "private")):
+                _r10_browser_inbox_url = final_url
+                return final_url, candidate_html
+        except Exception:
+            continue
+    raise RuntimeError("R10 gelen kutusu otomatik bulunamadı")
+
+
+def _r10_authenticated_browser(force=False):
+    global _r10_browser_inbox_url
+    with _r10_browser_lock:
+        if force:
+            _r10_close_playwright_browser()
+        page = _r10_browser_page or _r10_launch_playwright_browser()
+        current_url, html = _r10_browser_goto(page, R10_LOGIN_URL)
+        if not _r10_browser_authenticated(page, html):
+            html = _r10_browser_submit_login(page)
+            current_url = str(page.url)
+        inbox_url, _ = _r10_browser_find_inbox(page, current_url, html)
+        _r10_browser_inbox_url = inbox_url
+        return page
+
+
+def _r10_totp(secret, timestamp=None, digits=6, step=30):
+    cleaned = re.sub(r"\s+", "", str(secret or "")).upper()
+    if not cleaned:
+        return ""
+    padding = "=" * ((8 - len(cleaned) % 8) % 8)
+    key = base64.b32decode(cleaned + padding, casefold=True)
+    counter = int((timestamp or time.time()) // step)
+    digest = hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    number = int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF
+    return str(number % (10 ** digits)).zfill(digits)
+
+
+def _r10_form_has_password(form):
+    return any(item.get("type") == "password" for item in (form or {}).get("inputs", []))
+
+
+def _r10_choose_login_form(forms):
+    candidates = [form for form in forms if _r10_form_has_password(form)]
+    if not candidates:
+        return None
+    def score(form):
+        source = " ".join(
+            [form.get("action", ""), " ".join(form.get("text", []))]
+            + [item.get("name", "") for item in form.get("inputs", [])]
+        ).casefold()
+        return sum(token in source for token in ("login", "giriş", "giris", "kullanici", "username"))
+    return max(candidates, key=score)
+
+
+def _r10_form_payload(form, username="", password="", otp=""):
+    payload = {}
+    username_set = False
+    password_set = False
+    otp_set = False
+    for item in (form or {}).get("inputs", []):
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        input_type = str(item.get("type") or "").lower()
+        key = _name_match_key(name)
+        value = item.get("value", "")
+        if input_type == "password" or any(token in key for token in ("password", "parola", "sifre")):
+            payload[name] = password
+            password_set = True
+        elif any(token in key for token in ("username", "kullanici", "loginuser", "email")) and not username_set:
+            payload[name] = username
+            username_set = True
+        elif any(token in key for token in ("twofactor", "totp", "otp", "authcode", "securitycode", "dogrulamakodu")) and otp:
+            payload[name] = otp
+            otp_set = True
+        elif input_type not in ("submit", "button", "image", "file"):
+            payload[name] = value
+    if username and not username_set:
+        payload.setdefault("vb_login_username", username)
+    if password and not password_set:
+        payload.setdefault("vb_login_password", password)
+    if otp and not otp_set:
+        payload.setdefault("code", otp)
+    return payload
+
+
+def _r10_page_authenticated(html, collector, response_url, session):
+    text = " ".join(collector.text_parts).casefold()
+    username = R10_ACCOUNT_USERNAME.casefold()
+    for link in collector.links:
+        marker = (link.get("href", "") + " " + " ".join(link.get("text", []))).casefold()
+        if any(token in marker for token in ("logout", "çıkış", "cikis")):
+            return True
+    if username and username in text and "giriş yap" not in text and "giris yap" not in text:
+        return True
+    login_visible = "giriş yap" in text or "giris yap" in text
+    if session.cookies and not login_visible and not any(_r10_form_has_password(form) for form in collector.forms):
+        host = urlparse(response_url).netloc.lower().removeprefix("www.")
+        has_member_link = any(
+            any(token in (link.get("href", "") + " " + " ".join(link.get("text", []))).casefold()
+                for token in ("private.php", "gelen kutusu", "özel mesaj", "ozel mesaj", "logout", "çıkış", "cikis"))
+            for link in collector.links
+        )
+        return host == "r10.net" and (has_member_link or (username and username in text))
+    return False
+
+
+def _r10_same_host_url(base_url, href):
+    absolute = urljoin(base_url, str(href or "").strip())
+    parsed = urlparse(absolute)
+    if parsed.scheme != "https" or parsed.netloc.lower().removeprefix("www.") != "r10.net":
+        return ""
+    return absolute.split("#", 1)[0]
+
+
+def _r10_discover_inbox_url(page_url, collector, session):
+    if R10_INBOX_URL:
+        return R10_INBOX_URL
+    ranked = []
+    for link in collector.links:
+        absolute = _r10_same_host_url(page_url, link.get("href"))
+        if not absolute:
+            continue
+        marker = (absolute + " " + " ".join(link.get("text", []))).casefold()
+        score = sum(token in marker for token in ("özel mesaj", "ozel mesaj", "private", "inbox", "mesajlar", "conversation"))
+        if score and not any(token in marker for token in ("compose", "newmessage", "sendmessage", "yeni-mesaj")):
+            ranked.append((score, absolute))
+    if ranked:
+        ranked.sort(key=lambda item: (-item[0], len(item[1])))
+        return ranked[0][1]
+
+    # Common forum inbox paths are tried only after a successful authenticated
+    # session. A page must remain on r10.net and must not show a login form.
+    for suffix in ("/private.php", "/private.php?folderid=0", "/ozel-mesajlar/", "/mesajlar/"):
+        candidate = f"{R10_WEB_BASE_URL}{suffix}"
+        try:
+            response = session.get(candidate, timeout=R10_AUTO_HTTP_TIMEOUT, allow_redirects=True)
+            response.raise_for_status()
+            parsed = _r10_collect_html(response.text)
+            if not _r10_web_challenge(response.text) and _r10_page_authenticated(response.text, parsed, response.url, session):
+                page_text = " ".join(parsed.text_parts).casefold()
+                if any(token in page_text for token in ("mesaj", "gelen kutusu", "inbox", "private")):
+                    return response.url
+        except requests.RequestException:
+            continue
+    raise RuntimeError("R10 gelen kutusu otomatik bulunamadı; gerekirse R10_INBOX_URL girin")
+
+
+_r10_auto_session = None
+_r10_auto_session_lock = threading.Lock()
+
+
+def _r10_authenticated_session(force=False):
+    global _r10_auto_session
+    with _r10_auto_session_lock:
+        if _r10_auto_session is not None and not force:
+            return _r10_auto_session
+
+        session_client = requests.Session()
+        session_client.headers.update({
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/149 Safari/537.36",
+            "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.7",
+        })
+        response = session_client.get(R10_LOGIN_URL, timeout=R10_AUTO_HTTP_TIMEOUT, allow_redirects=True)
+        response.raise_for_status()
+        if _r10_web_challenge(response.text):
+            raise RuntimeError("R10 güvenlik doğrulaması istedi; otomatik onay durduruldu")
+        collector = _r10_collect_html(response.text)
+        if not _r10_page_authenticated(response.text, collector, response.url, session_client):
+            login_form = _r10_choose_login_form(collector.forms)
+            if login_form is None:
+                # R10/vBulletin can render the login box with JavaScript. The
+                # standard login endpoint remains the safe same-host fallback.
+                action_url = f"{R10_WEB_BASE_URL}/login.php?do=login"
+                payload = {
+                    "vb_login_username": R10_LOGIN_IDENTITY,
+                    "vb_login_password": R10_ACCOUNT_PASSWORD,
+                    "cookieuser": "1",
+                    "s": "",
+                    "do": "login",
+                    "vb_login_md5password": "",
+                    "vb_login_md5password_utf": "",
+                }
+            else:
+                action_url = _r10_same_host_url(response.url, login_form.get("action")) or response.url
+                payload = _r10_form_payload(login_form, R10_LOGIN_IDENTITY, R10_ACCOUNT_PASSWORD)
+                payload.setdefault("do", "login")
+                payload.setdefault("cookieuser", "1")
+                payload.setdefault("vb_login_md5password", "")
+                payload.setdefault("vb_login_md5password_utf", "")
+            response = session_client.post(
+                action_url,
+                data=payload,
+                timeout=R10_AUTO_HTTP_TIMEOUT,
+                allow_redirects=True,
+                headers={"Referer": response.url},
+            )
+            response.raise_for_status()
+            if _r10_web_challenge(response.text):
+                raise RuntimeError("R10 güvenlik doğrulaması istedi; otomatik onay durduruldu")
+
+            collector = _r10_collect_html(response.text)
+            otp_forms = []
+            for form in collector.forms:
+                names = " ".join(item.get("name", "") for item in form.get("inputs", [])).casefold()
+                if any(token in names for token in ("otp", "totp", "twofactor", "authcode", "securitycode", "dogrulama")):
+                    otp_forms.append(form)
+            if otp_forms:
+                if not R10_ACCOUNT_TOTP_SECRET:
+                    raise RuntimeError("R10 iki aşamalı doğrulama kullanıyor; R10_ACCOUNT_TOTP_SECRET girin")
+                otp_form = otp_forms[0]
+                otp_url = _r10_same_host_url(response.url, otp_form.get("action")) or response.url
+                otp_payload = _r10_form_payload(otp_form, otp=_r10_totp(R10_ACCOUNT_TOTP_SECRET))
+                response = session_client.post(
+                    otp_url,
+                    data=otp_payload,
+                    timeout=R10_AUTO_HTTP_TIMEOUT,
+                    allow_redirects=True,
+                    headers={"Referer": response.url},
+                )
+                response.raise_for_status()
+                collector = _r10_collect_html(response.text)
+
+            if not _r10_page_authenticated(response.text, collector, response.url, session_client):
+                raise RuntimeError("R10 hesabına giriş doğrulanamadı")
+
+        inbox_url = _r10_discover_inbox_url(response.url, collector, session_client)
+        session_client._nerlo_r10_inbox_url = inbox_url
+        _r10_auto_session = session_client
+        return _r10_auto_session
+
+
+def _r10_pending_key_record(submitted_key):
+    digest = r10_key_digest(submitted_key)
+    if not digest:
+        return None
+    matches = []
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT user_id,profile
+                FROM exchange_profiles
+                WHERE profile->'r10_verification'->>'status' IN ('pending','key_sent')
+                """
+            )
+            rows = cur.fetchall()
+    for uid, raw_profile in rows:
+        profile = dict(raw_profile or {})
+        info = dict(profile.get("r10_verification") or {})
+        expected = str(info.get("key_hash") or r10_key_digest(info.get("key")))
+        if expected and secrets.compare_digest(expected, digest):
+            matches.append((str(uid), profile, info))
+    return matches[0] if len(matches) == 1 else None
+
+
+def _r10_profile_slugs_from_page(page_url, collector):
+    slugs = set()
+    for link in collector.links:
+        absolute = _r10_same_host_url(page_url, link.get("href"))
+        if not absolute:
+            continue
+        try:
+            _, slug = normalize_r10_profile_url(absolute)
+        except ValueError:
+            continue
+        if slug:
+            slugs.add(slug.casefold())
+    return slugs
+
+
+def _r10_has_explicit_sender_link(page_url, collector, expected_slug):
+    """Require a real profile link whose visible text is the expected username."""
+    expected_slug = str(expected_slug or "").casefold().strip()
+    expected_text = _name_match_key(expected_slug)
+    if not expected_slug or not expected_text:
+        return False
+    for link in collector.links:
+        absolute = _r10_same_host_url(page_url, link.get("href"))
+        if not absolute:
+            continue
+        try:
+            _, slug = normalize_r10_profile_url(absolute)
+        except ValueError:
+            continue
+        visible = _name_match_key(" ".join(link.get("text", [])))
+        if slug.casefold() == expected_slug and visible == expected_text:
+            return True
+    return False
+
+
+def _r10_keys_from_text(value):
+    candidates = re.findall(r"(?i)NERLO(?:[\s\-_:]*[A-Z0-9]{4}){5}", str(value or ""))
+    result = []
+    seen = set()
+    for candidate in candidates:
+        normalized = normalize_r10_key(candidate)
+        if len(normalized) == 25 and normalized not in seen:
+            seen.add(normalized)
+            result.append(candidate)
+    return result
+
+
+def _r10_corporate_owner_from_text(value):
+    source = str(value or "")
+    patterns = (
+        r"(?im)^\s*(?:IBAN\s*(?:sahibi|hesap\s*sahibi|ad\s*soyad)|hesap\s*sahibi)\s*[:\-]\s*([^\r\n]{3,100})$",
+        r"(?im)^\s*(?:IBAN\s*ad(?:ı)?\s*soyad(?:ı)?)\s*[:\-]\s*([^\r\n]{3,100})$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, source)
+        if match:
+            owner = normalize_person_name(match.group(1))
+            if len(_name_parts(owner)) >= 2:
+                return owner
+    return ""
+
+
+def _r10_thread_links(page_url, collector):
+    ranked = []
+    seen = set()
+    for link in collector.links:
+        absolute = _r10_same_host_url(page_url, link.get("href"))
+        if not absolute or absolute in seen:
+            continue
+        marker = (absolute + " " + " ".join(link.get("text", []))).casefold()
+        score = sum(token in marker for token in ("showpm", "pmid", "private", "conversation", "mesaj", "message"))
+        if score <= 0 or any(token in marker for token in ("compose", "newmessage", "sendmessage", "delete", "sil")):
+            continue
+        seen.add(absolute)
+        ranked.append((score, absolute))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return [url for _, url in ranked[:R10_AUTO_MAX_THREADS]]
+
+
+def _r10_auto_claim(fingerprint, sender_slug, key_hash, uid, source_url):
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO r10_auto_messages(
+                    message_fingerprint,sender_slug,key_hash,user_id,status,source_url_hash
+                ) VALUES (%s,%s,%s,%s,'processing',%s)
+                ON CONFLICT(message_fingerprint) DO UPDATE SET
+                    status='processing',detail='',updated_at=NOW()
+                WHERE r10_auto_messages.status='error'
+                  AND r10_auto_messages.updated_at < NOW()-INTERVAL '5 minutes'
+                RETURNING message_fingerprint
+                """,
+                (
+                    fingerprint, sender_slug, key_hash, str(uid),
+                    hashlib.sha256(str(source_url or "").encode("utf-8")).hexdigest(),
+                ),
+            )
+            claimed = cur.fetchone() is not None
+        conn.commit()
+    return claimed
+
+
+def _r10_auto_finish(fingerprint, status, detail=""):
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE r10_auto_messages
+                SET status=%s,detail=%s,updated_at=NOW(),processed_at=NOW()
+                WHERE message_fingerprint=%s
+                """,
+                (str(status), str(detail or "")[:500], fingerprint),
+            )
+        conn.commit()
+
+
+def _r10_auto_status(status, detail="", approved=0):
+    snapshot = {
+        "status": str(status),
+        "detail": str(detail or "")[:500],
+        "checked_at": now(),
+        "approved": int(approved or 0),
+        "configured": bool(R10_AUTO_KEY_CONFIGURED),
+    }
+    try:
+        with _db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO exchange_meta(meta_key,meta_value)
+                    VALUES ('r10-auto-key-status',%s)
+                    ON CONFLICT(meta_key) DO UPDATE
+                    SET meta_value=EXCLUDED.meta_value,updated_at=NOW()
+                    """,
+                    (Jsonb(snapshot),),
+                )
+            conn.commit()
+    except Exception as exc:
+        print("R10 AUTO STATUS ERROR:", exc)
+    return snapshot
+
+
+def _r10_auto_process_page(page_url, html):
+    collector = _r10_collect_html(html)
+    page_text = _r10_profile_text(html)
+    page_slugs = _r10_profile_slugs_from_page(page_url, collector)
+    approved = 0
+    for submitted_key in _r10_keys_from_text(page_text):
+        matched = _r10_pending_key_record(submitted_key)
+        if not matched:
+            continue
+        uid, profile, info = matched
+        expected_slug = str(info.get("profile_slug") or "").casefold().strip()
+        if (
+            not expected_slug
+            or expected_slug not in page_slugs
+            or not _r10_has_explicit_sender_link(page_url, collector, expected_slug)
+        ):
+            continue
+        owner = ""
+        if info.get("account_type") == "corporate":
+            owner = _r10_corporate_owner_from_text(page_text)
+            if not owner:
+                continue
+        key_hash = r10_key_digest(submitted_key)
+        fingerprint = hashlib.sha256(
+            f"{page_url}|{expected_slug}|{key_hash}".encode("utf-8")
+        ).hexdigest()
+        if not _r10_auto_claim(fingerprint, expected_slug, key_hash, uid, page_url):
+            continue
+        try:
+            if r10_key_is_expired(info):
+                raise ValueError("Key süresi dolmuş")
+            approve_r10_with_key(uid, submitted_key, owner, f"r10-auto:{expected_slug}")
+            _r10_auto_finish(fingerprint, "approved", "Key ve gönderen R10 profili eşleşti")
+            approved += 1
+        except ValueError as exc:
+            _r10_auto_finish(fingerprint, "rejected", str(exc))
+        except Exception as exc:
+            _r10_auto_finish(fingerprint, "error", f"{type(exc).__name__}: {exc}")
+            raise
+    return approved
+
+
+def _r10_auto_key_requests_once():
+    """Requests fallback for R10 accounts without a JavaScript challenge.
+
+    Approval requires both the exact one-time Key and an explicit profile link
+    whose slug equals the R10 profile saved during Telegram verification. A Key
+    alone is never sufficient.
+    """
+    global _r10_auto_session
+    if not R10_AUTO_KEY_CONFIGURED:
+        _r10_auto_status("disabled", "R10 hesap bilgileri girilmedi")
+        return 0
+    try:
+        client = _r10_authenticated_session()
+        inbox_url = str(getattr(client, "_nerlo_r10_inbox_url", "") or R10_INBOX_URL)
+        response = client.get(inbox_url, timeout=R10_AUTO_HTTP_TIMEOUT, allow_redirects=True)
+        response.raise_for_status()
+        if _r10_web_challenge(response.text):
+            raise RuntimeError("R10 güvenlik doğrulaması istedi")
+        inbox_collector = _r10_collect_html(response.text)
+        if not _r10_page_authenticated(response.text, inbox_collector, response.url, client):
+            with _r10_auto_session_lock:
+                _r10_auto_session = None
+            client = _r10_authenticated_session(force=True)
+            inbox_url = str(getattr(client, "_nerlo_r10_inbox_url", "") or R10_INBOX_URL)
+            response = client.get(inbox_url, timeout=R10_AUTO_HTTP_TIMEOUT, allow_redirects=True)
+            response.raise_for_status()
+            inbox_collector = _r10_collect_html(response.text)
+
+        thread_urls = _r10_thread_links(response.url, inbox_collector)
+        approved = 0
+        if thread_urls:
+            for thread_url in thread_urls:
+                try:
+                    thread_response = client.get(thread_url, timeout=R10_AUTO_HTTP_TIMEOUT, allow_redirects=True)
+                    thread_response.raise_for_status()
+                    if _r10_web_challenge(thread_response.text):
+                        continue
+                    approved += _r10_auto_process_page(thread_response.url, thread_response.text)
+                except requests.RequestException as exc:
+                    print("R10 AUTO THREAD ERROR:", type(exc).__name__)
+        else:
+            # Some R10 layouts render the full message directly in the inbox.
+            approved = _r10_auto_process_page(response.url, response.text)
+        _r10_auto_status("ready", "R10 gelen kutusu kontrol edildi", approved)
+        return approved
+    except Exception as exc:
+        with _r10_auto_session_lock:
+            _r10_auto_session = None
+        _r10_auto_status("error", f"{type(exc).__name__}: {exc}")
+        raise
+
+
+
+def r10_auto_key_once():
+    """Check R10 PMs with a normal browser and approve only strict matches."""
+    if not R10_AUTO_KEY_CONFIGURED:
+        _r10_auto_status("disabled", "R10 e-posta ve parola bilgileri girilmedi")
+        return 0
+    if not R10_AUTO_BROWSER_ENABLED:
+        return _r10_auto_key_requests_once()
+
+    try:
+        page = _r10_authenticated_browser()
+        inbox_url = _r10_browser_inbox_url or R10_INBOX_URL
+        page_url, inbox_html = _r10_browser_goto(page, inbox_url)
+        if not _r10_browser_authenticated(page, inbox_html):
+            page = _r10_authenticated_browser(force=True)
+            page_url, inbox_html = _r10_browser_goto(page, _r10_browser_inbox_url or R10_INBOX_URL)
+
+        inbox_collector = _r10_collect_html(inbox_html)
+        thread_urls = _r10_thread_links(page_url, inbox_collector)
+        approved = 0
+        if thread_urls:
+            for thread_url in thread_urls:
+                try:
+                    thread_page_url, thread_html = _r10_browser_goto(page, thread_url)
+                    approved += _r10_auto_process_page(thread_page_url, thread_html)
+                except Exception as exc:
+                    print("R10 AUTO BROWSER THREAD ERROR:", type(exc).__name__)
+        else:
+            approved = _r10_auto_process_page(page_url, inbox_html)
+        _r10_auto_status("ready", "R10 gelen kutusu tarayıcıyla kontrol edildi", approved)
+        return approved
+    except Exception as exc:
+        with _r10_browser_lock:
+            _r10_close_playwright_browser()
+        _r10_auto_status("error", f"{type(exc).__name__}: {exc}")
+        raise
+
 def approve_r10_with_key(uid, submitted_key, iban_owner, actor):
     uid = str(uid)
     actor = str(actor or "panel")
@@ -5828,6 +7013,29 @@ def active_balances(uid):
     return [a for a in ASSETS if balance(uid, a) > 0]
 
 
+def convertible_balances(uid):
+    """Show only balances that can actually start a conversion.
+
+    Tiny dust balances can be greater than zero while still appearing as 0.00
+    in the wallet. Requiring the configured conversion minimum prevents such
+    assets from appearing in the source-asset menu.
+    """
+    result = []
+    for asset in ASSETS:
+        available = balance(uid, asset)
+        minimum = min_amount("convert", asset)
+        if available <= 0 or (minimum > 0 and available < minimum):
+            continue
+        if rate(asset) <= 0:
+            continue
+        result.append(asset)
+    return result
+
+
+def convertible_targets(source_asset):
+    return [asset for asset in ASSETS if asset != source_asset and rate(asset) > 0]
+
+
 def localized_status(uid, value):
     return t(uid, f"status_{value}") if value in ("pending", "processing", "completed", "rejected") else value
 
@@ -6063,9 +7271,9 @@ def show_crypto_deposit_address(chat_id, asset, state):
         user_state.pop(uid, None)
         send(
             chat_id,
-            "Bu coin için güvenli yatırma adresi üretilemedi. Sistem ayarlarını kontrol ediniz."
+            "Yatırma adresi şu anda oluşturulamadı. Daha sonra tekrar deneyin."
             if lang_of(uid) == "tr"
-            else "A secure deposit address could not be generated for this asset. Check the system configuration.",
+            else "The deposit address could not be created. Try again later.",
             reply_keyboard(uid),
         )
         return False
@@ -6138,7 +7346,7 @@ def begin_withdraw(chat_id):
 
 def begin_convert(chat_id):
     uid = str(chat_id)
-    assets = active_balances(chat_id)
+    assets = convertible_balances(chat_id)
     if not assets:
         send(chat_id, msg(uid, "no_balance"), reply_keyboard(uid))
         return
@@ -6488,7 +7696,7 @@ def handle_callback(chat_id, username, data, cb_id):
     if not data.startswith("lang:") and data not in ("second_confirm", "r10:key_sent"):
         answer(cb_id)
     elif data == "r10:key_sent":
-        answer(cb_id, "Bildiriminiz işleniyor...")
+        answer(cb_id, "Mesajınız kontrol ediliyor.")
     get_user(chat_id, username)
 
     if data.startswith("lang:"):
@@ -6573,9 +7781,9 @@ def handle_callback(chat_id, username, data, cb_id):
         elif state.get("automatic_deposit"):
             send(
                 chat_id,
-                "Transferiniz blockchain indexer tarafından otomatik algılanacaktır. Manuel bildirim gerekmez."
+                "Transferiniz ağ üzerinden otomatik kontrol edilecek. Bildirim göndermeniz gerekmez."
                 if lang_of(uid) == "tr"
-                else "Your transfer will be detected automatically by the blockchain indexer. No manual notice is required.",
+                else "Your transfer will be checked automatically on the network. No manual notice is required.",
                 reply_keyboard(uid),
             )
         else:
@@ -6623,9 +7831,20 @@ def handle_callback(chat_id, username, data, cb_id):
         return
     if data.startswith("convert_from:"):
         asset = data.split(":", 1)[1]
-        if balance(uid, asset) <= 0: send(chat_id, msg(uid, "no_balance")); return
+        if asset not in convertible_balances(uid):
+            send(chat_id, msg(uid, "no_balance"), reply_keyboard(uid))
+            return
+        targets = convertible_targets(asset)
+        if not targets:
+            send(chat_id, t(uid, "invalid_rate"), reply_keyboard(uid))
+            return
         user_state[uid] = {"flow": "convert", "step": "to_asset", "from_asset": asset}
-        send(chat_id, t(uid, "convert_available", amount=ucoin(uid, balance(uid, asset), asset)), asset_keyboard("convert_to", ASSETS, asset, uid)); return
+        send(
+            chat_id,
+            t(uid, "convert_available", amount=ucoin(uid, balance(uid, asset), asset)),
+            asset_keyboard("convert_to", targets, uid=uid),
+        )
+        return
     if data.startswith("convert_to:"):
         to_asset = data.split(":", 1)[1]
         state = user_state.get(uid, {})
@@ -9941,6 +11160,15 @@ def start_background_services_once():
             daemon=True,
             name="r10-key-expiry",
         ).start()
+        if R10_AUTO_KEY_CONFIGURED:
+            threading.Thread(
+                target=_run_singleton_polling_service,
+                args=("r10-auto-key", r10_auto_key_once, R10_AUTO_KEY_POLL_SECONDS),
+                daemon=True,
+                name="r10-auto-key",
+            ).start()
+        else:
+            _r10_auto_status("disabled", "R10 hesap bilgileri girilmedi")
         start_exchange_threads()
         _background_services_started = True
         print("BUILD VERSION:", BUILD_VERSION)
