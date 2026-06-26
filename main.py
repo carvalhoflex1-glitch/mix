@@ -65,6 +65,14 @@ R10_KEY_EXPIRY_SCAN_SECONDS = max(60, int(os.getenv("R10_KEY_EXPIRY_SCAN_SECONDS
 # R10 private-message auto verification. Login secrets remain only in the
 # hosting provider's secret variables and are never written to PostgreSQL/logs.
 R10_AUTO_KEY_ENABLED = os.getenv("R10_AUTO_KEY_ENABLED", "1").strip() == "1"
+# Preferred production mode: R10 is read only on the account owner's own Linux
+# computer. The local agent sends only the one-time Key and sender profile slug
+# to this app through an HMAC-signed endpoint. Browser cookies never leave the
+# user's computer and Cloudflare is never bypassed.
+R10_LOCAL_AGENT_ENABLED = os.getenv("R10_LOCAL_AGENT_ENABLED", "0").strip() == "1"
+R10_LOCAL_AGENT_SECRET = os.getenv("R10_LOCAL_AGENT_SECRET", "").strip()
+R10_LOCAL_AGENT_MAX_CLOCK_SKEW = max(60, min(900, int(os.getenv("R10_LOCAL_AGENT_MAX_CLOCK_SKEW", "300"))))
+R10_LOCAL_AGENT_CONFIGURED = bool(R10_LOCAL_AGENT_ENABLED and len(R10_LOCAL_AGENT_SECRET) >= 32)
 R10_ACCOUNT_EMAIL = os.getenv("R10_ACCOUNT_EMAIL", "").strip()
 # Backward compatibility: an old R10_ACCOUNT_USERNAME value may still be used
 # as the login identity. New installations should enter R10_ACCOUNT_EMAIL.
@@ -93,7 +101,7 @@ R10_BROWSER_HEADLESS = os.getenv("R10_BROWSER_HEADLESS", "1").strip() == "1"
 R10_BROWSER_AUTO_INSTALL = os.getenv("R10_BROWSER_AUTO_INSTALL", "1").strip() == "1"
 R10_CLOUDFLARE_WAIT_SECONDS = max(10, min(90, int(os.getenv("R10_CLOUDFLARE_WAIT_SECONDS", "35"))))
 R10_BROWSER_INSTALL_TIMEOUT = max(120, min(900, int(os.getenv("R10_BROWSER_INSTALL_TIMEOUT", "600"))))
-R10_AUTO_KEY_CONFIGURED = bool(R10_AUTO_KEY_ENABLED and (R10_SESSION_STATE_CONFIGURED or R10_CREDENTIALS_CONFIGURED))
+R10_AUTO_KEY_CONFIGURED = bool(R10_AUTO_KEY_ENABLED and not R10_LOCAL_AGENT_ENABLED and (R10_SESSION_STATE_CONFIGURED or R10_CREDENTIALS_CONFIGURED))
 
 # Exchange core / blockchain infrastructure
 EXCHANGE_MODE = os.getenv("EXCHANGE_MODE", "on").strip().lower() == "on"
@@ -159,12 +167,12 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-26-R10-SESSION-STATE-V30"
-PANEL_RELEASE = "NERLO-CONTROL-CENTER-V22-R10-SESSION-STATE"
+BUILD_VERSION = "NERLO-2026-06-26-R10-LOCAL-AGENT-V31"
+PANEL_RELEASE = "NERLO-CONTROL-CENTER-V23-R10-LOCAL-AGENT"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
 SWEEP_RELEASE = "TRON-HD-DEPOSIT-SWEEP-V1"
-SOURCE_BASE_SHA256 = "8083f1789ceed0356a7da60ac109c3d36d400fb7eda3a236d787d36e2f9ad725"
+SOURCE_BASE_SHA256 = "b3c92299f15d639b137929fb71f14be1f0990046118e085ab7ce819346beca7a"
 
 CONFIRMATION_THRESHOLDS = {
     "BTC": max(1, int(os.getenv("BTC_CONFIRMATIONS", "3"))),
@@ -456,6 +464,13 @@ def init_database():
     );
     CREATE INDEX IF NOT EXISTS idx_r10_auto_messages_status_updated
         ON r10_auto_messages (status, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS r10_local_agent_nonces (
+        nonce TEXT PRIMARY KEY,
+        received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_r10_local_agent_nonces_received
+        ON r10_local_agent_nonces (received_at DESC);
     """
     with _db_connect() as conn:
         with conn.cursor() as cur:
@@ -3163,10 +3178,12 @@ def exchange_health_snapshot():
         "sweeps": sweeps,
         "tron_pool": pool_snapshot,
         "r10_auto_key": {
-            "enabled": bool(R10_AUTO_KEY_ENABLED),
-            "configured": bool(R10_AUTO_KEY_CONFIGURED),
-            "auth_mode": R10_AUTH_MODE,
+            "enabled": bool(R10_LOCAL_AGENT_ENABLED or R10_AUTO_KEY_ENABLED),
+            "configured": bool(R10_LOCAL_AGENT_CONFIGURED or R10_AUTO_KEY_CONFIGURED),
+            "auth_mode": "local_agent" if R10_LOCAL_AGENT_ENABLED else R10_AUTH_MODE,
             "session_configured": bool(R10_SESSION_STATE_CONFIGURED),
+            "local_agent_enabled": bool(R10_LOCAL_AGENT_ENABLED),
+            "local_agent_configured": bool(R10_LOCAL_AGENT_CONFIGURED),
             "status": r10_auto_snapshot,
         },
         "reconciliation": reconciliation,
@@ -3190,7 +3207,9 @@ def validate_runtime_config():
     if len(app.secret_key) < 32:
         raise RuntimeError("FLASK_SECRET_KEY en az 32 karakter olmalıdır")
 
-    if bool(R10_LOGIN_IDENTITY) != bool(R10_ACCOUNT_PASSWORD):
+    if R10_LOCAL_AGENT_ENABLED and len(R10_LOCAL_AGENT_SECRET) < 32:
+        raise RuntimeError("R10_LOCAL_AGENT_SECRET en az 32 karakter olmalıdır")
+    if not R10_LOCAL_AGENT_ENABLED and bool(R10_LOGIN_IDENTITY) != bool(R10_ACCOUNT_PASSWORD):
         raise RuntimeError("R10 otomatik kontrol için e-posta ve parola birlikte girilmelidir")
     if R10_AUTO_KEY_CONFIGURED:
         for variable_name, value in (("R10_WEB_BASE_URL", R10_WEB_BASE_URL), ("R10_LOGIN_URL", R10_LOGIN_URL)):
@@ -3332,6 +3351,8 @@ def enforce_service_role():
 @app.before_request
 def enforce_csrf():
     if request.method == "POST":
+        if request.path == "/internal/r10/local-agent":
+            return None
         if request.path.startswith("/internal/signer/"):
             return None
         if request.path.startswith("/internal/exchange/"):
@@ -6245,6 +6266,104 @@ def r10_auto_key_once():
         _r10_auto_status(status, detail)
         raise
 
+
+def _r10_local_agent_store_nonce(nonce):
+    """Persist one request nonce so a signed packet cannot be replayed."""
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM r10_local_agent_nonces WHERE received_at < NOW()-INTERVAL '1 day'"
+            )
+            cur.execute(
+                "INSERT INTO r10_local_agent_nonces(nonce) VALUES (%s) ON CONFLICT DO NOTHING RETURNING nonce",
+                (str(nonce),),
+            )
+            inserted = cur.fetchone() is not None
+        conn.commit()
+    return inserted
+
+
+def _r10_local_agent_verify_request(raw_body):
+    if not R10_LOCAL_AGENT_CONFIGURED:
+        raise PermissionError("Yerel R10 ajanı yapılandırılmamış")
+    if len(raw_body) > 16384:
+        raise ValueError("İstek boyutu sınırı aşıldı")
+
+    timestamp_text = str(request.headers.get("X-R10-Timestamp") or "").strip()
+    nonce = str(request.headers.get("X-R10-Nonce") or "").strip()
+    supplied = str(request.headers.get("X-R10-Signature") or "").strip().lower()
+    if not timestamp_text.isdigit():
+        raise PermissionError("Geçersiz zaman damgası")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", nonce):
+        raise PermissionError("Geçersiz istek kimliği")
+    if not re.fullmatch(r"[0-9a-f]{64}", supplied):
+        raise PermissionError("Geçersiz imza")
+
+    timestamp = int(timestamp_text)
+    if abs(int(time.time()) - timestamp) > R10_LOCAL_AGENT_MAX_CLOCK_SKEW:
+        raise PermissionError("İstek zamanı geçersiz")
+
+    signed = timestamp_text.encode("ascii") + b"." + nonce.encode("ascii") + b"." + raw_body
+    expected = hmac.new(
+        R10_LOCAL_AGENT_SECRET.encode("utf-8"), signed, hashlib.sha256
+    ).hexdigest()
+    if not secrets.compare_digest(expected, supplied):
+        raise PermissionError("İmza doğrulanamadı")
+    if not _r10_local_agent_store_nonce(nonce):
+        raise PermissionError("Bu istek daha önce işlendi")
+
+
+def _r10_local_agent_message(payload):
+    submitted_key = str(payload.get("key") or "").strip()
+    sender_slug = str(payload.get("sender_slug") or "").strip().casefold()
+    iban_owner = str(payload.get("iban_owner") or "").strip()
+    source_ref = str(payload.get("message_fingerprint") or payload.get("source_ref") or "")[:300]
+
+    if len(normalize_r10_key(submitted_key)) != 25:
+        return {"ok": True, "status": "ignored", "detail": "Geçerli Nerlo Key bulunamadı"}, 200
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,80}", sender_slug):
+        return {"ok": True, "status": "ignored", "detail": "Gönderen R10 profili geçersiz"}, 200
+
+    matched = _r10_pending_key_record(submitted_key)
+    if not matched:
+        return {"ok": True, "status": "retry", "detail": "Key bekleyen doğrulamalarda henüz bulunamadı"}, 200
+
+    uid, profile, info = matched
+    expected_slug = str(info.get("profile_slug") or "").strip().casefold()
+    if not expected_slug or not secrets.compare_digest(expected_slug, sender_slug):
+        fingerprint = hashlib.sha256(
+            f"local-agent-mismatch|{sender_slug}|{r10_key_digest(submitted_key)}|{source_ref}".encode("utf-8")
+        ).hexdigest()
+        if _r10_auto_claim(fingerprint, sender_slug, r10_key_digest(submitted_key), uid, "local-agent"):
+            _r10_auto_finish(fingerprint, "rejected", "Key doğru kullanıcıya ait ancak R10 gönderen profili eşleşmedi")
+        _r10_auto_status("ready", "Yerel ajan mesajı reddetti: gönderen profil eşleşmedi", 0)
+        return {"ok": True, "status": "ignored", "detail": "Gönderen R10 profili eşleşmedi"}, 200
+
+    if info.get("account_type") == "corporate" and len(_name_parts(iban_owner)) < 2:
+        return {"ok": True, "status": "retry", "detail": "Kurumsal hesap için IBAN sahibi bilgisi bulunamadı"}, 200
+
+    key_hash = r10_key_digest(submitted_key)
+    fingerprint = hashlib.sha256(
+        f"local-agent|{sender_slug}|{key_hash}|{source_ref}".encode("utf-8")
+    ).hexdigest()
+    if not _r10_auto_claim(fingerprint, sender_slug, key_hash, uid, "local-agent"):
+        return {"ok": True, "status": "duplicate", "detail": "Mesaj daha önce işlendi"}, 200
+
+    try:
+        approve_r10_with_key(uid, submitted_key, iban_owner, f"r10-local-agent:{sender_slug}")
+        _r10_auto_finish(fingerprint, "approved", "Yerel ajan Key ve gönderen R10 profilini doğruladı")
+        _r10_auto_status("ready", "Yerel R10 ajanı çevrimiçi; son Key onaylandı", 1)
+        return {"ok": True, "status": "approved", "user_id": str(uid)}, 200
+    except ValueError as exc:
+        _r10_auto_finish(fingerprint, "rejected", str(exc))
+        _r10_auto_status("ready", f"Yerel ajan mesajı işleyemedi: {exc}", 0)
+        return {"ok": True, "status": "rejected", "detail": str(exc)}, 200
+    except Exception as exc:
+        _r10_auto_finish(fingerprint, "error", f"{type(exc).__name__}: {exc}")
+        _r10_auto_status("error", f"Yerel ajan işlem hatası: {type(exc).__name__}", 0)
+        raise
+
+
 def approve_r10_with_key(uid, submitted_key, iban_owner, actor):
     uid = str(uid)
     actor = str(actor or "panel")
@@ -8215,8 +8334,10 @@ def version_info():
         "sweep_release": SWEEP_RELEASE,
         "signer_stage": SIGNER_STAGE,
         "source_base_sha256": SOURCE_BASE_SHA256,
-        "r10_auth_mode": R10_AUTH_MODE,
+        "r10_auth_mode": "local_agent" if R10_LOCAL_AGENT_ENABLED else R10_AUTH_MODE,
         "r10_session_configured": bool(R10_SESSION_STATE_CONFIGURED),
+        "r10_local_agent_enabled": bool(R10_LOCAL_AGENT_ENABLED),
+        "r10_local_agent_configured": bool(R10_LOCAL_AGENT_CONFIGURED),
     }
 
 
@@ -8228,6 +8349,39 @@ def exchange_health():
     review_sweeps = int((snapshot.get("sweeps") or {}).get("review") or 0)
     snapshot["status"] = "degraded" if mismatch_count or dead_jobs or review_sweeps else "ok"
     return snapshot
+
+
+
+@app.route("/internal/r10/local-agent", methods=["POST"])
+def r10_local_agent_endpoint():
+    raw_body = request.get_data(cache=True, as_text=False) or b""
+    try:
+        _r10_local_agent_verify_request(raw_body)
+    except PermissionError as exc:
+        return {"ok": False, "error": str(exc)}, 401
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}, 400
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {"ok": False, "error": "Geçersiz JSON"}, 400
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "Geçersiz veri"}, 400
+
+    event = str(payload.get("event") or "message").strip().lower()
+    if event == "heartbeat":
+        detail = str(payload.get("detail") or "Yerel R10 ajanı çevrimiçi")[:300]
+        _r10_auto_status("ready", detail, 0)
+        return {"ok": True, "status": "ready", "build_version": BUILD_VERSION}
+    if event != "message":
+        return {"ok": False, "error": "Desteklenmeyen olay"}, 400
+    try:
+        response_body, status_code = _r10_local_agent_message(payload)
+        return response_body, status_code
+    except Exception as exc:
+        print("R10 LOCAL AGENT ENDPOINT ERROR:", type(exc).__name__, exc)
+        return {"ok": False, "error": "R10 mesajı işlenemedi"}, 500
 
 
 def _signer_supplied_token():
@@ -11237,7 +11391,9 @@ def start_background_services_once():
             daemon=True,
             name="r10-key-expiry",
         ).start()
-        if R10_AUTO_KEY_CONFIGURED:
+        if R10_LOCAL_AGENT_CONFIGURED:
+            _r10_auto_status("waiting_agent", "Yerel R10 ajanından bağlantı bekleniyor")
+        elif R10_AUTO_KEY_CONFIGURED:
             threading.Thread(
                 target=_run_singleton_polling_service,
                 args=("r10-auto-key", r10_auto_key_once, R10_AUTO_KEY_POLL_SECONDS),
@@ -11245,7 +11401,7 @@ def start_background_services_once():
                 name="r10-auto-key",
             ).start()
         else:
-            _r10_auto_status("disabled", "R10 oturumu veya hesap bilgileri girilmedi")
+            _r10_auto_status("disabled", "R10 yerel ajanı veya sunucu oturumu yapılandırılmadı")
         start_exchange_threads()
         _background_services_started = True
         print("BUILD VERSION:", BUILD_VERSION)
