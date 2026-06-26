@@ -122,8 +122,8 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V17"
-PANEL_RELEASE = "TREASURY-CONTROL-CENTER-V12-R10-PRO"
+BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V18"
+PANEL_RELEASE = "TREASURY-CONTROL-CENTER-V13-R10-PRO-STABLE"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
 SWEEP_RELEASE = "TRON-HD-DEPOSIT-SWEEP-V1"
@@ -159,6 +159,13 @@ data_lock = threading.RLock()
 _runtime_state_refresh_lock = threading.Lock()
 _runtime_state_refresh_at = {}
 user_state = {}
+_user_cache_lock = threading.RLock()
+_user_profile_refresh_at = {}
+_user_balance_refresh_at = {}
+_user_activity_persist_at = {}
+USER_PROFILE_CACHE_SECONDS = max(2, int(os.getenv("USER_PROFILE_CACHE_SECONDS", "8")))
+USER_BALANCE_CACHE_SECONDS = max(2, int(os.getenv("USER_BALANCE_CACHE_SECONDS", "5")))
+USER_ACTIVITY_PERSIST_SECONDS = max(15, int(os.getenv("USER_ACTIVITY_PERSIST_SECONDS", "60")))
 
 LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logo.png')
 
@@ -1520,6 +1527,26 @@ def exchange_load_all_profiles():
     with _db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT user_id,profile FROM exchange_profiles ORDER BY user_id")
+            rows = cur.fetchall()
+    return {str(uid): dict(profile or {}) for uid, profile in rows}
+
+
+def exchange_load_r10_profiles():
+    """Load only profiles that contain R10 verification data.
+
+    The approval page refreshes frequently. Restricting the query to relevant
+    rows prevents a full user-table scan from slowing Telegram responses.
+    """
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT user_id,profile
+                FROM exchange_profiles
+                WHERE profile ? 'r10_verification'
+                ORDER BY updated_at DESC
+                """
+            )
             rows = cur.fetchall()
     return {str(uid): dict(profile or {}) for uid, profile in rows}
 
@@ -3763,27 +3790,33 @@ def _plain_asset_icons(value):
     )
 
 
-def _keyboard_without_unsupported_copy(keyboard):
+def _telegram_keyboard_fallback(keyboard):
+    """Remove optional button fields that older Telegram endpoints may reject."""
     if not isinstance(keyboard, dict):
-        return keyboard
-    rows = []
+        return keyboard, False
     changed = False
-    for row in keyboard.get("inline_keyboard", []):
-        new_row = []
-        for raw_button in row:
-            button = dict(raw_button)
-            if "copy_text" in button:
-                changed = True
-                button.pop("copy_text", None)
-                button["callback_data"] = "r10:show_key"
-                button["text"] = "Keyi Göster"
-            new_row.append(button)
-        rows.append(new_row)
-    if not changed:
-        return keyboard
     result = dict(keyboard)
-    result["inline_keyboard"] = rows
-    return result
+    if isinstance(keyboard.get("inline_keyboard"), list):
+        rows = []
+        for row in keyboard.get("inline_keyboard", []):
+            clean_row = []
+            for raw_button in row:
+                if not isinstance(raw_button, dict):
+                    continue
+                button = dict(raw_button)
+                if "icon_custom_emoji_id" in button:
+                    button.pop("icon_custom_emoji_id", None)
+                    changed = True
+                if "copy_text" in button:
+                    button.pop("copy_text", None)
+                    button["callback_data"] = "r10:show_key"
+                    button["text"] = "Keyi Göster"
+                    changed = True
+                clean_row.append(button)
+            if clean_row:
+                rows.append(clean_row)
+        result["inline_keyboard"] = rows
+    return result, changed
 
 
 def send(chat_id, text, keyboard=None):
@@ -3798,12 +3831,24 @@ def send(chat_id, text, keyboard=None):
     if result.get("ok", False):
         return result
 
-    fallback = {"chat_id": chat_id, "text": _plain_asset_icons(text)}
-    if keyboard:
-        fallback["reply_markup"] = _keyboard_without_unsupported_copy(keyboard)
-    if entities or fallback.get("reply_markup") != keyboard:
-        return api("sendMessage", fallback)
-    return result
+    # Retry only for a Telegram payload rejection. Retrying network/time-out
+    # failures doubles the wait and makes the bot feel slow.
+    if int(result.get("error_code") or 0) != 400:
+        print("TELEGRAM SEND ERROR:", result)
+        return result
+
+    fallback_keyboard, keyboard_changed = _telegram_keyboard_fallback(keyboard)
+    fallback = {"chat_id": chat_id, "text": _plain_asset_icons(text) if entities else rendered}
+    if fallback_keyboard:
+        fallback["reply_markup"] = fallback_keyboard
+    if not entities and not keyboard_changed:
+        print("TELEGRAM SEND BAD REQUEST:", result)
+        return result
+
+    retry = api("sendMessage", fallback)
+    if not retry.get("ok", False):
+        print("TELEGRAM SEND FALLBACK ERROR:", retry)
+    return retry
 
 
 def send_qr(chat_id, content, caption=""):
@@ -4838,17 +4883,58 @@ def verify_pin(stored, pin):
     return secrets.compare_digest(stored, legacy)
 
 
+def _persist_user_activity(uid, username, seen_at):
+    """Persist activity without overwriting concurrent panel/R10 changes."""
+    try:
+        with _db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT profile FROM exchange_profiles WHERE user_id=%s FOR UPDATE", (uid,))
+                row = cur.fetchone()
+                if not row:
+                    return
+                profile = dict(row[0] or {})
+                if username:
+                    profile["username"] = username
+                profile["last_seen"] = seen_at
+                sessions = dict(profile.get("sessions") or {})
+                telegram_session = dict(sessions.get("telegram") or {})
+                telegram_session.setdefault("created_at", seen_at)
+                telegram_session["last_seen"] = seen_at
+                telegram_session["active"] = True
+                sessions["telegram"] = telegram_session
+                profile["sessions"] = sessions
+                cur.execute(
+                    "UPDATE exchange_profiles SET profile=%s,updated_at=NOW() WHERE user_id=%s",
+                    (Jsonb(profile), uid),
+                )
+            conn.commit()
+    except Exception as exc:
+        print("USER ACTIVITY PERSIST ERROR:", exc)
+
+
 def get_user(chat_id, username=""):
     uid = str(chat_id)
-    stored_profile = exchange_load_profile(uid)
-    if stored_profile is not None:
-        users[uid] = stored_profile
-    if uid not in users:
+    monotonic_now = time.monotonic()
+    seen_at = now()
+
+    with _user_cache_lock:
+        last_profile_refresh = _user_profile_refresh_at.get(uid, 0)
+        should_refresh_profile = uid not in users or monotonic_now - last_profile_refresh >= USER_PROFILE_CACHE_SECONDS
+
+    if should_refresh_profile:
+        stored_profile = exchange_load_profile(uid)
+        if stored_profile is not None:
+            users[uid] = stored_profile
+        with _user_cache_lock:
+            _user_profile_refresh_at[uid] = monotonic_now
+
+    created = uid not in users
+    if created:
         users[uid] = {
             "chat_id": uid,
             "username": username or "unknown",
-            "created_at": now(),
-            "last_seen": now(),
+            "created_at": seen_at,
+            "last_seen": seen_at,
             "status": "active",
             "withdraw_locked": False,
             "pin_hash": "",
@@ -4861,33 +4947,63 @@ def get_user(chat_id, username=""):
             "last_security_event": "",
             "favorites": [],
             "notifications": {"transactions": True, "security": True, "announcements": True},
-            "sessions": {"telegram": {"created_at": now(), "last_seen": now(), "active": True}},
+            "sessions": {"telegram": {"created_at": seen_at, "last_seen": seen_at, "active": True}},
             "note": "",
         }
+
     u = users[uid]
     u.setdefault("withdraw_locked", False)
     u.setdefault("pin_failed_attempts", 0)
     u.setdefault("language", "")
     u.setdefault("favorites", [])
     u.setdefault("notifications", {"transactions": True, "security": True, "announcements": True})
-    u.setdefault("sessions", {"telegram": {"created_at": now(), "last_seen": now(), "active": True}})
+    u.setdefault("sessions", {"telegram": {"created_at": seen_at, "last_seen": seen_at, "active": True}})
     u.setdefault("balances", {a: "0" for a in ASSETS})
     u.setdefault("pending_balances", {a: "0" for a in ASSETS})
     u.setdefault("session_version", 1)
     u.setdefault("last_pin_change", "")
     u.setdefault("last_security_event", "")
-    for a in ASSETS:
-        u["balances"].setdefault(a, "0")
-        u["pending_balances"].setdefault(a, "0")
-    try:
-        exchange_refresh_user_cache(uid)
-    except Exception as exc:
-        print("USER BALANCE REFRESH ERROR:", exc)
+    for asset in ASSETS:
+        u["balances"].setdefault(asset, "0")
+        u["pending_balances"].setdefault(asset, "0")
+
+    with _user_cache_lock:
+        last_balance_refresh = _user_balance_refresh_at.get(uid, 0)
+        should_refresh_balance = created or monotonic_now - last_balance_refresh >= USER_BALANCE_CACHE_SECONDS
+    if should_refresh_balance:
+        try:
+            exchange_refresh_user_cache(uid)
+        except Exception as exc:
+            print("USER BALANCE REFRESH ERROR:", exc)
+        with _user_cache_lock:
+            _user_balance_refresh_at[uid] = monotonic_now
+
+    username_changed = bool(username and username != u.get("username"))
     if username:
         u["username"] = username
-    u["last_seen"] = now()
-    u["sessions"]["telegram"]["last_seen"] = now()
-    save_user_profile(uid)
+    u["last_seen"] = seen_at
+    telegram_session = u.setdefault("sessions", {}).setdefault("telegram", {})
+    telegram_session.setdefault("created_at", seen_at)
+    telegram_session["last_seen"] = seen_at
+    telegram_session["active"] = True
+
+    if created:
+        save_user_profile(uid)
+        with _user_cache_lock:
+            _user_activity_persist_at[uid] = monotonic_now
+    else:
+        with _user_cache_lock:
+            last_activity_persist = _user_activity_persist_at.get(uid, 0)
+            should_persist_activity = username_changed or monotonic_now - last_activity_persist >= USER_ACTIVITY_PERSIST_SECONDS
+            if should_persist_activity:
+                _user_activity_persist_at[uid] = monotonic_now
+        if should_persist_activity:
+            threading.Thread(
+                target=_persist_user_activity,
+                args=(uid, username or str(u.get("username") or ""), seen_at),
+                daemon=True,
+                name=f"user-activity-{uid}",
+            ).start()
     return u
 
 
@@ -5950,6 +6066,10 @@ def handle_text(chat_id, username, text):
 
 def handle_callback(chat_id, username, data, cb_id):
     uid = str(chat_id)
+    if not data.startswith("lang:") and data not in ("second_confirm", "r10:key_sent"):
+        answer(cb_id)
+    elif data == "r10:key_sent":
+        answer(cb_id, "Bildiriminiz işleniyor...")
     get_user(chat_id, username)
 
     if data.startswith("lang:"):
@@ -5963,8 +6083,6 @@ def handle_callback(chat_id, username, data, cb_id):
         start_user(chat_id, username)
         return
 
-    if data not in ("second_confirm", "r10:key_sent"):
-        answer(cb_id)
     if users[uid].get("language") not in ("tr", "en"):
         ask_language(chat_id); return
     if data == "cancel": user_state.pop(uid, None); send(chat_id, msg(uid, "request_cancelled"), reply_keyboard(uid)); return
@@ -5987,10 +6105,8 @@ def handle_callback(chat_id, username, data, cb_id):
     if data == "r10:key_sent":
         try:
             info, newly_notified = mark_r10_key_sent(uid)
-            answer(cb_id, "Bildiriminiz alındı." if newly_notified else "Bildiriminiz daha önce alınmış.")
             send(chat_id, r10_message(uid, "r10_key_sent_confirmation", info), reply_keyboard(uid))
         except ValueError as exc:
-            answer(cb_id, str(exc)[:180])
             current = users.get(uid, {}).get("r10_verification", {}) or {}
             if current.get("status") == "expired":
                 send(chat_id, r10_message(uid, "r10_expired", current), {"inline_keyboard": [[inline_button(t(uid, "r10_verify"), "r10:start")]]})
@@ -6214,31 +6330,46 @@ def bot_poll_once():
     result = response.json()
     if not result.get("ok", False):
         raise RuntimeError(f"Telegram getUpdates failed: {result}")
+
     for update in result.get("result", []):
-        OFFSET = update["update_id"] + 1
-        save_offset(OFFSET)
-        if "message" in update:
-            message = update["message"]
-            chat_id = message["chat"]["id"]
-            username = message.get("from", {}).get("username", "unknown")
-            text = message.get("text", "")
-            ids = [
-                str(entity.get("custom_emoji_id"))
-                for entity in message.get("entities", [])
-                if entity.get("type") == "custom_emoji" and entity.get("custom_emoji_id")
-            ]
-            if ids and str(chat_id) == str(ADMIN_CHAT_ID):
-                send(chat_id, "\n".join(ids))
-                continue
-            handle_text(chat_id, username, text)
-        elif "callback_query" in update:
-            callback = update["callback_query"]
-            handle_callback(
-                callback["message"]["chat"]["id"],
-                callback.get("from", {}).get("username", "unknown"),
-                callback.get("data", ""),
-                callback["id"],
-            )
+        next_offset = update["update_id"] + 1
+        try:
+            if "message" in update:
+                message = update["message"]
+                chat_id = message["chat"]["id"]
+                username = message.get("from", {}).get("username", "unknown")
+                text_value = message.get("text", "")
+                ids = [
+                    str(entity.get("custom_emoji_id"))
+                    for entity in message.get("entities", [])
+                    if entity.get("type") == "custom_emoji" and entity.get("custom_emoji_id")
+                ]
+                if ids and str(chat_id) == str(ADMIN_CHAT_ID):
+                    send(chat_id, "\n".join(ids))
+                else:
+                    handle_text(chat_id, username, text_value)
+            elif "callback_query" in update:
+                callback = update["callback_query"]
+                callback_message = callback.get("message") or {}
+                callback_chat = callback_message.get("chat") or {}
+                if callback_chat.get("id") is not None:
+                    handle_callback(
+                        callback_chat["id"],
+                        callback.get("from", {}).get("username", "unknown"),
+                        callback.get("data", ""),
+                        callback["id"],
+                    )
+        except Exception as exc:
+            print("TELEGRAM UPDATE ERROR:", update.get("update_id"), repr(exc))
+            traceback.print_exc()
+            try:
+                if ADMIN_CHAT_ID:
+                    send(ADMIN_CHAT_ID, f"Bot güncelleme hatası · {update.get('update_id')}\n{type(exc).__name__}: {exc}")
+            except Exception:
+                pass
+        finally:
+            OFFSET = next_offset
+            save_offset(OFFSET)
 
 
 def bot_loop():
@@ -8541,7 +8672,7 @@ def admin_approvals_fragment():
         return "", 401
     if not has_panel_permission("approvals"):
         return "", 403
-    for uid, profile in exchange_load_all_profiles().items():
+    for uid, profile in exchange_load_r10_profiles().items():
         users[str(uid)] = profile
     query = request.args.get("aq", "").strip()
     status_filter = request.args.get("astatus", "all").strip()
