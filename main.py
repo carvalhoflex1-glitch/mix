@@ -20,7 +20,7 @@ from urllib.parse import urlparse
 from collections import defaultdict, deque
 from datetime import datetime, date
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
-from html import escape
+from html import escape, unescape
 
 import requests
 import qrcode
@@ -118,7 +118,7 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V12"
+BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V13"
 PANEL_RELEASE = "TREASURY-CONTROL-CENTER-V11"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
@@ -3947,10 +3947,22 @@ def normalize_r10_profile_url(profile_url):
     host = parsed.netloc.lower().removeprefix("www.")
     if parsed.scheme not in ("http", "https") or host != "r10.net":
         raise ValueError("invalid_link")
-    slug = parsed.path.strip("/").split("/")[0].lower()
-    if not re.fullmatch(r"[a-z0-9_.-]{2,64}", slug or ""):
-        raise ValueError("invalid_link")
-    return f"https://www.r10.net/{slug}", slug
+
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) == 1:
+        slug = parts[0].lower()
+        if not re.fullmatch(r"[a-z0-9_.-]{2,64}", slug):
+            raise ValueError("invalid_link")
+        return f"https://www.r10.net/{slug}", slug
+
+    if len(parts) == 2 and parts[0].lower() == "profil":
+        match = re.fullmatch(r"([0-9]+)-([a-z0-9_.-]{2,64})\.html", parts[1], re.I)
+        if not match:
+            raise ValueError("invalid_link")
+        profile_id, slug = match.group(1), match.group(2).lower()
+        return f"https://www.r10.net/profil/{profile_id}-{slug}.html", slug
+
+    raise ValueError("invalid_link")
 
 
 def r10_profile_used_by(profile_slug, except_uid=""):
@@ -3977,33 +3989,146 @@ def r10_iban_owner_used_by(owner_key, except_uid=""):
     return ""
 
 
+def _r10_profile_text(html):
+    source = str(html or "")
+    source = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", source)
+    source = unescape(source).replace("\xa0", " ")
+    source = re.sub(r"<[^>]+>", " ", source)
+    return re.sub(r"\s+", " ", source).strip()
+
+
+def _r10_field(text, label):
+    next_labels = (
+        "Ad Soyad|Unvan|Doğum Günü|Yaş|Üyelik Tarihi|Meslek|Şube|Konu Sayısı|"
+        r"Mesaj Sayısı|Şikayet|Beğeniler|R10\+|Profil Ziyareti|Hakkında|Uzmanlıklar|Arkadaşlar"
+    )
+    match = re.search(
+        rf"(?:^|\s){label}\s*:?\s*(.+?)(?=\s+(?:{next_labels})\s*:?\s*|$)",
+        text,
+        re.I,
+    )
+    return match.group(1).strip(" -:") if match else ""
+
+
+def _r10_int(value):
+    digits = re.sub(r"[^0-9]", "", str(value or ""))
+    return int(digits) if digits else 0
+
+
+def _r10_membership_months(day, month, year):
+    try:
+        joined = date(int(year), int(month), int(day))
+    except ValueError:
+        return None
+    current = date.today()
+    if joined > current:
+        return None
+    months = (current.year - joined.year) * 12 + current.month - joined.month
+    if current.day < joined.day:
+        months -= 1
+    return max(0, months)
+
+
+def _r10_mask_name(first, last):
+    def mask_part(value):
+        letters = re.sub(r"[^A-Za-zÇĞİÖŞÜçğıöşü]", "", str(value or ""))
+        if len(letters) < 2:
+            return ""
+        return letters[:2] + "*" * max(4, len(letters) - 2)
+
+    return f"{mask_part(first)} {mask_part(last)}".strip()
+
+
 def parse_r10_profile_name(html):
-    text = re.sub(r"<[^>]+>", " ", str(html or ""))
-    text = re.sub(r"\s+", " ", text)
-    masked = re.search(r"\b([A-Za-zÇĞİÖŞÜçğıöşü]{2})\*{2,}\s+([A-Za-zÇĞİÖŞÜçğıöşü]{2})\*{2,}\b", text)
-    trade_match = re.search(r"(?:trade|ticaret|alışveriş)[^0-9]{0,20}([0-9]{1,6})", text, re.I)
-    trades = int(trade_match.group(1)) if trade_match else 0
-    month_match = re.search(r"([0-9]{1,3})\s*(?:ay|month)", text, re.I)
-    year_match = re.search(r"([0-9]{1,2})\s*(?:yıl|year)", text, re.I)
-    months = (int(year_match.group(1)) * 12 if year_match else 0) + (int(month_match.group(1)) if month_match else 0)
-    corporate = bool(re.search(r"\b(kurumsal|unvan|firma|şirket|company)\b", text, re.I))
-    if masked:
-        return {"masked": masked.group(0), "first2": masked.group(1), "last2": masked.group(2), "account_type": "corporate" if corporate else "personal", "trades": trades, "months": months}
+    text = _r10_profile_text(html)
+    if not text:
+        return None
+
+    header = text.split("Künye", 1)[0]
+    title = _r10_field(text, "Unvan")
+    corporate = bool(title) or bool(re.search(r"\bKurumsal(?:\s+PLUS|\s+Üye)?\b", header, re.I))
+
+    date_match = re.search(r"Üyelik\s*Tarihi\s*:?\s*([0-9]{1,2})[./-]([0-9]{1,2})[./-]([0-9]{4})", text, re.I)
+    months = None
+    membership_date = ""
+    if date_match:
+        day, month, year = date_match.groups()
+        months = _r10_membership_months(day, month, year)
+        membership_date = f"{int(day):02d}/{int(month):02d}/{int(year):04d}"
+
+    r10_plus = re.search(r"R10\+\s*([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)", text, re.I)
+    negative = neutral = positive = None
+    if r10_plus:
+        negative, neutral, positive = (_r10_int(value) for value in r10_plus.groups())
+
+    common = {
+        "account_type": "corporate" if corporate else "personal",
+        "trades": positive,
+        "months": months,
+        "membership_date": membership_date,
+        "r10_plus_negative": negative,
+        "r10_plus_neutral": neutral,
+        "r10_plus_positive": positive,
+    }
+
     if corporate:
-        title_match = re.search(r"(?:unvan|firma|şirket|company)\s*:?\s*([A-Za-zÇĞİÖŞÜçğıöşü0-9 .&-]{3,80})", text, re.I)
-        title = title_match.group(1).strip() if title_match else "Kurumsal hesap"
-        return {"masked": title, "first2": "", "last2": "", "account_type": "corporate", "trades": trades, "months": months}
-    return None
+        common.update({
+            "masked": title or "Kurumsal hesap",
+            "first2": "",
+            "last2": "",
+            "company_title": title,
+        })
+        return common
+
+    full_name = _r10_field(text, "Ad Soyad")
+    if not full_name or full_name.strip() in ("-", "—"):
+        return None
+
+    name_tokens = re.findall(r"[A-Za-zÇĞİÖŞÜçğıöşü]{2,}(?:\*+)?", full_name)
+    if len(name_tokens) < 2:
+        return None
+
+    first_token, last_token = name_tokens[0], name_tokens[-1]
+    first_letters = re.sub(r"\*+", "", first_token)
+    last_letters = re.sub(r"\*+", "", last_token)
+    if len(first_letters) < 2 or len(last_letters) < 2:
+        return None
+
+    common.update({
+        "masked": _r10_mask_name(first_letters, last_letters),
+        "first2": first_letters[:2],
+        "last2": last_letters[:2],
+        "company_title": "",
+    })
+    return common
 
 
 def fetch_r10_profile_mask(profile_url):
     canonical_url, slug = normalize_r10_profile_url(profile_url)
-    response = requests.get(canonical_url, headers={"User-Agent": "Mozilla/5.0 NerloBot"}, timeout=15)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
+        "Cache-Control": "no-cache",
+    }
+    response = requests.get(canonical_url, headers=headers, timeout=20, allow_redirects=True)
     response.raise_for_status()
+
+    final_host = urlparse(response.url).netloc.lower().removeprefix("www.")
+    if final_host != "r10.net":
+        raise ValueError("invalid_link")
+
+    lowered = response.text.lower()
+    if "cf-chl-" in lowered or "just a moment" in lowered or "attention required" in lowered:
+        raise RuntimeError("r10_access_challenge")
+
     parsed_name = parse_r10_profile_name(response.text)
     if not parsed_name:
         raise ValueError("name_not_found")
-    parsed_name["profile_url"] = canonical_url
+    if parsed_name.get("months") is None or parsed_name.get("trades") is None:
+        raise ValueError("profile_data_incomplete")
+
+    parsed_name["profile_url"] = response.url.split("?", 1)[0]
     parsed_name["profile_slug"] = slug
     return parsed_name
 
