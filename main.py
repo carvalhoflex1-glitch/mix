@@ -72,6 +72,13 @@ R10_ACCOUNT_USERNAME = os.getenv("R10_ACCOUNT_USERNAME", "").strip()
 R10_LOGIN_IDENTITY = R10_ACCOUNT_EMAIL or R10_ACCOUNT_USERNAME
 R10_ACCOUNT_PASSWORD = os.getenv("R10_ACCOUNT_PASSWORD", "")
 R10_ACCOUNT_TOTP_SECRET = os.getenv("R10_ACCOUNT_TOTP_SECRET", "").strip()
+# Preferred authentication mode: a session created on the account owner's own
+# normal browser. The value is kept only in the hosting provider's secret
+# variables and is never written to PostgreSQL or logs.
+R10_SESSION_STATE_B64 = os.getenv("R10_SESSION_STATE_B64", "").strip()
+R10_SESSION_STATE_CONFIGURED = bool(R10_SESSION_STATE_B64)
+R10_CREDENTIALS_CONFIGURED = bool(R10_LOGIN_IDENTITY and R10_ACCOUNT_PASSWORD)
+R10_AUTH_MODE = "session" if R10_SESSION_STATE_CONFIGURED else ("credentials" if R10_CREDENTIALS_CONFIGURED else "disabled")
 R10_WEB_BASE_URL = os.getenv("R10_WEB_BASE_URL", "https://www.r10.net").strip().rstrip("/")
 R10_CONTACT_PROFILE_URL = os.getenv("R10_CONTACT_PROFILE_URL", "").strip() or "https://www.r10.net/profil/212516-sorrymama.html"
 R10_LOGIN_URL = os.getenv("R10_LOGIN_URL", "").strip() or f"{R10_WEB_BASE_URL}/"
@@ -86,7 +93,7 @@ R10_BROWSER_HEADLESS = os.getenv("R10_BROWSER_HEADLESS", "1").strip() == "1"
 R10_BROWSER_AUTO_INSTALL = os.getenv("R10_BROWSER_AUTO_INSTALL", "1").strip() == "1"
 R10_CLOUDFLARE_WAIT_SECONDS = max(10, min(90, int(os.getenv("R10_CLOUDFLARE_WAIT_SECONDS", "35"))))
 R10_BROWSER_INSTALL_TIMEOUT = max(120, min(900, int(os.getenv("R10_BROWSER_INSTALL_TIMEOUT", "600"))))
-R10_AUTO_KEY_CONFIGURED = bool(R10_AUTO_KEY_ENABLED and R10_LOGIN_IDENTITY and R10_ACCOUNT_PASSWORD)
+R10_AUTO_KEY_CONFIGURED = bool(R10_AUTO_KEY_ENABLED and (R10_SESSION_STATE_CONFIGURED or R10_CREDENTIALS_CONFIGURED))
 
 # Exchange core / blockchain infrastructure
 EXCHANGE_MODE = os.getenv("EXCHANGE_MODE", "on").strip().lower() == "on"
@@ -152,12 +159,12 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-26-R10-BROWSER-AUTO-LOGIN-V29"
-PANEL_RELEASE = "NERLO-CONTROL-CENTER-V21-R10-BROWSER-AUTO"
+BUILD_VERSION = "NERLO-2026-06-26-R10-SESSION-STATE-V30"
+PANEL_RELEASE = "NERLO-CONTROL-CENTER-V22-R10-SESSION-STATE"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
 SWEEP_RELEASE = "TRON-HD-DEPOSIT-SWEEP-V1"
-SOURCE_BASE_SHA256 = "ff98736b04ddb34beca2a5848380510a71dc08540d8421cd0a93ba84cb0d0ade"
+SOURCE_BASE_SHA256 = "8083f1789ceed0356a7da60ac109c3d36d400fb7eda3a236d787d36e2f9ad725"
 
 CONFIRMATION_THRESHOLDS = {
     "BTC": max(1, int(os.getenv("BTC_CONFIRMATIONS", "3"))),
@@ -3158,6 +3165,8 @@ def exchange_health_snapshot():
         "r10_auto_key": {
             "enabled": bool(R10_AUTO_KEY_ENABLED),
             "configured": bool(R10_AUTO_KEY_CONFIGURED),
+            "auth_mode": R10_AUTH_MODE,
+            "session_configured": bool(R10_SESSION_STATE_CONFIGURED),
             "status": r10_auto_snapshot,
         },
         "reconciliation": reconciliation,
@@ -5374,6 +5383,50 @@ def _r10_sync_playwright_factory():
             raise RuntimeError("Playwright kurulmasına rağmen yüklenemedi") from exc
 
 
+def _r10_session_storage_state():
+    """Decode and validate the Railway session-state secret.
+
+    Only r10.net cookies/origins are accepted. The decoded value is kept in
+    memory and is never persisted or printed by the application.
+    """
+    if not R10_SESSION_STATE_B64:
+        return None
+    compact = re.sub(r"\s+", "", R10_SESSION_STATE_B64)
+    if len(compact) > 2_000_000:
+        raise RuntimeError("R10 oturum değişkeni güvenli boyut sınırını aşıyor")
+    compact += "=" * ((4 - len(compact) % 4) % 4)
+    try:
+        raw = base64.b64decode(compact.encode("ascii"), validate=True)
+        state = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error) as exc:
+        raise RuntimeError("R10_SESSION_STATE_B64 geçersiz veya bozuk") from exc
+    if not isinstance(state, dict):
+        raise RuntimeError("R10 oturum verisi geçersiz")
+
+    cookies = []
+    for item in state.get("cookies") or []:
+        if not isinstance(item, dict):
+            continue
+        domain = str(item.get("domain") or "").lstrip(".").casefold()
+        name = str(item.get("name") or "")
+        value = str(item.get("value") or "")
+        if (domain == "r10.net" or domain.endswith(".r10.net")) and name and value:
+            clean = dict(item)
+            clean["domain"] = str(item.get("domain") or "")
+            cookies.append(clean)
+    origins = []
+    for item in state.get("origins") or []:
+        if not isinstance(item, dict):
+            continue
+        parsed = urlparse(str(item.get("origin") or ""))
+        host = str(parsed.hostname or "").casefold()
+        if parsed.scheme == "https" and (host == "r10.net" or host.endswith(".r10.net")):
+            origins.append(dict(item))
+    if not cookies:
+        raise RuntimeError("R10 oturum verisinde kullanılabilir çerez bulunamadı")
+    return {"cookies": cookies, "origins": origins}
+
+
 def _r10_launch_playwright_browser():
     global _r10_browser_driver, _r10_browser, _r10_browser_context, _r10_browser_page
     factory = _r10_sync_playwright_factory()
@@ -5407,12 +5460,16 @@ def _r10_launch_playwright_browser():
             _r10_browser = _r10_browser_driver.chromium.launch(**launch_options)
         else:
             raise RuntimeError(f"R10 Chromium başlatılamadı: {first_error}") from first_error
-    _r10_browser_context = _r10_browser.new_context(
-        locale="tr-TR",
-        timezone_id="Europe/Istanbul",
-        viewport={"width": 1365, "height": 768},
-        java_script_enabled=True,
-    )
+    context_options = {
+        "locale": "tr-TR",
+        "timezone_id": "Europe/Istanbul",
+        "viewport": {"width": 1365, "height": 768},
+        "java_script_enabled": True,
+    }
+    session_state = _r10_session_storage_state()
+    if session_state is not None:
+        context_options["storage_state"] = session_state
+    _r10_browser_context = _r10_browser.new_context(**context_options)
     _r10_browser_page = _r10_browser_context.new_page()
     _r10_browser_page.set_default_timeout(R10_AUTO_HTTP_TIMEOUT * 1000)
     return _r10_browser_page
@@ -5657,6 +5714,14 @@ def _r10_authenticated_browser(force=False):
         page = _r10_browser_page or _r10_launch_playwright_browser()
         current_url, html = _r10_browser_goto(page, R10_LOGIN_URL)
         if not _r10_browser_authenticated(page, html):
+            # When a transferred session is configured, never fall back to a
+            # password login. A stale or Cloudflare-bound session must fail
+            # closed and be renewed by the account owner.
+            if R10_SESSION_STATE_CONFIGURED:
+                raise RuntimeError(
+                    "R10 oturumu geçersiz veya Railway bağlantısında kabul edilmedi. "
+                    "Yeni oturum değişkeni oluşturulmalıdır."
+                )
             html = _r10_browser_submit_login(page)
             current_url = str(page.url)
         inbox_url, _ = _r10_browser_find_inbox(page, current_url, html)
@@ -6020,6 +6085,8 @@ def _r10_auto_status(status, detail="", approved=0):
         "checked_at": now(),
         "approved": int(approved or 0),
         "configured": bool(R10_AUTO_KEY_CONFIGURED),
+        "auth_mode": R10_AUTH_MODE,
+        "session_configured": bool(R10_SESSION_STATE_CONFIGURED),
     }
     try:
         with _db_connect() as conn:
@@ -6090,7 +6157,7 @@ def _r10_auto_key_requests_once():
     """
     global _r10_auto_session
     if not R10_AUTO_KEY_CONFIGURED:
-        _r10_auto_status("disabled", "R10 hesap bilgileri girilmedi")
+        _r10_auto_status("disabled", "R10 oturumu veya hesap bilgileri girilmedi")
         return 0
     try:
         client = _r10_authenticated_session()
@@ -6135,9 +6202,9 @@ def _r10_auto_key_requests_once():
 
 
 def r10_auto_key_once():
-    """Check R10 PMs with a normal browser and approve only strict matches."""
+    """Check R10 PMs and approve only strict Key + sender matches."""
     if not R10_AUTO_KEY_CONFIGURED:
-        _r10_auto_status("disabled", "R10 e-posta ve parola bilgileri girilmedi")
+        _r10_auto_status("disabled", "R10 oturumu veya hesap bilgileri girilmedi")
         return 0
     if not R10_AUTO_BROWSER_ENABLED:
         return _r10_auto_key_requests_once()
@@ -6167,7 +6234,15 @@ def r10_auto_key_once():
     except Exception as exc:
         with _r10_browser_lock:
             _r10_close_playwright_browser()
-        _r10_auto_status("error", f"{type(exc).__name__}: {exc}")
+        detail = f"{type(exc).__name__}: {exc}"
+        lowered = str(exc).casefold()
+        status = "session_expired" if R10_SESSION_STATE_CONFIGURED and any(
+            token in lowered for token in (
+                "oturumu geçersiz", "oturumu geceriz", "güvenlik doğrulaması",
+                "guvenlik dogrulamasi", "cloudflare", "gelen kutusu oturumu",
+            )
+        ) else "error"
+        _r10_auto_status(status, detail)
         raise
 
 def approve_r10_with_key(uid, submitted_key, iban_owner, actor):
@@ -8140,6 +8215,8 @@ def version_info():
         "sweep_release": SWEEP_RELEASE,
         "signer_stage": SIGNER_STAGE,
         "source_base_sha256": SOURCE_BASE_SHA256,
+        "r10_auth_mode": R10_AUTH_MODE,
+        "r10_session_configured": bool(R10_SESSION_STATE_CONFIGURED),
     }
 
 
@@ -11168,7 +11245,7 @@ def start_background_services_once():
                 name="r10-auto-key",
             ).start()
         else:
-            _r10_auto_status("disabled", "R10 hesap bilgileri girilmedi")
+            _r10_auto_status("disabled", "R10 oturumu veya hesap bilgileri girilmedi")
         start_exchange_threads()
         _background_services_started = True
         print("BUILD VERSION:", BUILD_VERSION)
