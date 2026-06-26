@@ -53,6 +53,7 @@ BLOCKCYPHER_KEY = os.getenv("BLOCKCYPHER_KEY", "").strip()
 ALCHEMY_KEY = os.getenv("ALCHEMY_KEY", "").strip()
 TRONGRID_KEY = os.getenv("TRONGRID_KEY", "").strip()
 WALLET_SCAN_SECONDS = max(30, int(os.getenv("WALLET_SCAN_SECONDS", "60")))
+R10_FETCH_HARD_TIMEOUT = max(10, min(60, int(os.getenv("R10_FETCH_HARD_TIMEOUT", "25"))))
 
 # Exchange core / blockchain infrastructure
 EXCHANGE_MODE = os.getenv("EXCHANGE_MODE", "on").strip().lower() == "on"
@@ -118,7 +119,7 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V14"
+BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V15"
 PANEL_RELEASE = "TREASURY-CONTROL-CENTER-V11"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
@@ -3809,9 +3810,12 @@ def lang_of(uid):
     return lang if lang in ("tr", "en") else "tr"
 
 
-def t(uid, key, **kwargs):
+def t(uid, message_key, **kwargs):
     lang = lang_of(uid)
-    value = BOT_TEXTS.get(lang, BOT_TEXTS["tr"]).get(key, BOT_TEXTS["tr"].get(key, key))
+    value = BOT_TEXTS.get(lang, BOT_TEXTS["tr"]).get(
+        message_key,
+        BOT_TEXTS["tr"].get(message_key, message_key),
+    )
     try:
         return value.format(**kwargs)
     except (KeyError, ValueError):
@@ -4139,6 +4143,125 @@ def begin_r10_verification(chat_id):
     uid = str(chat_id)
     user_state[uid] = {"flow": "r10_verify", "step": "profile_link"}
     send(chat_id, t(uid, "r10_link_question"))
+
+
+def _r10_fetch_worker(profile_text, result_box, done_event):
+    try:
+        result_box["parsed"] = fetch_r10_profile_mask(profile_text)
+    except Exception as exc:
+        result_box["error"] = exc
+    finally:
+        done_event.set()
+
+
+def _r10_complete_profile_check(chat_id, uid, profile_text, check_token, result_box, done_event):
+    completed = done_event.wait(R10_FETCH_HARD_TIMEOUT)
+    state = user_state.get(uid)
+    if not state or state.get("r10_check_token") != check_token:
+        return
+
+    state["r10_checking"] = False
+    state.pop("r10_check_token", None)
+
+    if not completed:
+        print("R10 PROFILE HARD TIMEOUT:", profile_text)
+        send(chat_id, t(uid, "r10_fetch_failed"))
+        return
+
+    error = result_box.get("error")
+    if error is not None:
+        if isinstance(error, ValueError):
+            error_code = str(error)
+            if error_code == "invalid_link":
+                message_key = "r10_invalid_link"
+            elif error_code == "name_not_found":
+                message_key = "r10_hidden_name"
+            else:
+                message_key = "r10_fetch_failed"
+        else:
+            message_key = "r10_fetch_failed"
+        print("R10 PROFILE FETCH ERROR:", repr(error))
+        send(chat_id, t(uid, message_key))
+        return
+
+    parsed = result_box.get("parsed")
+    if not isinstance(parsed, dict):
+        print("R10 PROFILE RESULT ERROR: parsed result is missing")
+        send(chat_id, t(uid, "r10_fetch_failed"))
+        return
+
+    try:
+        if r10_profile_used_by(parsed.get("profile_slug"), uid):
+            send(chat_id, t(uid, "r10_duplicate"), reply_keyboard(uid))
+            user_state.pop(uid, None)
+            return
+
+        if parsed.get("account_type") == "personal" and (
+            int(parsed.get("months") or 0) < 6 or int(parsed.get("trades") or 0) < 5
+        ):
+            send(chat_id, t(uid, "r10_rules_failed"), reply_keyboard(uid))
+            user_state.pop(uid, None)
+            return
+
+        key = "NERLO-" + secrets.token_hex(3).upper()
+        users[uid]["r10_verification"] = {
+            "status": "pending",
+            "profile_url": parsed.get("profile_url", profile_text),
+            "profile_slug": parsed.get("profile_slug", ""),
+            "masked_name": parsed["masked"],
+            "account_type": parsed.get("account_type", "personal"),
+            "first2": parsed.get("first2", ""),
+            "last2": parsed.get("last2", ""),
+            "key": key,
+            "r10_months": int(parsed.get("months") or 0),
+            "r10_trades": int(parsed.get("trades") or 0),
+            "iban_owner": "",
+            "created_at": now(),
+            "approved_at": "",
+            "approved_by": "",
+        }
+        save_user_profile(uid)
+        add_admin_log("r10_verify_started", "R10 doğrulama başlatıldı", uid)
+        user_state.pop(uid, None)
+
+        if parsed.get("account_type") == "corporate":
+            send(chat_id, t(uid, "r10_corporate_key_sent", key=key), reply_keyboard(uid))
+        else:
+            send(chat_id, t(uid, "r10_key_sent", name=parsed["masked"], key=key), reply_keyboard(uid))
+    except Exception as exc:
+        print("R10 PROFILE COMPLETE ERROR:", repr(exc))
+        send(chat_id, t(uid, "r10_fetch_failed"))
+
+
+def start_r10_profile_check(chat_id, uid, profile_text):
+    state = user_state.get(uid)
+    if not state or state.get("flow") != "r10_verify" or state.get("step") != "profile_link":
+        return False
+    if state.get("r10_checking"):
+        send(chat_id, t(uid, "r10_checking"))
+        return True
+
+    check_token = secrets.token_urlsafe(12)
+    state["r10_checking"] = True
+    state["r10_check_token"] = check_token
+    send(chat_id, t(uid, "r10_checking"))
+
+    result_box = {}
+    done_event = threading.Event()
+    threading.Thread(
+        target=_r10_fetch_worker,
+        args=(profile_text, result_box, done_event),
+        daemon=True,
+        name=f"r10-fetch-{uid}",
+    ).start()
+    threading.Thread(
+        target=_r10_complete_profile_check,
+        args=(chat_id, uid, profile_text, check_token, result_box, done_event),
+        daemon=True,
+        name=f"r10-complete-{uid}",
+    ).start()
+    return True
+
 
 def hash_pin(pin):
     return generate_password_hash(str(pin), method="scrypt")
@@ -5079,35 +5202,7 @@ def handle_text(chat_id, username, text):
     flow, step = state.get("flow"), state.get("step")
 
     if flow == "r10_verify" and step == "profile_link":
-        send(chat_id, t(uid, "r10_checking"))
-        try:
-            parsed = fetch_r10_profile_mask(text)
-        except ValueError as exc:
-            send(chat_id, t(uid, "r10_invalid_link") if str(exc) == "invalid_link" else (t(uid, "r10_hidden_name") if str(exc) == "name_not_found" else t(uid, "r10_fetch_failed")))
-            return
-        except Exception as exc:
-            print("R10 PROFILE FETCH ERROR:", exc)
-            send(chat_id, t(uid, "r10_fetch_failed"))
-            return
-        if r10_profile_used_by(parsed.get("profile_slug"), uid):
-            send(chat_id, t(uid, "r10_duplicate"), reply_keyboard(uid)); user_state.pop(uid, None); return
-        if parsed.get("account_type") == "personal" and (int(parsed.get("months") or 0) < 6 or int(parsed.get("trades") or 0) < 5):
-            send(chat_id, t(uid, "r10_rules_failed"), reply_keyboard(uid)); user_state.pop(uid, None); return
-        key = "NERLO-" + secrets.token_hex(3).upper()
-        users[uid]["r10_verification"] = {
-            "status": "pending", "profile_url": parsed.get("profile_url", text), "profile_slug": parsed.get("profile_slug", ""),
-            "masked_name": parsed["masked"], "account_type": parsed.get("account_type", "personal"),
-            "first2": parsed.get("first2", ""), "last2": parsed.get("last2", ""), "key": key,
-            "r10_months": int(parsed.get("months") or 0), "r10_trades": int(parsed.get("trades") or 0),
-            "iban_owner": "", "created_at": now(), "approved_at": "", "approved_by": "",
-        }
-        save_user_profile(uid)
-        add_admin_log("r10_verify_started", "R10 doğrulama başlatıldı", uid)
-        user_state.pop(uid, None)
-        if parsed.get("account_type") == "corporate":
-            send(chat_id, t(uid, "r10_corporate_key_sent", key=key), reply_keyboard(uid))
-        else:
-            send(chat_id, t(uid, "r10_key_sent", name=parsed["masked"], key=key), reply_keyboard(uid))
+        start_r10_profile_check(chat_id, uid, text)
         return
 
     if step == "set_pin":
