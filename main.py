@@ -167,12 +167,12 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-26-R10-LOCAL-AGENT-V31"
-PANEL_RELEASE = "NERLO-CONTROL-CENTER-V23-R10-LOCAL-AGENT"
+BUILD_VERSION = "NERLO-2026-06-26-PRO-PANEL-V32"
+PANEL_RELEASE = "NERLO-OPERATIONS-CONSOLE-V32"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
 SWEEP_RELEASE = "TRON-HD-DEPOSIT-SWEEP-V1"
-SOURCE_BASE_SHA256 = "b3c92299f15d639b137929fb71f14be1f0990046118e085ab7ce819346beca7a"
+SOURCE_BASE_SHA256 = "dede1b533b64beea599f22911b30705bced39dbdd16c300b06046e222679354b"
 
 CONFIRMATION_THRESHOLDS = {
     "BTC": max(1, int(os.getenv("BTC_CONFIRMATIONS", "3"))),
@@ -10648,6 +10648,143 @@ def set_admin_notice(message, kind="success"):
 EDITABLE_SETTING_KEYS = [key for key in DEFAULT_SETTINGS if not key.startswith("icon_") and key not in {"rates_source", "rates_last_updated", "rates_last_error"}]
 
 
+def _request_ledger_entry_types(rid):
+    """Return immutable ledger entry types linked to one request."""
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT entry_type
+                FROM exchange_ledger
+                WHERE reference_type='request' AND reference_id=%s
+                ORDER BY id
+                """,
+                (str(rid),),
+            )
+            return {str(row[0] or "") for row in cur.fetchall()}
+
+
+def _request_reset_category(record):
+    """Classify an open request without changing money or blockchain state."""
+    record = dict(record or {})
+    if str(record.get("status") or "") not in ("pending", "processing"):
+        return "closed"
+    request_type = str(record.get("type") or record.get("request_type") or "")
+    if record.get("broadcast_locked") or record.get("broadcast_txid") or record.get("manual_txid"):
+        return "network"
+    if bool(record.get("automatic")) and request_type == "deposit":
+        return "network"
+    if request_type == "convert":
+        return "reconcile"
+    if request_type in ("deposit", "withdraw"):
+        return "actionable"
+    return "reconcile"
+
+
+def _set_request_terminal_state(rid, status, reason):
+    changes = {
+        "status": str(status),
+        "updated_at": now(),
+        "panel_reconciled_at": now(),
+        "panel_reconciled_by": current_panel_username(),
+        "panel_reconcile_reason": str(reason or "")[:500],
+    }
+    if status == "completed":
+        changes["completed_at"] = now()
+    else:
+        changes["rejected_at"] = now()
+        changes["failure_reason"] = "panel_pending_reconcile"
+    return exchange_update_request(str(rid), changes)
+
+
+def reset_open_requests_safely():
+    """Close safe/manual requests and reconcile stale records.
+
+    Blockchain deposits and already-broadcast withdrawals are deliberately left
+    untouched. Their status is controlled by the chain/indexer, not the panel.
+    """
+    refresh_request_cache()
+    result = {
+        "closed": 0,
+        "reconciled": 0,
+        "network": 0,
+        "review": 0,
+        "failed": 0,
+        "failed_ids": [],
+    }
+    targets = [
+        (str(rid), dict(record or {}))
+        for rid, record in requests_db.items()
+        if str((record or {}).get("status") or "") in ("pending", "processing")
+    ]
+
+    for rid, record in targets:
+        category = _request_reset_category(record)
+        request_type = str(record.get("type") or record.get("request_type") or "")
+        if category == "network":
+            result["network"] += 1
+            continue
+
+        if category == "actionable":
+            try:
+                exchange_admin_request_transition(rid, "reject_request")
+                result["closed"] += 1
+                continue
+            except Exception as exc:
+                # A stale request may already have had its money released while
+                # only its visible status remained open. Reconcile only when the
+                # immutable ledger proves a terminal outcome or has no entries.
+                print("PENDING REQUEST NORMAL RESET FAILED:", rid, type(exc).__name__, exc)
+
+        try:
+            entry_types = _request_ledger_entry_types(rid)
+            if request_type == "convert":
+                if {"convert_out", "convert_in"}.issubset(entry_types):
+                    _set_request_terminal_state(rid, "completed", "Dönüşüm ledger kayıtları tamamlanmıştı; açık durum düzeltildi.")
+                    result["reconciled"] += 1
+                elif not entry_types:
+                    _set_request_terminal_state(rid, "rejected", "Ledger hareketi olmayan yarım dönüşüm kaydı kapatıldı.")
+                    result["reconciled"] += 1
+                else:
+                    result["review"] += 1
+                continue
+
+            if request_type == "deposit":
+                if entry_types & {"deposit_approved", "deposit_pending_release", "blockchain_deposit_confirmed"}:
+                    _set_request_terminal_state(rid, "completed", "Yatırım ledger üzerinde tamamlanmıştı; açık durum düzeltildi.")
+                    result["reconciled"] += 1
+                elif entry_types & {"deposit_pending_cancel", "deposit_reorg_pending_reversal"} or not entry_types:
+                    _set_request_terminal_state(rid, "rejected", "Yatırım bakiyesi ayrılmamış veya daha önce bırakılmıştı; açık durum kapatıldı.")
+                    result["reconciled"] += 1
+                else:
+                    result["review"] += 1
+                continue
+
+            if request_type == "withdraw":
+                if entry_types & {"withdrawal_broadcast_settled", "withdraw_pending_release"}:
+                    _set_request_terminal_state(rid, "completed", "Çekim ledger üzerinde tamamlanmıştı; açık durum düzeltildi.")
+                    result["reconciled"] += 1
+                elif entry_types & {"withdraw_refund", "withdraw_pending_cancel", "withdrawal_failed_refund"} or not entry_types:
+                    _set_request_terminal_state(rid, "rejected", "Çekim bakiyesi ayrılmamış veya daha önce iade edilmişti; açık durum kapatıldı.")
+                    result["reconciled"] += 1
+                else:
+                    result["review"] += 1
+                continue
+
+            if not entry_types:
+                _set_request_terminal_state(rid, "rejected", "Ledger hareketi olmayan eski açık kayıt kapatıldı.")
+                result["reconciled"] += 1
+            else:
+                result["review"] += 1
+        except Exception as exc:
+            result["failed"] += 1
+            result["failed_ids"].append(rid)
+            print("PENDING REQUEST RECONCILE ERROR:", rid, type(exc).__name__, exc)
+
+    refresh_request_cache()
+    return result
+
+
 @app.route("/admin", methods=["GET", "POST"])
 def admin():
     if not logged_in(): return redirect("/login")
@@ -10678,29 +10815,27 @@ def admin():
                 set_admin_notice("Canlı kurlar güncellenemedi. Kur Yönetimi bölümündeki hata bilgisini kontrol edin.", "error")
         elif action == "clear_pending_requests":
             if request.form.get("confirm_reset") != "BEKLEYENLERI_SIFIRLA":
-                set_admin_notice("Güvenli sıfırlama onayı doğrulanamadı.", "error")
+                set_admin_notice("Açık işlemleri kapatma onayı doğrulanamadı.", "error")
             else:
-                targets = [
-                    (str(rid), dict(record or {}))
-                    for rid, record in requests_db.items()
-                    if str((record or {}).get("type") or "") in ("deposit", "withdraw")
-                    and str((record or {}).get("status") or "") in ("pending", "processing")
-                    and not bool((record or {}).get("automatic"))
-                ]
-                cleared = 0
-                skipped = 0
-                for rid, record in targets:
-                    try:
-                        exchange_admin_request_transition(rid, "reject_request")
-                        cleared += 1
-                    except Exception as exc:
-                        skipped += 1
-                        print("PENDING REQUEST RESET SKIPPED:", rid, exc)
-                add_admin_log("clear_pending_requests", f"Güvenli sıfırlama · tamamlanan: {cleared}; atlanan: {skipped}")
-                if skipped:
-                    set_admin_notice(f"{cleared} bekleyen yatırım/çekim sıfırlandı; {skipped} güvenlik nedeniyle atlandı.", "error")
+                summary = reset_open_requests_safely()
+                add_admin_log(
+                    "clear_pending_requests",
+                    "Açık işlem toparlama · "
+                    f"kapatılan: {summary['closed']}; düzeltilen: {summary['reconciled']}; "
+                    f"ağda bekleyen: {summary['network']}; inceleme: {summary['review']}; hata: {summary['failed']}",
+                )
+                finished = summary["closed"] + summary["reconciled"]
+                if summary["failed"] or summary["review"]:
+                    set_admin_notice(
+                        f"{finished} açık kayıt kapatıldı. {summary['network']} ağ işlemi korundu; "
+                        f"{summary['review']} kayıt manuel incelemeye bırakıldı.",
+                        "error",
+                    )
                 else:
-                    set_admin_notice(f"{cleared} bekleyen yatırım/çekim güvenli biçimde sıfırlandı.")
+                    set_admin_notice(
+                        f"{finished} açık kayıt güvenli biçimde kapatıldı. "
+                        f"{summary['network']} blockchain işlemi ağ sonucu için açık bırakıldı."
+                    )
         elif action == "settings":
             validation_error = ""
             pending_settings = {}
@@ -10967,6 +11102,9 @@ def admin():
     status_counts = {key: 0 for key in ("pending", "processing", "completed", "rejected")}
     type_counts = {key: 0 for key in ("deposit", "withdraw", "convert")}
     open_type_counts = {key: 0 for key in ("deposit", "withdraw", "convert")}
+    resettable_count = 0
+    network_pending_count = 0
+    reconcile_count = 0
     for item in requests_db.values():
         item_status = str(item.get("status") or "pending")
         item_type = str(item.get("type") or "other")
@@ -10974,8 +11112,27 @@ def admin():
         type_counts[item_type] = type_counts.get(item_type, 0) + 1
         if item_status in ("pending", "processing") and item_type in open_type_counts:
             open_type_counts[item_type] += 1
+            category = _request_reset_category(item)
+            if category == "network":
+                network_pending_count += 1
+            elif category == "reconcile":
+                reconcile_count += 1
+                resettable_count += 1
+            elif category == "actionable":
+                resettable_count += 1
 
     pending_count = status_counts.get("pending", 0) + status_counts.get("processing", 0)
+    health_snapshot = exchange_health_snapshot()
+    r10_panel_status = dict((health_snapshot.get("r10_auto_key") or {}).get("status") or {})
+    r10_checked = _r10_time(r10_panel_status.get("checked_at"))
+    r10_agent_online = bool(
+        R10_LOCAL_AGENT_CONFIGURED
+        and r10_panel_status.get("status") == "ready"
+        and r10_checked
+        and (datetime.now() - r10_checked).total_seconds() <= max(180, R10_AUTO_KEY_POLL_SECONDS * 3)
+    )
+    ledger_mismatch_count = int((health_snapshot.get("reconciliation") or {}).get("mismatch_count", 0) or 0)
+    dead_job_count = int((health_snapshot.get("jobs") or {}).get("dead", 0) or 0)
     completed_today = sum(
         1 for r in requests_db.values()
         if r.get("status") == "completed" and str(r.get("updated_at", r.get("created_at", ""))).startswith(today())
@@ -11060,15 +11217,15 @@ def admin():
         notice_html = f"<div class='toast {'toast-error' if notice.get('kind') == 'error' else ''}' id='admin-toast'>{h(notice.get('message'))}</div>"
 
     nav_items = [
-        ("dashboard", "Kontrol Merkezi", "01", "Operasyon"),
-        ("pool", "Havuz ve Toplama", "02", "Operasyon"),
-        ("requests", "İşlem Talepleri", "03", "Operasyon"),
-        ("users", "Kullanıcılar", "04", "Yönetim"),
-        ("approvals", "Kullanıcı Onay", "05", "Yönetim"),
-        ("broadcast", "Duyurular", "06", "Yönetim"),
-        ("settings", "Sistem Ayarları", "07", "Sistem"),
-        ("logs", "Denetim Kayıtları", "08", "Sistem"),
-        ("admins", "Yetkililer", "09", "Sistem"),
+        ("dashboard", "Genel Bakış", "⌂", "ANA MENÜ"),
+        ("requests", "İşlemler", "⇄", "ANA MENÜ"),
+        ("users", "Kullanıcılar", "◎", "ANA MENÜ"),
+        ("approvals", "R10 Onayları", "✓", "OPERASYON"),
+        ("pool", "Havuz ve Sweep", "◇", "OPERASYON"),
+        ("broadcast", "Duyurular", "✉", "OPERASYON"),
+        ("settings", "Ayarlar", "⚙", "SİSTEM"),
+        ("logs", "Denetim Kayıtları", "≡", "SİSTEM"),
+        ("admins", "Yetkililer", "⌘", "SİSTEM"),
     ]
     nav_parts = []
     last_group = None
@@ -11088,24 +11245,56 @@ def admin():
         )
     nav_html = "".join(nav_parts)
 
+    health_alerts = []
+    if ledger_mismatch_count:
+        health_alerts.append(("critical", "Bakiye defteri uyuşmazlığı", f"{ledger_mismatch_count} hesap kontrol gerektiriyor."))
+    if dead_job_count:
+        health_alerts.append(("critical", "Başarısız arka plan işi", f"{dead_job_count} görev tekrar çalıştırılamadı."))
+    if pool_review_count:
+        health_alerts.append(("warning", "Sweep incelemesi", f"{pool_review_count} havuz hareketi inceleme bekliyor."))
+    if R10_LOCAL_AGENT_ENABLED and not r10_agent_online:
+        health_alerts.append(("warning", "R10 yerel ajan çevrimdışı", "Linux Mint bilgisayarındaki ajanı ve tarayıcıyı açın."))
+    if not health_alerts:
+        health_alerts.append(("ok", "Sistem normal", "Kritik uyarı bulunmuyor."))
+    health_alert_html = "".join(
+        f"<div class='health-row {h(level)}'><i></i><div><b>{h(title)}</b><span>{h(detail)}</span></div></div>"
+        for level, title, detail in health_alerts
+    )
+    reset_form_html = f"""
+      <form method='post' class='reset-command' onsubmit="return confirm('Panelde güvenle kapatılabilen tüm açık kayıtlar kapatılsın mı? Blockchain işlemleri korunacaktır.');">
+        <input type='hidden' name='action' value='clear_pending_requests'>
+        <input type='hidden' name='confirm_reset' value='BEKLEYENLERI_SIFIRLA'>
+        <input type='hidden' name='return_to' value='/admin?view=requests'>
+        <div><b>Açık kayıtları toparla</b><span>{resettable_count} kapatılabilir · {network_pending_count} ağ işlemi korunur</span></div>
+        <button class='btn danger' {'disabled' if resettable_count == 0 else ''}>Toparla ve Kapat</button>
+      </form>
+    """
+
     dashboard_section = f"""<section class='page-view {'active' if active_view == 'dashboard' else ''}' data-view='dashboard'>
-      <div class='dashboard-simple-head'><div><span>GENEL DURUM</span><h2>Kontrol Merkezi</h2></div><div><small>Son görünüm</small><b>{h(now())}</b></div></div>
-      <div class='dashboard-kpi-simple'>
-        <div><span>Toplam kullanıcı</span><strong>{len(users)}</strong><small>{approved_r10_users} R10 onaylı</small></div>
-        <div class='{'attention' if pending_count else ''}'><span>Açık işlem</span><strong>{pending_count}</strong><small>{status_counts.get('pending',0)} bekliyor · {status_counts.get('processing',0)} işleniyor</small></div>
-        <div><span>Bugün tamamlanan</span><strong>{completed_today}</strong><small>Başarılı işlem</small></div>
-        <div class='{'attention' if frozen_users or locked_users else ''}'><span>Kısıtlı hesap</span><strong>{frozen_users + locked_users}</strong><small>{frozen_users} dondurulmuş · {locked_users} çekim kilitli</small></div>
+      <div class='ops-hero'>
+        <div><span class='eyebrow'>NERLO OPERATIONS</span><h2>Genel Bakış</h2><p>İşlemler, güvenlik ve sistem sağlığı tek ekranda.</p></div>
+        <div class='hero-meta'><small>Son yenileme</small><b>{h(now())}</b></div>
       </div>
-      <div class='dashboard-summary-grid'>
-        <section class='surface dashboard-queue-card'>
-          <div class='surface-head'><div><span>AÇIK İŞLEMLER</span><h3>Operasyon özeti</h3></div><button type='button' class='text-action' data-jump-view='requests'>İşlem taleplerini aç</button></div>
-          <div class='dashboard-open-types'><div><span>Yatırım</span><b>{open_type_counts.get('deposit',0)}</b></div><div><span>Çekim</span><b>{open_type_counts.get('withdraw',0)}</b></div><div><span>Dönüşüm</span><b>{open_type_counts.get('convert',0)}</b></div></div>
-          <details class='pending-reset-box'><summary>Bekleyen yatırım ve çekimleri sıfırla</summary><p>Yalnızca manuel bekleyen kayıtlar güvenli biçimde reddedilir; ayrılmış çekim bakiyesi kullanıcıya iade edilir. Blockchain tarafından otomatik izlenen işlemler değiştirilmez.</p><form method='post' onsubmit="return confirm('Bekleyen manuel yatırım ve çekim işlemleri güvenli biçimde sıfırlansın mı?');"><input type='hidden' name='action' value='clear_pending_requests'><input type='hidden' name='confirm_reset' value='BEKLEYENLERI_SIFIRLA'><input type='hidden' name='return_to' value='/admin?view=dashboard'><button class='btn danger'>Güvenli Sıfırlamayı Uygula</button></form></details>
+      <div class='metric-strip'>
+        <button type='button' data-jump-view='users'><span>Kullanıcı</span><strong>{len(users)}</strong><small>{approved_r10_users} R10 onaylı</small></button>
+        <button type='button' data-jump-view='requests' class='{'attention' if resettable_count else ''}'><span>İşlem bekliyor</span><strong>{resettable_count}</strong><small>{network_pending_count} ağ onayı ayrı izleniyor</small></button>
+        <button type='button' data-jump-view='requests'><span>Bugün tamamlanan</span><strong>{completed_today}</strong><small>Başarılı kayıt</small></button>
+        <button type='button' data-jump-view='users' class='{'attention' if frozen_users or locked_users else ''}'><span>Kısıtlı hesap</span><strong>{frozen_users + locked_users}</strong><small>{frozen_users} dondurulmuş · {locked_users} çekim kilitli</small></button>
+      </div>
+      <div class='dashboard-command-grid'>
+        <section class='surface primary-surface'>
+          <div class='surface-head'><div><span>OPERASYON KUYRUĞU</span><h3>Açık işlemler</h3></div><button type='button' class='text-action' data-jump-view='requests'>Tümünü aç</button></div>
+          <div class='queue-breakdown'><div><span>Yatırım</span><b>{open_type_counts.get('deposit',0)}</b></div><div><span>Çekim</span><b>{open_type_counts.get('withdraw',0)}</b></div><div><span>Dönüşüm</span><b>{open_type_counts.get('convert',0)}</b></div></div>
+          {reset_form_html}
         </section>
-        <section class='surface'><div class='surface-head'><div><span>SON HAREKETLER</span><h3>Güncel işlemler</h3></div><small>Son 8 kayıt</small></div><div class='activity-list'>{recent_activity}</div></section>
+        <section class='surface'>
+          <div class='surface-head'><div><span>SİSTEM SAĞLIĞI</span><h3>Canlı kontroller</h3></div><span class='compact-state {'online' if r10_agent_online else 'offline'}'>R10 ajan {'açık' if r10_agent_online else 'kapalı'}</span></div>
+          <div class='health-list'>{health_alert_html}</div>
+        </section>
       </div>
+      <section class='surface activity-surface'><div class='surface-head'><div><span>SON HAREKETLER</span><h3>Güncel işlemler</h3></div><button type='button' class='text-action' data-jump-view='requests'>İşlem geçmişi</button></div><div class='activity-list'>{recent_activity}</div></section>
       <details class='surface dashboard-asset-details'>
-        <summary><span>Varlık bakiyeleri</span><small>Kullanıcı yükümlülükleri ve açık çekimler</small></summary>
+        <summary><span>Varlık ve yükümlülük özeti</span><small>Kullanıcı bakiyeleri ile açık çekimler</small></summary>
         <div class='table-wrap'><table class='compact-asset-table'><thead><tr><th>Varlık</th><th>Kullanıcı bakiyesi</th><th>Bekleyen çekim</th></tr></thead><tbody>{asset_rows}</tbody></table></div>
       </details>
     </section>""" if "dashboard" in allowed_views else ""
@@ -11122,8 +11311,12 @@ def admin():
     </section>""" if "pool" in allowed_views else ""
 
     requests_section = f"""<section class='page-view {'active' if active_view == 'requests' else ''}' data-view='requests'>
-      <div class='page-heading'><div><span>ONAY VE İŞLEM AKIŞI</span><h2>İşlem talepleri</h2><p>Her talebi açık tutar, hedef, ağ ve durum bilgileriyle yönetin.</p></div><div class='heading-metrics'><span>Bekleyen <b>{status_counts.get('pending',0)}</b></span><span>İşlenen <b>{status_counts.get('processing',0)}</b></span></div></div>
-      <form id='request-filter' class='command-filter'><div class='search-field'><span>⌕</span><input name='rq' value='{h(request_query)}' placeholder='İşlem no, kullanıcı ID veya kullanıcı adı'></div><select name='status'><option value='all'>Tüm durumlar</option>{''.join(f"<option value='{s}' {'selected' if status_filter == s else ''}>{status_label(s)}</option>" for s in ['pending','processing','completed','rejected'])}</select><select name='type'><option value='all'>Tüm işlem türleri</option>{''.join(f"<option value='{t}' {'selected' if type_filter == t else ''}>{request_type_label(t)}</option>" for t in ['deposit','withdraw','convert'])}</select><button class='btn primary'>Filtrele</button></form>
+      <div class='page-heading clean-heading'><div><span>İŞLEM YÖNETİMİ</span><h2>İşlemler</h2><p>Bekleyen kayıtları inceleyin, tamamlayın veya güvenli biçimde kapatın.</p></div><div class='heading-metrics'><span>Kapatılabilir <b>{resettable_count}</b></span><span>Ağda bekleyen <b>{network_pending_count}</b></span></div></div>
+      <div class='request-toolbar'>
+        <form id='request-filter' class='command-filter'><div class='search-field'><span>⌕</span><input name='rq' value='{h(request_query)}' placeholder='İşlem no, kullanıcı ID veya kullanıcı adı'></div><select name='status'><option value='all'>Tüm durumlar</option>{''.join(f"<option value='{status}' {'selected' if status_filter == status else ''}>{status_label(status)}</option>" for status in ['pending','processing','completed','rejected'])}</select><select name='type'><option value='all'>Tüm türler</option>{''.join(f"<option value='{kind}' {'selected' if type_filter == kind else ''}>{request_type_label(kind)}</option>" for kind in ['deposit','withdraw','convert'])}</select><button class='btn primary'>Uygula</button></form>
+        {reset_form_html}
+      </div>
+      <div class='info-line'><span><b>Not:</b> Blockchain yatırımları ve ağa gönderilmiş çekimler bu toplu işlemle kapatılmaz.</span><span>{status_counts.get('pending',0)} bekliyor · {status_counts.get('processing',0)} işleniyor</span></div>
       <div id='request-list' class='case-list'>{render_request_list(request_query, status_filter, type_filter)}</div>
     </section>""" if "requests" in allowed_views else ""
 
@@ -11228,6 +11421,36 @@ def admin():
     .rate-status-card{display:grid;grid-template-columns:minmax(220px,.8fr) minmax(0,1.5fr) auto;align-items:center;gap:18px;padding:16px;margin-bottom:14px;border:1px solid #203348;border-radius:14px;background:linear-gradient(120deg,#0d1b29,#0a1119)}.rate-status-card.ok{border-color:rgba(67,190,124,.25)}.rate-status-card.error{border-color:rgba(225,92,92,.3)}.rate-status-card>div span,.rate-status-card>div b,.rate-status-card>div small{display:block}.rate-status-card>div span{color:#68809a;font-size:7px;letter-spacing:.14em}.rate-status-card>div b{margin:4px 0;font-size:14px}.rate-status-card>div small{color:#68798d;font-size:8px;overflow-wrap:anywhere}.rate-status-card dl{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:0}.rate-status-card dl>div{padding:9px;border:1px solid rgba(255,255,255,.055);border-radius:10px;background:rgba(0,0,0,.12)}.rate-status-card dt{color:#607187;font-size:7px}.rate-status-card dd{margin:4px 0 0;color:#c2cfdb;font-size:8px;overflow-wrap:anywhere}
     @media(max-width:1180px){.dashboard-kpi-simple{grid-template-columns:repeat(2,minmax(0,1fr))}.dashboard-summary-grid{grid-template-columns:1fr}.approval-main-actions{grid-template-columns:1fr}.approval-quick-facts{grid-template-columns:repeat(2,minmax(0,1fr))}.rate-status-card{grid-template-columns:1fr}.rate-status-card dl{grid-template-columns:repeat(2,minmax(0,1fr))}}
     @media(max-width:700px){.dashboard-simple-head,.approval-workbench-head,.approval-key-strip,.approval-workbench-foot{align-items:flex-start;flex-direction:column}.dashboard-kpi-simple,.dashboard-open-types,.approval-stat-simple,.approval-quick-facts,.approval-secondary-content,.rate-status-card dl{grid-template-columns:1fr}.approval-main-actions{padding:0 12px 12px}.approval-key-strip,.approval-secondary-panel{margin-left:12px;margin-right:12px}.approval-master-detail{grid-template-columns:1fr}}
+
+
+    /* V32: sade, tutarlı ve profesyonel yönetim arayüzü */
+    :root{--bg:#07101f;--bg2:#0a1425;--panel:#0e1a2d;--panel2:#111f34;--line:#22324a;--line2:#2e405c;--text:#f2f6fc;--muted:#8fa0b9;--accent:#4f8cff;--accent2:#78a7ff;--green:#38c793;--amber:#f0b85a;--red:#ef6a72;--shadow:0 18px 60px rgba(0,0,0,.28)}
+    *{box-sizing:border-box}html{background:var(--bg)}body{margin:0;background:radial-gradient(circle at 80% -10%,rgba(79,140,255,.14),transparent 34%),linear-gradient(180deg,#07101f 0%,#091424 100%);color:var(--text);font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;line-height:1.5}
+    button,input,select,textarea{font:inherit}.control-shell{min-height:100vh;display:grid;grid-template-columns:248px minmax(0,1fr)}
+    .sidebar{position:sticky;top:0;height:100vh;padding:22px 16px 16px;background:rgba(7,16,31,.94);border-right:1px solid var(--line);display:flex;flex-direction:column;backdrop-filter:blur(16px);z-index:30}.brand{display:flex;align-items:center;gap:12px;padding:0 8px 22px;border-bottom:1px solid var(--line)}.brand-mark{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;background:linear-gradient(145deg,var(--accent),#315fb8);box-shadow:0 8px 24px rgba(79,140,255,.28);font-weight:800;color:white}.brand strong{display:block;font-size:15px;letter-spacing:.01em}.brand small{display:block;color:var(--muted);font-size:11px;margin-top:2px}
+    .nav-scroll{padding:18px 0;overflow:auto;display:flex;flex-direction:column;gap:4px}.nav-group-label{padding:14px 11px 6px;font-size:10px;font-weight:750;letter-spacing:.14em;color:#65758e}.nav-entry{width:100%;display:grid;grid-template-columns:26px minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px 12px;border:1px solid transparent;border-radius:10px;background:transparent;color:#9dadc4;text-align:left;cursor:pointer;transition:.16s ease}.nav-entry>span{font-size:16px;color:#7486a2;text-align:center}.nav-entry b{font-weight:620;font-size:13px}.nav-entry em{min-width:21px;height:21px;padding:0 6px;border-radius:999px;display:grid;place-items:center;background:#244b8d;color:#dceaff;font-style:normal;font-size:11px}.nav-entry:hover{background:#0f1d31;color:white}.nav-entry.active{background:linear-gradient(90deg,rgba(79,140,255,.18),rgba(79,140,255,.06));border-color:rgba(79,140,255,.3);color:white}.nav-entry.active>span{color:var(--accent2)}
+    .sidebar-footer{margin-top:auto;padding:14px 8px 0;border-top:1px solid var(--line)}.operator{display:flex;align-items:center;gap:10px;margin-bottom:12px}.operator-avatar{width:34px;height:34px;border-radius:10px;background:#17253a;display:grid;place-items:center;font-weight:800}.operator strong,.operator small{display:block}.operator small{font-size:10px;color:var(--muted)}.signout{display:block;text-decoration:none;color:#aab7cb;padding:9px 10px;border-radius:8px;background:#0d192b;text-align:center;font-size:12px}.signout:hover{color:white;background:#15243a}
+    .workspace{min-width:0}.topbar{height:72px;position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;padding:0 28px;background:rgba(7,16,31,.82);border-bottom:1px solid var(--line);backdrop-filter:blur(16px)}.topbar-left{display:flex;align-items:center;gap:13px}.breadcrumbs span{display:block;font-size:9px;letter-spacing:.16em;color:#6f82a0;font-weight:750}.breadcrumbs h1{margin:1px 0 0;font-size:19px;letter-spacing:-.02em}.menu-toggle{display:none;border:0;background:#122039;color:white;border-radius:9px;width:38px;height:38px}.system-health{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.health-chip{display:flex;align-items:center;gap:7px;padding:7px 10px;border:1px solid #21334c;border-radius:999px;background:#0d192a;color:#aebbd0;font-size:11px}.health-chip i{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(56,199,147,.12)}.health-chip.warn i{background:var(--amber);box-shadow:0 0 0 3px rgba(240,184,90,.12)}
+    .content{padding:28px;max-width:1560px;margin:0 auto}.page-view{display:none}.page-view.active{display:block;animation:panelFade .18s ease}@keyframes panelFade{from{opacity:.4;transform:translateY(4px)}to{opacity:1;transform:none}}
+    .ops-hero,.page-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:22px}.ops-hero h2,.page-heading h2{margin:2px 0 5px;font-size:28px;letter-spacing:-.035em}.ops-hero p,.page-heading p{margin:0;color:var(--muted)}.eyebrow,.page-heading>div>span,.surface-head>div>span,.section-head .eyebrow{font-size:10px;letter-spacing:.14em;color:#7890b4;font-weight:750}.hero-meta{text-align:right}.hero-meta small,.hero-meta b{display:block}.hero-meta small{color:var(--muted);font-size:11px}.hero-meta b{font-size:12px;margin-top:3px}
+    .metric-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}.metric-strip button{border:1px solid var(--line);background:linear-gradient(180deg,var(--panel),#0c1829);color:var(--text);border-radius:13px;padding:18px;text-align:left;cursor:pointer;box-shadow:0 10px 30px rgba(0,0,0,.12);transition:.15s}.metric-strip button:hover{transform:translateY(-2px);border-color:#38547b}.metric-strip span,.metric-strip small{display:block}.metric-strip span{font-size:11px;color:var(--muted)}.metric-strip strong{display:block;font-size:27px;line-height:1.2;margin:5px 0 2px}.metric-strip small{font-size:11px;color:#70829e}.metric-strip .attention{border-color:rgba(240,184,90,.36);background:linear-gradient(180deg,rgba(240,184,90,.1),#0c1829)}
+    .dashboard-command-grid{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(320px,.8fr);gap:16px;margin-bottom:16px}.surface,.panel-card{background:linear-gradient(180deg,rgba(17,31,52,.96),rgba(12,24,42,.96));border:1px solid var(--line);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.14)}.surface{padding:20px}.primary-surface{border-color:#2c4467}.surface-head,.section-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}.surface-head h3,.section-head h3{margin:2px 0 0;font-size:17px;letter-spacing:-.02em}.surface-head small,.section-head p{color:var(--muted);margin:0;font-size:11px}.text-action{border:0;background:transparent;color:var(--accent2);cursor:pointer;font-weight:650;font-size:12px}
+    .queue-breakdown{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px}.queue-breakdown div{padding:13px;border-radius:10px;background:#0a1628;border:1px solid #1c2b42}.queue-breakdown span,.queue-breakdown b{display:block}.queue-breakdown span{font-size:11px;color:var(--muted)}.queue-breakdown b{font-size:22px;margin-top:2px}.reset-command{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px;border-radius:11px;background:rgba(239,106,114,.06);border:1px solid rgba(239,106,114,.2)}.reset-command div b,.reset-command div span{display:block}.reset-command div b{font-size:12px}.reset-command div span{font-size:10px;color:var(--muted);margin-top:2px}.reset-command button:disabled{opacity:.45;cursor:not-allowed}
+    .health-list{display:flex;flex-direction:column;gap:8px}.health-row{display:flex;align-items:flex-start;gap:10px;padding:11px 12px;background:#0a1627;border:1px solid #1c2b42;border-radius:10px}.health-row i{width:8px;height:8px;border-radius:50%;margin-top:5px;background:var(--green)}.health-row.warning i{background:var(--amber)}.health-row.critical i{background:var(--red)}.health-row b,.health-row span{display:block}.health-row b{font-size:12px}.health-row span{font-size:10px;color:var(--muted);margin-top:2px}.compact-state{font-size:10px;padding:5px 8px;border-radius:999px;border:1px solid #28405e;color:#9eb0c8}.compact-state.online{color:#82ddb9;border-color:rgba(56,199,147,.28)}.compact-state.offline{color:#f3c672;border-color:rgba(240,184,90,.28)}
+    .activity-surface{margin-bottom:16px}.activity-list{display:flex;flex-direction:column}.activity-row{display:grid;grid-template-columns:12px minmax(0,1fr) auto;align-items:center;gap:10px;padding:11px 2px;border-bottom:1px solid #1a2a41}.activity-row:last-child{border-bottom:0}.activity-row strong,.activity-row small{display:block}.activity-row strong{font-size:12px}.activity-row small{font-size:10px;color:var(--muted);margin-top:2px}.activity-row>b{font-size:12px}.activity-mark{width:7px;height:7px;border-radius:50%;background:#64748b}.activity-mark.done{background:var(--green)}.activity-mark.waiting,.activity-mark.working{background:var(--amber)}.activity-mark.declined{background:var(--red)}
+    .dashboard-asset-details{padding:0;overflow:hidden}.dashboard-asset-details>summary{list-style:none;display:flex;justify-content:space-between;padding:17px 20px;cursor:pointer}.dashboard-asset-details>summary span{font-weight:650}.dashboard-asset-details>summary small{color:var(--muted)}
+    .request-toolbar{display:grid;grid-template-columns:minmax(0,1fr) minmax(330px,.62fr);gap:12px;align-items:stretch;margin-bottom:10px}.command-filter{display:grid;grid-template-columns:minmax(240px,1fr) 170px 150px auto;gap:8px;padding:10px;background:var(--panel);border:1px solid var(--line);border-radius:12px}.search-field{display:flex;align-items:center;gap:8px}.search-field>span{color:#7185a3}.command-filter input,.command-filter select,.user-command input,.form-grid input,.form-grid select,.form-grid textarea,.txid-command input{width:100%;height:40px;border-radius:8px;border:1px solid #293b55;background:#091528;color:var(--text);padding:0 11px;outline:none}.command-filter input:focus,.command-filter select:focus,.form-grid input:focus,.form-grid textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(79,140,255,.12)}.request-toolbar>.reset-command{background:var(--panel);border-color:var(--line)}.info-line{display:flex;justify-content:space-between;gap:12px;color:var(--muted);font-size:10px;margin:0 2px 14px}
+    .case-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.case-card{background:linear-gradient(180deg,var(--panel),#0b1728);border:1px solid var(--line);border-radius:13px;overflow:hidden;box-shadow:none}.case-topline{display:flex;justify-content:space-between;align-items:flex-start;padding:15px 16px;border-bottom:1px solid #1d2c43}.case-identity{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.case-identity small{width:100%;color:var(--muted);font-size:10px}.case-type{font-size:9px;letter-spacing:.08em;padding:4px 7px;border-radius:6px;background:#172840;color:#a9b9cf}.case-body{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:16px;padding:16px}.case-amount>span{font-size:10px;color:var(--muted)}.case-amount>strong{display:block;font-size:22px;margin:3px 0 10px;letter-spacing:-.02em}.case-breakdown{display:flex;flex-direction:column;gap:5px}.case-breakdown span{font-size:10px;color:var(--muted)}.case-breakdown b{color:#cbd6e6}.case-information{display:grid;gap:7px}.case-detail{display:flex;justify-content:space-between;gap:12px;padding-bottom:7px;border-bottom:1px dashed #24344b}.case-detail span{color:var(--muted);font-size:10px}.case-detail strong{font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.case-destination{margin:0 16px 14px;padding:11px 12px;border-radius:9px;background:#081426;border:1px solid #1b2b43;display:flex;align-items:center;justify-content:space-between;gap:12px}.case-destination span,.case-destination code{display:block}.case-destination span{font-size:9px;color:var(--muted)}.case-destination code{font-size:10px;overflow-wrap:anywhere}.case-footer{padding:13px 16px;border-top:1px solid #1d2c43}.case-actions,.txid-command{display:flex;gap:7px;flex-wrap:wrap}.txid-command{margin-bottom:8px}.txid-command input{flex:1;min-width:180px}.case-alert{padding:10px 11px;border-radius:8px;margin-bottom:9px;border:1px solid #2d425f;background:#0a1729}.case-alert b,.case-alert span{display:block}.case-alert b{font-size:11px}.case-alert span{font-size:10px;color:var(--muted)}
+    .btn{height:38px;border:1px solid #2b3d58;border-radius:8px;padding:0 13px;background:#14233a;color:#dce5f2;font-weight:650;font-size:11px;cursor:pointer;transition:.14s}.btn:hover{filter:brightness(1.1);transform:translateY(-1px)}.btn.primary,.btn.positive{background:var(--accent);border-color:var(--accent);color:white}.btn.positive{background:#228e69;border-color:#228e69}.btn.danger,.btn.negative{background:rgba(239,106,114,.1);border-color:rgba(239,106,114,.35);color:#ffadb2}.btn.subtle,.btn.ghost{background:#111f34}.copy-control{border:1px solid #2a3d58;background:#132239;color:#b8c5d7;border-radius:7px;padding:6px 9px;font-size:10px;cursor:pointer}
+    .status{display:inline-flex;align-items:center;gap:6px;padding:5px 8px;border-radius:999px;border:1px solid #2d405b;background:#101e32;font-size:10px;color:#b7c4d6}.status i{width:6px;height:6px;border-radius:50%;background:#75869f}.status.done{color:#82ddb9;border-color:rgba(56,199,147,.28)}.status.done i{background:var(--green)}.status.waiting,.status.working{color:#f3c672;border-color:rgba(240,184,90,.28)}.status.waiting i,.status.working i{background:var(--amber)}.status.declined{color:#ff9da4;border-color:rgba(239,106,114,.28)}.status.declined i{background:var(--red)}
+    .panel-card{padding:18px;margin-bottom:12px}.form-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.form-grid label{display:block;color:var(--muted);font-size:10px;margin-bottom:5px}.form-grid .wide{grid-column:span 2}.submit-cell{display:flex;align-items:flex-end}.user-command{display:flex;gap:8px;align-items:flex-end;padding:14px;background:var(--panel);border:1px solid var(--line);border-radius:12px;margin-bottom:14px}.user-command>div{flex:1}.user-command label{display:block;font-size:10px;color:var(--muted);margin-bottom:5px}.mini-balance-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:12px 0}.mini-balance{padding:13px;background:#0a1628;border:1px solid #1f3048;border-radius:10px}.mini-asset{display:flex;justify-content:space-between;gap:8px}.mini-asset small,.mini-pending{font-size:9px;color:var(--muted)}.mini-balance>strong{display:block;margin:7px 0 3px}.user-workspace{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.security-actions{display:flex;gap:7px;flex-wrap:wrap}
+    .table-wrap{overflow:auto;border-radius:10px;border:1px solid #1f3048}table{width:100%;border-collapse:collapse;min-width:650px;background:#0a1627}th,td{padding:11px 12px;border-bottom:1px solid #1c2b42;text-align:left;font-size:10px}th{position:sticky;top:0;background:#0e1b2e;color:#7f92ae;text-transform:uppercase;letter-spacing:.07em;font-weight:700;z-index:1}td{color:#c6d1e0}.muted-cell{color:var(--muted);text-align:center}.table-wrap a{color:#8db3ff}.address-cell,.tx-cell{display:block;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+    .setting-tabs{display:flex;gap:6px;overflow:auto;padding-bottom:8px}.setting-tab{border:1px solid var(--line);background:#0c192a;color:#93a3ba;padding:8px 11px;border-radius:8px;white-space:nowrap;cursor:pointer;font-size:10px}.setting-tab.active{background:rgba(79,140,255,.16);border-color:rgba(79,140,255,.4);color:#dfeaff}.setting-pane{display:none}.setting-pane.active{display:block}.settings-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.setting-field{padding:12px;background:#0a1627;border:1px solid #1f3048;border-radius:10px}.setting-field label{display:block;font-size:10px;color:#aebbd0;margin-bottom:6px}.setting-field input,.setting-field textarea,.setting-field select{width:100%;border:1px solid #293b55;background:#081426;color:white;border-radius:7px;padding:9px}.setting-field textarea{min-height:110px;resize:vertical}
+    .toast{position:fixed;right:22px;top:86px;z-index:100;padding:12px 16px;border-radius:10px;background:#15382e;border:1px solid rgba(56,199,147,.35);color:#c9f4e4;box-shadow:var(--shadow);font-size:12px}.toast-error{background:#3a1d25;border-color:rgba(239,106,114,.4);color:#ffd2d5}.empty-state{padding:28px;text-align:center;color:var(--muted);background:#0b1728;border:1px dashed #2a3c56;border-radius:11px}.empty-state b,.empty-state span{display:block}.empty-state span{font-size:11px;margin-top:5px}
+    @media(max-width:1180px){.metric-strip{grid-template-columns:repeat(2,1fr)}.dashboard-command-grid,.request-toolbar{grid-template-columns:1fr}.case-list{grid-template-columns:1fr}.mini-balance-grid{grid-template-columns:repeat(2,1fr)}.system-health .health-chip:nth-child(1){display:none}}
+    @media(max-width:860px){.control-shell{grid-template-columns:1fr}.sidebar{position:fixed;left:-270px;width:248px;transition:.2s;box-shadow:var(--shadow)}body.sidebar-open .sidebar{left:0}.menu-toggle{display:grid;place-items:center}.topbar{padding:0 16px}.content{padding:18px}.system-health{display:none}.ops-hero,.page-heading{align-items:flex-start;flex-direction:column}.hero-meta{text-align:left}.command-filter{grid-template-columns:1fr}.form-grid,.user-workspace,.settings-grid{grid-template-columns:1fr}.form-grid .wide{grid-column:auto}.case-body{grid-template-columns:1fr}}
+    @media(max-width:560px){.metric-strip,.mini-balance-grid{grid-template-columns:1fr}.content{padding:14px}.surface,.panel-card{padding:15px}.queue-breakdown{grid-template-columns:1fr}.reset-command,.info-line{align-items:flex-start;flex-direction:column}.case-topline{gap:10px}.case-destination{align-items:flex-start;flex-direction:column}.toast{left:12px;right:12px;top:78px}}
+
     """
 
     panel_script = r"""
@@ -11275,17 +11498,24 @@ def admin():
     const tabs=[...document.querySelectorAll('[data-setting-target]')],panes=[...document.querySelectorAll('[data-setting-pane]')];tabs.forEach(tab=>tab.addEventListener('click',()=>{tabs.forEach(x=>x.classList.toggle('active',x===tab));panes.forEach(p=>p.classList.toggle('active',p.dataset.settingPane===tab.dataset.settingTarget));}));
     document.addEventListener('click',async e=>{const button=e.target.closest('[data-copy]');if(!button)return;try{await navigator.clipboard.writeText(button.dataset.copy||'');const old=button.textContent;button.textContent='Kopyalandı';setTimeout(()=>button.textContent=old,1200);}catch(err){button.textContent='Kopyalanamadı';}});
     const toast=document.getElementById('admin-toast');if(toast)setTimeout(()=>toast.remove(),4300);
+    document.addEventListener('keydown',event=>{
+      if(event.key==='Escape')document.body.classList.remove('sidebar-open');
+      if(event.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)){
+        const search=document.querySelector('.page-view.active input[type="text"],.page-view.active input:not([type])');
+        if(search){event.preventDefault();search.focus();}
+      }
+    });
     """
 
     signer_online = bool(WITHDRAW_SIGNER_URL)
     active_title = next((label for slug, label, number, group in nav_items if slug == active_view), "Kontrol Merkezi")
     return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='color-scheme' content='dark'>
-    <title>Nerlo Yönetim Merkezi · V15</title><style>{panel_css}</style></head><body>{notice_html}
+    <title>Nerlo Operations · V32</title><style>{panel_css}</style></head><body>{notice_html}
     <div class='control-shell'>
-      <aside class='sidebar'><div class='brand'><div class='brand-mark'>N</div><div><strong>Nerlo Wallet</strong><small>Yönetim Merkezi · V15</small></div></div><nav class='nav-scroll'>{nav_html}</nav>
+      <aside class='sidebar'><div class='brand'><div class='brand-mark'>N</div><div><strong>Nerlo Operations</strong><small>Yönetim Paneli · V32</small></div></div><nav class='nav-scroll'>{nav_html}</nav>
         <div class='sidebar-footer'><div class='operator'><div class='operator-avatar'>{h(current_panel_username()[:1].upper() or 'N')}</div><div><strong>{h(current_panel_username())}</strong><small>Yetkili operasyon hesabı</small></div></div><a class='signout' href='/logout'>Güvenli çıkış yap</a></div>
       </aside>
-      <section class='workspace'><header class='topbar'><div class='topbar-left'><button id='menu-toggle' class='menu-toggle' type='button'>☰</button><div class='breadcrumbs'><span>NERLO / OPERASYON</span><h1 id='page-title'>{h(active_title)}</h1></div></div><div class='system-health'><span class='health-chip'><i></i>Bakiye defteri aktif</span><span class='health-chip {'warn' if not signer_online else ''}'><i></i>{'İmzalama servisi bağlı' if signer_online else 'İmzalama servisi bekliyor'}</span><span class='health-chip'><i></i>Çevrim içi</span></div></header>
+      <section class='workspace'><header class='topbar'><div class='topbar-left'><button id='menu-toggle' class='menu-toggle' type='button'>☰</button><div class='breadcrumbs'><span>YÖNETİM PANELİ</span><h1 id='page-title'>{h(active_title)}</h1></div></div><div class='system-health'><span class='health-chip'><i></i>Ledger aktif</span><span class='health-chip {'warn' if not r10_agent_online else ''}'><i></i>{'R10 ajan bağlı' if r10_agent_online else 'R10 ajan kapalı'}</span><span class='health-chip {'warn' if not signer_online else ''}'><i></i>{'Signer bağlı' if signer_online else 'Signer bekliyor'}</span></div></header>
         <main class='content'>{dashboard_section}{pool_section}{requests_section}{users_section}{approvals_section}{broadcast_section}{settings_section}{logs_section}{admins_section}</main>
       </section>
     </div><script>{panel_script}</script></body></html>"""
