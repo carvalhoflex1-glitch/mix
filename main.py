@@ -118,7 +118,7 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V13"
+BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V14"
 PANEL_RELEASE = "TREASURY-CONTROL-CENTER-V11"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
@@ -3378,6 +3378,7 @@ BOT_TEXTS = {
         "r10_verify": "R10 Doğrulama", "r10_link_question": "r10.net profil linkinizi gönderiniz.",
         "r10_invalid_link": "Geçerli bir r10.net profil linki gönderiniz.",
         "r10_fetch_failed": "r10 profili okunamadı. Linki kontrol edip tekrar deneyiniz.",
+        "r10_checking": "R10 profili kontrol ediliyor, lütfen bekleyiniz...",
         "r10_key_sent": "Hoş geldiniz {name}.\n\nTL işlemleri için son adım:\nBu doğrulama keyini r10.net üzerinden @nerlowallet hesabına PM gönderiniz.\n\nKey: {key}",
         "r10_corporate_key_sent": "Kurumsal r10 hesabınız algılandı.\n\nTL işlemleri için @nerlowallet hesabına PM gönderiniz:\nKey: {key}\nIBAN ad soyad: ...\n\nBu ad soyad onaydan sonra değiştirilemez.",
         "r10_hidden_name": "Lütfen r10 profilinizde ad soyad gizlemesini kapatıp tekrar deneyiniz.",
@@ -3440,6 +3441,7 @@ BOT_TEXTS = {
         "r10_verify": "R10 Verification", "r10_link_question": "Send your r10.net profile link.",
         "r10_invalid_link": "Send a valid r10.net profile link.",
         "r10_fetch_failed": "The r10 profile could not be read. Check the link and try again.",
+        "r10_checking": "Checking the R10 profile, please wait...",
         "r10_key_sent": "Welcome {name}.\n\nLast step for TRY transactions:\nSend this verification key to @nerlowallet on r10.net by PM.\n\nKey: {key}",
         "r10_corporate_key_sent": "Corporate r10 account detected.\n\nSend this to @nerlowallet by PM:\nKey: {key}\nIBAN full name: ...\n\nThis name cannot be changed after approval.",
         "r10_hidden_name": "Please disable name hiding on your r10 profile and try again.",
@@ -4111,7 +4113,7 @@ def fetch_r10_profile_mask(profile_url):
         "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
         "Cache-Control": "no-cache",
     }
-    response = requests.get(canonical_url, headers=headers, timeout=20, allow_redirects=True)
+    response = requests.get(canonical_url, headers=headers, timeout=(7, 12), allow_redirects=True)
     response.raise_for_status()
 
     final_host = urlparse(response.url).netloc.lower().removeprefix("www.")
@@ -5077,6 +5079,7 @@ def handle_text(chat_id, username, text):
     flow, step = state.get("flow"), state.get("step")
 
     if flow == "r10_verify" and step == "profile_link":
+        send(chat_id, t(uid, "r10_checking"))
         try:
             parsed = fetch_r10_profile_mask(text)
         except ValueError as exc:
