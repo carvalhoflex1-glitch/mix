@@ -122,8 +122,8 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V19"
-PANEL_RELEASE = "TREASURY-CONTROL-CENTER-V13-R10-PRO-STABLE"
+BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V20"
+PANEL_RELEASE = "TREASURY-CONTROL-CENTER-V14-R10-MASTER-DETAIL"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
 SWEEP_RELEASE = "TRON-HD-DEPOSIT-SWEEP-V1"
@@ -4246,17 +4246,51 @@ def _r10_profile_text(html):
 
 
 def _r10_field(text, label):
-    stop = (
-        r"Ad Soyad|Unvan|Üyelik Tarihi|Son Giriş|İl|Meslek|Cinsiyet|Doğum Tarihi|"
-        r"Mesaj Sayısı|Şikayet|Beğeniler|R10\+|Profil Ziyareti|Hakkında|Uzmanlıklar|Arkadaşlar"
+    """Read one R10 profile field and stop at the next known profile heading.
+
+    R10 currently renders labels both with and without a colon. Keeping the
+    boundary label-aware prevents interface words such as "Kapat" from being
+    appended to the user's name.
+    """
+    stop_labels = (
+        "Ad Soyad", "Unvan", "Üyelik Tarihi", "Son Giriş", "Son Görülme", "Şube", "İl",
+        "Meslek", "Cinsiyet", "Doğum Tarihi", "Konu Sayısı", "Mesaj Sayısı", "Şikayet",
+        "Beğeniler", "R10+", "Profil Ziyareti", "Hakkında", "Uzmanlıklar", "Arkadaşlar",
+        "Son Ziyaretçiler", "Rozetler", "Ticaret", "Cezalar", "Diğer",
     )
+    stop = "|".join(re.escape(item) for item in stop_labels)
+    label_pattern = re.escape(str(label or "").strip())
+    if not label_pattern:
+        return ""
+
+    # Normal profile layout: every profile field is on its own line.
     match = re.search(
-        rf"(?:^|\n)\s*{re.escape(label)}\s*:?\s*(.+?)(?=\n\s*(?:{stop})\s*:|$)",
-        text,
+        rf"(?:^|\n)\s*(?:[•*\-]\s*)?{label_pattern}\s*:?\s*(.*?)"
+        rf"(?=\n\s*(?:[•*\-]\s*)?(?:{stop})\s*:?\s*|$)",
+        str(text or ""),
         re.I | re.S,
     )
-    return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
+    if not match:
+        # Defensive fallback for compressed/minified markup where headings may
+        # appear on one line. The same heading boundary still applies.
+        match = re.search(
+            rf"\b{label_pattern}\s*:?\s*(.*?)"
+            rf"(?=\s+(?:{stop})\s*:?\s*|$)",
+            str(text or ""),
+            re.I | re.S,
+        )
+    if not match:
+        return ""
 
+    value = re.sub(r"\s+", " ", match.group(1)).strip(" \t\r\n:;|•-")
+    # These are modal/navigation labels, never profile field values.
+    value = re.split(
+        r"\s+(?:Kapat|Özel\s+Mesaj|Mesaj\s+Gönder|Ticaret\s+Detayları|Verilen\s+Ticaret\s+Puanları|Yapılan\s+Yorumlar)\b",
+        value,
+        maxsplit=1,
+        flags=re.I,
+    )[0].strip()
+    return value
 
 def _r10_int(value):
     clean = re.sub(r"[^0-9]", "", str(value or ""))
@@ -4277,14 +4311,42 @@ def _r10_membership_months(day, month, year):
     return max(0, months)
 
 
-def _r10_mask_name(first, last):
-    def mask_part(value):
-        letters = re.sub(r"[^A-Za-zÇĞİÖŞÜçğıöşü]", "", str(value or ""))
-        if len(letters) < 2:
-            return ""
-        return letters[:2] + "*" * max(3, len(letters) - 2)
+def _r10_mask_part(value):
+    letters = re.sub(r"[^A-Za-zÇĞİÖŞÜçğıöşü]", "", str(value or ""))
+    if len(letters) < 2:
+        return ""
+    return letters[:2] + "*" * max(3, len(letters) - 2)
 
-    return f"{mask_part(first)} {mask_part(last)}".strip()
+
+def _r10_mask_name(first, last):
+    return f"{_r10_mask_part(first)} {_r10_mask_part(last)}".strip()
+
+
+def _r10_profile_name_tokens(value):
+    """Return only plausible person-name tokens from the R10 Ad Soyad field."""
+    blocked = {
+        "kapat", "profil", "mesaj", "gönder", "üyelik", "tarihi", "şube", "konu", "sayısı",
+        "şikayet", "beğeniler", "ziyareti", "hakkında", "arkadaşlar", "uzmanlıklar", "ticaret",
+    }
+    result = []
+    for token in re.findall(r"[A-Za-zÇĞİÖŞÜçğıöşü]{2,}(?:\*+)?", str(value or "")):
+        plain = re.sub(r"\*+", "", token)
+        if _tr_lower(plain) in blocked:
+            break
+        result.append(token)
+        if len(result) >= 6:
+            break
+    return result
+
+
+def _r10_masked_display(tokens):
+    """Preserve R10's own mask; mask every name part only when the name is open."""
+    cleaned = [str(token or "").strip() for token in tokens if str(token or "").strip()]
+    if not cleaned:
+        return ""
+    if any("*" in token for token in cleaned):
+        return " ".join(cleaned)
+    return " ".join(part for part in (_r10_mask_part(token) for token in cleaned) if part)
 
 
 def parse_r10_profile_name(html):
@@ -4304,7 +4366,7 @@ def parse_r10_profile_name(html):
         months = _r10_membership_months(day, month, year)
         membership_date = f"{int(day):02d}/{int(month):02d}/{int(year):04d}"
 
-    r10_plus = re.search(r"R10\+\s*([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)", text, re.I)
+    r10_plus = re.search(r"R10\+\s*:?\s*([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)", text, re.I)
     negative = neutral = positive = None
     if r10_plus:
         negative, neutral, positive = (_r10_int(value) for value in r10_plus.groups())
@@ -4320,11 +4382,12 @@ def parse_r10_profile_name(html):
     }
 
     if corporate:
+        clean_title = re.sub(r"\s+", " ", str(title or "")).strip()
         common.update({
-            "masked": title or "Kurumsal hesap",
+            "masked": clean_title or "Kurumsal hesap",
             "first2": "",
             "last2": "",
-            "company_title": title,
+            "company_title": clean_title,
         })
         return common
 
@@ -4332,24 +4395,26 @@ def parse_r10_profile_name(html):
     if not full_name or full_name.strip() in ("-", "—"):
         return None
 
-    name_tokens = re.findall(r"[A-Za-zÇĞİÖŞÜçğıöşü]{2,}(?:\*+)?", full_name)
+    name_tokens = _r10_profile_name_tokens(full_name)
     if len(name_tokens) < 2:
         return None
 
-    first_token, last_token = name_tokens[0], name_tokens[-1]
-    first_letters = re.sub(r"\*+", "", first_token)
-    last_letters = re.sub(r"\*+", "", last_token)
+    first_letters = re.sub(r"\*+", "", name_tokens[0])
+    last_letters = re.sub(r"\*+", "", name_tokens[-1])
     if len(first_letters) < 2 or len(last_letters) < 2:
         return None
 
+    masked_display = _r10_masked_display(name_tokens)
+    if not masked_display:
+        return None
+
     common.update({
-        "masked": _r10_mask_name(first_letters, last_letters),
+        "masked": masked_display,
         "first2": first_letters[:2],
         "last2": last_letters[:2],
         "company_title": "",
     })
     return common
-
 
 def fetch_r10_profile_mask(profile_url):
     canonical_url, slug = normalize_r10_profile_url(profile_url)
@@ -8453,7 +8518,22 @@ def _r10_approval_sort_key(item):
     return priority.get(str(info.get("status") or ""), 9), "".join(chr(255 - ord(ch)) for ch in timestamp)
 
 
-def render_r10_approval_card(uid, user, info):
+def render_r10_approval_list_item(uid, user, info, selected=False):
+    status = str(info.get("status") or "")
+    username = username_label((user or {}).get("username"))
+    hitap = r10_hitap(uid, info)
+    profile_slug = str(info.get("profile_slug") or "-")
+    activity = str(info.get("key_sent_at") or info.get("approved_at") or info.get("created_at") or "-")
+    badge = "Key bildirildi" if status == "key_sent" else r10_status_label(status)
+    return f"""
+      <button type='button' class='approval-user-row {'active' if selected else ''}' data-approval-select='{h(uid)}' aria-pressed='{'true' if selected else 'false'}'>
+        <span class='approval-user-avatar'>{h((hitap[:1] or 'N').upper())}</span>
+        <span class='approval-user-main'><b>{h(hitap)}</b><small>@{h(username)} · {h(profile_slug)}</small><em>{h(activity)}</em></span>
+        <span class='approval-user-side'><span class='status {h(r10_status_class(status))}'>{h(badge)}</span><small>Detayı aç →</small></span>
+      </button>"""
+
+
+def render_r10_approval_detail(uid, user, info):
     status = str(info.get("status") or "")
     account_type = str(info.get("account_type") or "personal")
     username = username_label((user or {}).get("username"))
@@ -8461,48 +8541,61 @@ def render_r10_approval_card(uid, user, info):
     profile_url = str(info.get("profile_url") or "#")
     reason = str(info.get("decision_reason") or info.get("reverify_reason") or "")
     owner = str(info.get("iban_owner") or "")
-    return_to = "/admin?view=approvals"
+    return_to = f"/admin?view=approvals&approval_user={uid}"
+
+    owner_field = ""
+    if account_type == "corporate":
+        owner_field = f"<label>IBAN hesap sahibinin ad-soyadı<input name='iban_owner' value='{h(owner)}' placeholder='R10 özel mesajında iletilen ad-soyad' autocomplete='off' required></label>"
 
     verify_form = ""
-    reject_form = ""
     if status in ("pending", "key_sent"):
-        owner_field = ""
-        if account_type == "corporate":
-            owner_field = f"<label>IBAN hesap sahibinin ad-soyadı<input name='iban_owner' value='{h(owner)}' placeholder='R10 özel mesajında iletilen ad-soyad' autocomplete='off' required></label>"
         verify_form = f"""
-        <form method='post' class='approval-action approval-verify-form'>
-          <input type='hidden' name='action' value='verify_r10_key'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='{return_to}'>
-          <div class='approval-action-title'><span>GÜVENLİ EŞLEŞTİRME</span><b>R10’dan gelen Keyi doğrula</b></div>
-          <label>R10 özel mesajındaki Key<input name='verification_key' placeholder='NERLO-....' autocomplete='off' autocapitalize='characters' spellcheck='false' required></label>
-          {owner_field}
-          <button class='btn positive' type='submit'>Keyi Doğrula ve Otomatik Onayla</button>
-        </form>"""
+          <form method='post' class='approval-action approval-verify-form'>
+            <input type='hidden' name='action' value='verify_r10_key'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='{h(return_to)}'>
+            <div class='approval-action-title'><span>GÜVENLİ EŞLEŞTİRME</span><b>R10’dan gelen Keyi doğrula</b></div>
+            <label>R10 özel mesajındaki Key<input name='verification_key' placeholder='NERLO-....' autocomplete='off' autocapitalize='characters' spellcheck='false' required></label>
+            {owner_field}
+            <button class='btn positive' type='submit'>Keyi Doğrula ve Otomatik Onayla</button>
+          </form>"""
+    else:
+        verify_form = f"<div class='approval-closed-action'><b>Key doğrulama kapalı</b><span>Bu kayıt şu anda “{h(r10_status_label(status))}” durumunda.</span></div>"
+
+    reject_form = ""
+    if status in ("pending", "key_sent", "expired"):
         reject_form = f"""
-        <form method='post' class='approval-action approval-reject-form'>
-          <input type='hidden' name='action' value='reject_r10_tl'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='{return_to}'>
-          <label>Red nedeni<textarea name='decision_reason' rows='2' placeholder='Kullanıcıya gönderilecek açıklama' required></textarea></label>
-          <button class='btn negative' type='submit'>Doğrulamayı Reddet</button>
-        </form>"""
+          <form method='post' class='approval-action approval-reject-form'>
+            <input type='hidden' name='action' value='reject_r10_tl'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='{h(return_to)}'>
+            <div class='approval-action-title'><span>KARAR</span><b>Doğrulama talebini reddet</b></div>
+            <label>Red nedeni<textarea name='decision_reason' rows='3' placeholder='Kullanıcıya gönderilecek açıklama' required></textarea></label>
+            <button class='btn negative' type='submit'>Doğrulamayı Reddet</button>
+          </form>"""
 
     approved_actions = ""
     if status == "approved":
         approved_actions = f"""
-        <div class='approval-decision-grid'>
-          <form method='post' class='approval-action'>
-            <input type='hidden' name='action' value='request_r10_reverify'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='{return_to}'>
-            <label>Yeniden doğrulama nedeni<textarea name='decision_reason' rows='2' required></textarea></label>
-            <button class='btn subtle'>Yeniden Doğrulama İste</button>
-          </form>
-          <form method='post' class='approval-action'>
-            <input type='hidden' name='action' value='revoke_r10_tl'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='{return_to}'>
-            <label>Onayı kaldırma nedeni<textarea name='decision_reason' rows='2' required></textarea></label>
-            <button class='btn danger'>Onayı Kaldır</button>
-          </form>
-        </div>"""
+          <div class='approval-decision-grid'>
+            <form method='post' class='approval-action'>
+              <input type='hidden' name='action' value='request_r10_reverify'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='{h(return_to)}'>
+              <div class='approval-action-title'><span>YENİ KONTROL</span><b>Yeniden doğrulama iste</b></div>
+              <label>Neden<textarea name='decision_reason' rows='3' required></textarea></label>
+              <button class='btn subtle'>Yeniden Doğrulama İste</button>
+            </form>
+            <form method='post' class='approval-action'>
+              <input type='hidden' name='action' value='revoke_r10_tl'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='{h(return_to)}'>
+              <div class='approval-action-title'><span>ERİŞİMİ KAPAT</span><b>Mevcut onayı kaldır</b></div>
+              <label>Neden<textarea name='decision_reason' rows='3' required></textarea></label>
+              <button class='btn danger'>Onayı Kaldır</button>
+            </form>
+          </div>"""
+
+    if not reject_form and not approved_actions:
+        decision_actions = f"<div class='approval-closed-action'><b>Karar işlemi bulunmuyor</b><span>Mevcut durum: {h(r10_status_label(status))}</span></div>"
+    else:
+        decision_actions = reject_form + approved_actions
 
     salutation_form = f"""
-      <form method='post' class='approval-salutation'>
-        <input type='hidden' name='action' value='update_r10_salutation'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='{return_to}'>
+      <form method='post' class='approval-salutation approval-salutation-full'>
+        <input type='hidden' name='action' value='update_r10_salutation'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='{h(return_to)}'>
         <label>Mesajlarda kullanılacak özel hitap<input name='custom_salutation' value='{h(info.get('custom_salutation') or '')}' placeholder='{h(r10_hitap(uid, info))}' maxlength='80'></label>
         <button class='btn ghost'>Hitabı Kaydet</button>
       </form>"""
@@ -8515,41 +8608,81 @@ def render_r10_approval_card(uid, user, info):
     if info.get("key_sent_at"):
         key_sent_note = f"<span class='approval-signal'><i></i>Kullanıcı Keyi gönderdiğini bildirdi · {h(info.get('key_sent_at'))}</span>"
 
+    audit_rows = [
+        ("Başvuru oluşturuldu", info.get("created_at") or "-"),
+        ("Key oluşturuldu", info.get("key_created_at") or "-"),
+        ("Key gönderim bildirimi", info.get("key_sent_at") or "-"),
+        ("Key kullanıldı", info.get("key_used_at") or "-"),
+        ("Keyi kullanan yetkili", info.get("key_used_by") or "-"),
+        ("Onay tarihi", info.get("approved_at") or "-"),
+        ("Onaylayan", info.get("approved_by") or "-"),
+        ("Red tarihi", info.get("rejected_at") or "-"),
+        ("Reddeden", info.get("rejected_by") or "-"),
+        ("Hitap güncellemesi", info.get("salutation_updated_at") or "-"),
+    ]
+    audit_html = "".join(f"<div><span>{h(label)}</span><b>{h(value)}</b></div>" for label, value in audit_rows)
+
     return f"""
-    <article class='approval-card approval-{h(status)}' data-approval-user='{h(uid)}'>
+    <article class='approval-card approval-detail-card approval-{h(status)}' data-approval-user='{h(uid)}'>
       <header class='approval-card-head'>
-        <div class='approval-person'><div class='approval-avatar'>{h((r10_hitap(uid, info)[:1] or 'N').upper())}</div><div><span>TELEGRAM KULLANICISI</span><h3>{h(r10_hitap(uid, info))}</h3><p>@{h(username)} · {h(uid)}</p></div></div>
+        <div class='approval-person'><div class='approval-avatar'>{h((r10_hitap(uid, info)[:1] or 'N').upper())}</div><div><span>SEÇİLEN KULLANICI</span><h3>{h(r10_hitap(uid, info))}</h3><p>@{h(username)} · Telegram ID {h(uid)}</p></div></div>
         <div class='approval-head-actions'><span class='status {h(r10_status_class(status))}'><i></i>{h(r10_status_label(status))}</span><a class='text-action' href='/admin?view=users&manage_user_id={h(uid)}'>Kullanıcı hesabını aç</a></div>
       </header>
       {key_sent_note}
-      <div class='approval-overview'>
-        <section class='approval-profile'>
-          <div class='approval-section-title'><span>R10 PROFİLİ</span><b>Doğrulama bilgileri</b></div>
-          <div class='approval-info-grid'>
-            <div><span>Hesap türü</span><strong>{h(r10_account_type_label(account_type))}</strong></div>
-            <div><span>R10 kullanıcı adı</span><strong>{h(info.get('profile_slug') or '-')}</strong></div>
-            <div><span>Üyelik</span><strong>{h(str(info.get('r10_months', 0)))} ay</strong><small>{h(info.get('membership_date') or '-')}</small></div>
-            <div><span>Olumlu R10+</span><strong>{h(str(info.get('r10_trades', 0)))}</strong><small>Olumsuz {h(str(info.get('r10_plus_negative', 0)))} · Nötr {h(str(info.get('r10_plus_neutral', 0)))}</small></div>
-            <div><span>Profildeki hitap</span><strong>{h(info.get('company_title') or info.get('masked_name') or '-')}</strong></div>
-            <div><span>IBAN hesap sahibi</span><strong>{h(owner or '-')}</strong><small>{'Onay sonrası kilitli' if info.get('iban_owner_locked') else 'Henüz kilitlenmedi'}</small></div>
-          </div>
-          <a class='approval-profile-link' href='{h(profile_url)}' target='_blank' rel='noopener'>R10 profilini yeni sekmede aç</a>
-        </section>
-        <section class='approval-key-vault'>
-          <div class='approval-section-title'><span>KEY GÜVENLİĞİ</span><b>Tek kullanımlık doğrulama anahtarı</b></div>
-          <div class='approval-key-box'><code>{h(key_value or '-')}</code>{f"<button type='button' class='copy-control' data-copy='{h(key_value)}'>Keyi Kopyala</button>" if key_value else ''}</div>
-          <div class='approval-key-meta'><div><span>Oluşturulma</span><b>{h(info.get('key_created_at') or info.get('created_at') or '-')}</b></div><div><span>Son geçerlilik</span><b>{h(info.get('key_expires_at') or '-')}</b></div><div><span>Kalan süre</span><b>{h(r10_key_remaining_text(info) if status in ('pending','key_sent') else r10_status_label(status))}</b></div><div><span>Hatalı deneme</span><b>{h(str(info.get('key_failed_attempts', 0)))}</b></div></div>
-          <div class='approval-key-state'><span>Key kullanımı</span><b>{h(info.get('key_used_at') or 'Henüz kullanılmadı')}</b><small>{h(info.get('key_used_by') or '')}</small></div>
-        </section>
+      <div class='approval-detail-layout'>
+        <nav class='approval-detail-nav' aria-label='Doğrulama detay kategorileri'>
+          <button type='button' class='active' data-approval-category-target='summary'><span>01</span><b>Genel Bilgiler</b><small>Profil ve hesap özeti</small></button>
+          <button type='button' data-approval-category-target='key'><span>02</span><b>Key Doğrulama</b><small>Anahtar ve eşleştirme</small></button>
+          <button type='button' data-approval-category-target='decision'><span>03</span><b>Karar İşlemleri</b><small>Red, kaldırma, yeniden kontrol</small></button>
+          <button type='button' data-approval-category-target='message'><span>04</span><b>Mesaj ve Hitap</b><small>Kullanıcıya hitap biçimi</small></button>
+          <button type='button' data-approval-category-target='audit'><span>05</span><b>İşlem Kaydı</b><small>Tarih ve yetkili bilgileri</small></button>
+        </nav>
+        <div class='approval-detail-content'>
+          <section class='approval-category-pane active' data-approval-category-pane='summary'>
+            <div class='approval-section-title'><span>GENEL BİLGİLER</span><b>R10 profili ve doğrulama özeti</b></div>
+            <div class='approval-info-grid approval-summary-grid'>
+              <div><span>Hesap türü</span><strong>{h(r10_account_type_label(account_type))}</strong></div>
+              <div><span>R10 kullanıcı adı</span><strong>{h(info.get('profile_slug') or '-')}</strong></div>
+              <div><span>Profildeki hitap</span><strong>{h(info.get('company_title') or info.get('masked_name') or '-')}</strong></div>
+              <div><span>Üyelik</span><strong>{h(str(info.get('r10_months', 0)))} ay</strong><small>{h(info.get('membership_date') or '-')}</small></div>
+              <div><span>Olumlu R10+</span><strong>{h(str(info.get('r10_trades', 0)))}</strong><small>Olumsuz {h(str(info.get('r10_plus_negative', 0)))} · Nötr {h(str(info.get('r10_plus_neutral', 0)))}</small></div>
+              <div><span>IBAN hesap sahibi</span><strong>{h(owner or '-')}</strong><small>{'Onay sonrası kilitli' if info.get('iban_owner_locked') else 'Henüz kilitlenmedi'}</small></div>
+            </div>
+            <a class='approval-profile-link approval-profile-button' href='{h(profile_url)}' target='_blank' rel='noopener'>R10 profilini yeni sekmede aç</a>
+          </section>
+
+          <section class='approval-category-pane' data-approval-category-pane='key'>
+            <div class='approval-section-title'><span>KEY DOĞRULAMA</span><b>Tek kullanımlık güvenlik anahtarı</b></div>
+            <div class='approval-key-box'><code>{h(key_value or '-')}</code>{f"<button type='button' class='copy-control' data-copy='{h(key_value)}'>Keyi Kopyala</button>" if key_value else ''}</div>
+            <div class='approval-key-meta'><div><span>Oluşturulma</span><b>{h(info.get('key_created_at') or info.get('created_at') or '-')}</b></div><div><span>Son geçerlilik</span><b>{h(info.get('key_expires_at') or '-')}</b></div><div><span>Kalan süre</span><b>{h(r10_key_remaining_text(info) if status in ('pending','key_sent') else r10_status_label(status))}</b></div><div><span>Hatalı deneme</span><b>{h(str(info.get('key_failed_attempts', 0)))}</b></div></div>
+            <div class='approval-key-state'><span>Key kullanımı</span><b>{h(info.get('key_used_at') or 'Henüz kullanılmadı')}</b><small>{h(info.get('key_used_by') or '')}</small></div>
+            <div class='approval-category-actions'>{verify_form}</div>
+          </section>
+
+          <section class='approval-category-pane' data-approval-category-pane='decision'>
+            <div class='approval-section-title'><span>KARAR İŞLEMLERİ</span><b>Doğrulama durumunu güvenli biçimde yönetin</b></div>
+            {decision_box}
+            <div class='approval-category-actions'>{decision_actions}</div>
+          </section>
+
+          <section class='approval-category-pane' data-approval-category-pane='message'>
+            <div class='approval-section-title'><span>MESAJ VE HİTAP</span><b>Kullanıcıya gönderilen doğrulama mesajlarının hitabı</b></div>
+            <div class='approval-message-preview'><span>Şu an kullanılacak hitap</span><strong>{h(r10_hitap(uid, info))}</strong><p>Bireysel profilde maskeli ad-soyad, kurumsal profilde unvan otomatik kullanılır. Bu alandaki özel değer önceliklidir.</p></div>
+            {salutation_form}
+          </section>
+
+          <section class='approval-category-pane' data-approval-category-pane='audit'>
+            <div class='approval-section-title'><span>İŞLEM KAYDI</span><b>Doğrulama zaman çizelgesi</b></div>
+            <div class='approval-audit-grid'>{audit_html}</div>
+          </section>
+        </div>
       </div>
-      {decision_box}
-      <div class='approval-controls'>{verify_form}{reject_form}{approved_actions}</div>
-      <footer class='approval-card-footer'>{salutation_form}<div class='approval-audit'><span>Başvuru: {h(info.get('created_at') or '-')}</span><span>Onaylayan: {h(info.get('approved_by') or '-')}</span><span>Onay: {h(info.get('approved_at') or '-')}</span></div></footer>
     </article>"""
 
 
-def render_r10_approval_live_area(query="", status_filter="all", focus_uid=""):
-    records = []
+def render_r10_approval_live_area(query="", status_filter="all", selected_uid=""):
+    all_records = []
+    filtered_records = []
     counts = {key: 0 for key in ("pending", "key_sent", "approved", "rejected", "revoked", "reverify_required", "expired")}
     for uid, user in users.items():
         info = (user or {}).get("r10_verification", {}) or {}
@@ -8561,18 +8694,43 @@ def render_r10_approval_live_area(query="", status_filter="all", focus_uid=""):
             info = dict(info)
             info["status"] = "expired"
         counts[status] = counts.get(status, 0) + 1
+        item = (str(uid), user, info)
+        all_records.append(item)
         if status_filter != "all" and status != status_filter:
-            continue
-        if focus_uid and str(uid) != str(focus_uid):
             continue
         if not _r10_approval_search_matches(uid, user, info, query):
             continue
-        records.append((str(uid), user, info))
-    records.sort(key=lambda item: str(item[2].get("key_sent_at") or item[2].get("created_at") or ""), reverse=True)
-    records.sort(key=lambda item: 0 if item[2].get("status") == "key_sent" else 1)
-    cards = "".join(render_r10_approval_card(uid, user, info) for uid, user, info in records)
-    if not cards:
-        cards = "<div class='empty-state approval-empty'><b>Eşleşen doğrulama kaydı bulunamadı</b><span>Arama veya durum süzgecini değiştirin.</span></div>"
+        filtered_records.append(item)
+
+    def sort_key(item):
+        uid, user, info = item
+        priority = {"key_sent": 0, "pending": 1, "approved": 2, "reverify_required": 3, "rejected": 4, "revoked": 5, "expired": 6}
+        return priority.get(str(info.get("status") or ""), 9), str(info.get("key_sent_at") or info.get("created_at") or "")
+
+    filtered_records.sort(key=lambda item: str(item[2].get("key_sent_at") or item[2].get("created_at") or ""), reverse=True)
+    filtered_records.sort(key=lambda item: sort_key(item)[0])
+
+    selected = None
+    if selected_uid:
+        selected = next((item for item in filtered_records if item[0] == str(selected_uid)), None)
+        if selected is None:
+            selected = next((item for item in all_records if item[0] == str(selected_uid)), None)
+    if selected is None and filtered_records:
+        selected = filtered_records[0]
+
+    selected_id = selected[0] if selected else ""
+    list_html = "".join(
+        render_r10_approval_list_item(uid, user, info, uid == selected_id)
+        for uid, user, info in filtered_records
+    )
+    if not list_html:
+        list_html = "<div class='empty-state approval-list-empty'><b>Eşleşen kullanıcı bulunamadı</b><span>Arama veya durum süzgecini değiştirin.</span></div>"
+
+    if selected:
+        detail_html = render_r10_approval_detail(*selected)
+    else:
+        detail_html = "<div class='empty-state approval-detail-empty'><b>Detay görüntülenecek kullanıcı yok</b><span>Soldaki listeden bir kullanıcı seçin.</span></div>"
+
     return f"""
       <div class='approval-stat-grid'>
         <div><span>Key gönderildi</span><strong>{counts.get('key_sent', 0)}</strong><small>Öncelikli inceleme</small></div>
@@ -8580,10 +8738,16 @@ def render_r10_approval_live_area(query="", status_filter="all", focus_uid=""):
         <div><span>Onaylanan</span><strong>{counts.get('approved', 0)}</strong><small>TL işlemleri açık</small></div>
         <div><span>İşlem gereken</span><strong>{counts.get('rejected', 0) + counts.get('revoked', 0) + counts.get('reverify_required', 0) + counts.get('expired', 0)}</strong><small>Kapalı veya yeniden doğrulama</small></div>
       </div>
-      <div class='approval-card-list'>{cards}</div>"""
+      <div class='approval-master-detail' data-current-approval-user='{h(selected_id)}'>
+        <aside class='approval-user-panel'>
+          <div class='approval-user-panel-head'><div><span>KULLANICI LİSTESİ</span><b>{len(filtered_records)} kayıt</b></div><small>Detay için kullanıcıya dokunun</small></div>
+          <div class='approval-user-list'>{list_html}</div>
+        </aside>
+        <section class='approval-selected-detail'>{detail_html}</section>
+      </div>"""
 
 
-def render_r10_approval_menu(query="", status_filter="all", focus_uid=""):
+def render_r10_approval_menu(query="", status_filter="all", selected_uid=""):
     options = [
         ("all", "Tüm doğrulamalar"), ("key_sent", "Key gönderildi"), ("pending", "Key gönderimi bekleniyor"),
         ("approved", "Onaylandı"), ("reverify_required", "Yeniden doğrulama gerekli"),
@@ -8592,14 +8756,13 @@ def render_r10_approval_menu(query="", status_filter="all", focus_uid=""):
     option_html = "".join(f"<option value='{h(value)}' {'selected' if status_filter == value else ''}>{h(label)}</option>" for value, label in options)
     return f"""
     <section class='approval-command-center'>
-      <div class='approval-command-head'><div><span>CANLI DOĞRULAMA MERKEZİ</span><h3>Kullanıcı Onay</h3><p>R10 profilini, tek kullanımlık Keyi, IBAN sahibini ve yönetici kararlarını tek ekranda güvenli biçimde yönetin.</p></div><div id='approval-connection' class='approval-connection online'><i></i><span>Kendi kendine güncelleme etkin</span></div></div>
+      <div class='approval-command-head'><div><span>CANLI DOĞRULAMA MERKEZİ</span><h3>Kullanıcı Onay</h3><p>Kullanıcıyı listeden seçin; profil, Key, karar, mesaj ve işlem kayıtlarını ayrı kategorilerde yönetin.</p></div><div id='approval-connection' class='approval-connection online'><i></i><span>Kendi kendine güncelleme etkin</span></div></div>
       <div id='approval-filter' class='approval-filter'>
         <label>Doğrulama kaydı ara<input id='approval-search' value='{h(query)}' placeholder='Telegram ID, kullanıcı adı, R10 profili veya Key'></label>
         <label>Duruma göre süz<select id='approval-status-filter'>{option_html}</select></label>
-        <input id='approval-focus-user' type='hidden' value='{h(focus_uid)}'>
+        <input id='approval-focus-user' type='hidden' value='{h(selected_uid)}'>
       </div>
-      {f"<div class='approval-focus-note'><span>Yalnızca {h(focus_uid)} numaralı kullanıcı gösteriliyor.</span><a href='/admin?view=approvals'>Tüm doğrulamaları göster</a></div>" if focus_uid else ''}
-      <div id='approval-live-area'>{render_r10_approval_live_area(query, status_filter, focus_uid)}</div>
+      <div id='approval-live-area'>{render_r10_approval_live_area(query, status_filter, selected_uid)}</div>
     </section>"""
 
 def permission_options(selected_permissions):
@@ -9200,6 +9363,27 @@ def admin():
     @media(max-width:1280px){.asset-grid,.mini-balance-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.case-information{grid-template-columns:repeat(2,minmax(0,1fr))}.approval-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.approval-overview{grid-template-columns:1fr}.approval-key-vault{border-left:0;border-top:1px solid rgba(255,255,255,.055)}}
     @media(max-width:980px){.control-shell{grid-template-columns:1fr}.sidebar{position:fixed;left:-300px;width:286px;transition:.22s left;box-shadow:20px 0 80px rgba(0,0,0,.42)}body.sidebar-open .sidebar{left:0}.menu-toggle{display:grid;place-items:center}.system-health .health-chip:not(:first-child){display:none}.dashboard-split,.treasury-layout,.broadcast-layout,.user-workspace{grid-template-columns:1fr}.command-filter{grid-template-columns:1fr 1fr}.search-field{grid-column:1/-1}.case-body{grid-template-columns:1fr}.case-amount{border-right:0;border-bottom:1px solid rgba(255,255,255,.05)}}
     @media(max-width:640px){.content{padding:20px 13px 42px}.topbar{height:66px;padding:0 13px}.breadcrumbs h1{font-size:17px}.command-hero{min-height:auto;padding:24px;display:block}.hero-copy h2{font-size:33px}.hero-date{margin-top:24px}.kpi-grid,.asset-grid,.mini-balance-grid,.pipeline,.treasury-state,.settings-grid,.permission-grid,.security-actions,.balance-form,.form-grid,.approval-stat-grid,.approval-info-grid,.approval-key-meta,.approval-controls,.approval-decision-grid{grid-template-columns:1fr}.treasury-values{grid-template-columns:1fr}.treasury-values div+div{border-left:0;border-top:1px solid rgba(255,255,255,.08);padding:14px 0 0}.flow-steps{display:grid;grid-template-columns:1fr}.flow-steps>i{display:none}.command-filter,.user-command,.approval-filter{grid-template-columns:1fr}.case-identity{align-items:flex-start;flex-direction:column;gap:4px}.case-information{grid-template-columns:1fr}.case-destination,.pool-address,.compose-foot,.page-heading,.section-title,.surface-head,.user-profile-head,.root-account,.admin-account-head,.approval-command-head,.approval-card-head,.approval-card-footer{align-items:flex-start;flex-direction:column}.case-actions,.admin-account-actions,.txid-command{display:grid;grid-template-columns:1fr}.case-actions .btn,.admin-account-actions .btn,.copy-control{width:100%}.heading-metrics{display:none}.admin-account-grid{grid-template-columns:1fr}.approval-head-actions{align-items:flex-start;flex-direction:column}.approval-salutation{grid-template-columns:1fr;width:100%}.approval-audit{justify-content:flex-start}.approval-key-box{align-items:flex-start;flex-direction:column}}
+
+    .approval-master-detail{display:grid;grid-template-columns:minmax(310px,390px) minmax(0,1fr);gap:16px;margin-top:18px;align-items:start}
+    .approval-user-panel{overflow:hidden;position:sticky;top:86px;border:1px solid #1d2c3d;border-radius:18px;background:linear-gradient(180deg,#0e1721,#091019);box-shadow:0 22px 64px rgba(0,0,0,.2)}
+    .approval-user-panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px 16px;border-bottom:1px solid rgba(255,255,255,.055);background:rgba(255,255,255,.014)}
+    .approval-user-panel-head span{display:block;color:#66788d;font-size:8px;letter-spacing:.14em}.approval-user-panel-head b{display:block;margin-top:2px;font-size:13px}.approval-user-panel-head small{color:#5e7084;font-size:8px;text-align:right}
+    .approval-user-list{max-height:680px;overflow:auto;padding:8px;scrollbar-width:thin;scrollbar-color:#26394e transparent}
+    .approval-user-row{width:100%;display:grid;grid-template-columns:38px minmax(0,1fr) auto;align-items:center;gap:10px;padding:11px 10px;margin:0 0 6px;border:1px solid transparent;border-radius:13px;background:transparent;color:#dbe5ef;text-align:left;transition:.16s ease}
+    .approval-user-row:last-child{margin-bottom:0}.approval-user-row:hover{border-color:#24384e;background:#101a25}.approval-user-row.active{border-color:rgba(106,169,255,.48);background:linear-gradient(90deg,rgba(106,169,255,.14),rgba(106,169,255,.035));box-shadow:inset 3px 0 0 #6aa9ff}
+    .approval-user-avatar{width:38px;height:38px;display:grid;place-items:center;border:1px solid #2a4663;border-radius:11px;background:#102237;color:#85baff;font-weight:850}
+    .approval-user-main{min-width:0}.approval-user-main b,.approval-user-main small,.approval-user-main em{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.approval-user-main b{font-size:10px}.approval-user-main small{margin-top:2px;color:#74859a;font-size:8px}.approval-user-main em{margin-top:3px;color:#4f6073;font-size:7px;font-style:normal}
+    .approval-user-side{display:grid;justify-items:end;gap:4px}.approval-user-side .status{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:7px}.approval-user-side small{color:#65809f;font-size:7px}
+    .approval-selected-detail{min-width:0}.approval-detail-card{margin:0}.approval-detail-layout{display:grid;grid-template-columns:205px minmax(0,1fr);min-height:560px}
+    .approval-detail-nav{padding:13px;border-right:1px solid rgba(255,255,255,.055);background:rgba(0,0,0,.13)}
+    .approval-detail-nav button{width:100%;display:grid;grid-template-columns:30px minmax(0,1fr);column-gap:8px;align-items:center;padding:10px;margin-bottom:6px;border:1px solid transparent;border-radius:11px;background:transparent;color:#8291a3;text-align:left}
+    .approval-detail-nav button span{grid-row:1/3;width:27px;height:27px;display:grid;place-items:center;border-radius:8px;background:#111c28;color:#5f7186;font-size:7px;font-weight:900}.approval-detail-nav button b{font-size:9px}.approval-detail-nav button small{font-size:7px;color:#536477}.approval-detail-nav button:hover{background:#101923;color:#dce7f1}.approval-detail-nav button.active{border-color:rgba(106,169,255,.3);background:rgba(106,169,255,.09);color:#a9d0ff}.approval-detail-nav button.active span{background:#18324d;color:#8bc0ff}
+    .approval-detail-content{min-width:0;padding:22px}.approval-category-pane{display:none}.approval-category-pane.active{display:block}.approval-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.approval-profile-button{margin-top:14px;padding:9px 11px;border:1px solid rgba(106,169,255,.22);border-radius:10px;background:rgba(106,169,255,.06)}
+    .approval-category-actions{display:grid;gap:12px;margin-top:15px}.approval-category-actions .approval-action{max-width:760px}.approval-category-actions .approval-decision-grid{grid-template-columns:1fr 1fr}.approval-closed-action{display:grid;gap:5px;padding:16px;border:1px dashed #29394b;border-radius:13px;background:#0a1119;color:#718196}.approval-closed-action b{color:#c7d3df}.approval-closed-action span{font-size:9px}
+    .approval-message-preview{padding:16px;margin-bottom:14px;border:1px solid #203247;border-radius:13px;background:linear-gradient(135deg,#0e1b28,#0a121b)}.approval-message-preview span{display:block;color:#65788e;font-size:8px}.approval-message-preview strong{display:block;margin-top:5px;font-size:17px;color:#d8e7f5}.approval-message-preview p{margin:6px 0 0;color:#718398;font-size:9px}.approval-salutation-full{max-width:760px}.approval-audit-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.approval-audit-grid>div{padding:12px;border:1px solid #1b2a3a;border-radius:11px;background:#0a1119}.approval-audit-grid span{display:block;color:#62748a;font-size:8px}.approval-audit-grid b{display:block;margin-top:4px;color:#c8d5e1;font-size:9px;overflow-wrap:anywhere}.approval-list-empty{min-height:150px}.approval-detail-empty{min-height:330px}
+    @media(max-width:1280px){.approval-master-detail{grid-template-columns:330px minmax(0,1fr)}.approval-detail-layout{grid-template-columns:180px minmax(0,1fr)}.approval-summary-grid{grid-template-columns:1fr}.approval-category-actions .approval-decision-grid{grid-template-columns:1fr}}
+    @media(max-width:1040px){.approval-master-detail{grid-template-columns:1fr}.approval-user-panel{position:static}.approval-user-list{max-height:360px}.approval-detail-layout{grid-template-columns:190px minmax(0,1fr)}}
+    @media(max-width:720px){.approval-detail-layout{grid-template-columns:1fr}.approval-detail-nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;border-right:0;border-bottom:1px solid rgba(255,255,255,.055)}.approval-detail-nav button{margin:0}.approval-detail-content{padding:16px}.approval-audit-grid{grid-template-columns:1fr}.approval-user-row{grid-template-columns:36px minmax(0,1fr)}.approval-user-side{grid-column:2;justify-items:start;grid-auto-flow:column;justify-content:start}.approval-user-side .status{max-width:180px}}
     """
 
     panel_script = r"""
@@ -9232,12 +9416,17 @@ def admin():
     const approvalStatus=document.getElementById('approval-status-filter');
     const approvalFocus=document.getElementById('approval-focus-user');
     const approvalConnection=document.getElementById('approval-connection');
-    let approvalBusy=false,approvalTypingTimer=null;
+    let approvalBusy=false,approvalTypingTimer=null,approvalActiveCategory='summary';
     function approvalDrafts(){const drafts={};if(!approvalArea)return drafts;approvalArea.querySelectorAll('[data-approval-user]').forEach(card=>{const uid=card.dataset.approvalUser;card.querySelectorAll('input:not([type="hidden"]),textarea,select').forEach(field=>{drafts[uid+'|'+field.name]={value:field.value,focus:document.activeElement===field,start:field.selectionStart,end:field.selectionEnd};});});return drafts;}
     function restoreApprovalDrafts(drafts){if(!approvalArea)return;approvalArea.querySelectorAll('[data-approval-user]').forEach(card=>{const uid=card.dataset.approvalUser;card.querySelectorAll('input:not([type="hidden"]),textarea,select').forEach(field=>{const saved=drafts[uid+'|'+field.name];if(!saved)return;field.value=saved.value;if(saved.focus){field.focus();if(typeof field.setSelectionRange==='function'&&saved.start!==null)field.setSelectionRange(saved.start,saved.end);}});});}
-    async function refreshApprovals(){if(!approvalArea||!approvalView||!approvalView.classList.contains('active')||approvalBusy)return;approvalBusy=true;const drafts=approvalDrafts();const params=new URLSearchParams({aq:approvalSearch?approvalSearch.value:'',astatus:approvalStatus?approvalStatus.value:'all',approval_user:approvalFocus?approvalFocus.value:''});try{const res=await fetch('/admin/approvals-fragment?'+params.toString(),{cache:'no-store'});if(!res.ok)throw new Error('HTTP '+res.status);const html=await res.text();if(html!==approvalArea.innerHTML){approvalArea.innerHTML=html;restoreApprovalDrafts(drafts);}if(approvalConnection){approvalConnection.classList.remove('offline');approvalConnection.classList.add('online');approvalConnection.querySelector('span').textContent='Kendi kendine güncelleme etkin';}}catch(err){if(approvalConnection){approvalConnection.classList.remove('online');approvalConnection.classList.add('offline');approvalConnection.querySelector('span').textContent='Bağlantı kuruluyor';}}finally{approvalBusy=false;}}
-    if(approvalSearch)approvalSearch.addEventListener('input',()=>{clearTimeout(approvalTypingTimer);approvalTypingTimer=setTimeout(refreshApprovals,280);});
-    if(approvalStatus)approvalStatus.addEventListener('change',refreshApprovals);
+    function setApprovalCategory(name){approvalActiveCategory=name||'summary';if(!approvalArea)return;approvalArea.querySelectorAll('[data-approval-category-target]').forEach(button=>button.classList.toggle('active',button.dataset.approvalCategoryTarget===approvalActiveCategory));approvalArea.querySelectorAll('[data-approval-category-pane]').forEach(pane=>pane.classList.toggle('active',pane.dataset.approvalCategoryPane===approvalActiveCategory));}
+    function updateApprovalUrl(uid){const url=new URL(location.href);url.searchParams.set('view','approvals');if(uid)url.searchParams.set('approval_user',uid);else url.searchParams.delete('approval_user');history.replaceState(null,'',url);}
+    async function refreshApprovals(){if(!approvalArea||!approvalView||!approvalView.classList.contains('active')||approvalBusy)return;approvalBusy=true;const drafts=approvalDrafts();const currentList=approvalArea.querySelector('.approval-user-list');const listScroll=currentList?currentList.scrollTop:0;const params=new URLSearchParams({aq:approvalSearch?approvalSearch.value:'',astatus:approvalStatus?approvalStatus.value:'all',approval_user:approvalFocus?approvalFocus.value:''});try{const res=await fetch('/admin/approvals-fragment?'+params.toString(),{cache:'no-store'});if(!res.ok)throw new Error('HTTP '+res.status);const html=await res.text();if(html!==approvalArea.innerHTML){approvalArea.innerHTML=html;restoreApprovalDrafts(drafts);setApprovalCategory(approvalActiveCategory);const newList=approvalArea.querySelector('.approval-user-list');if(newList)newList.scrollTop=listScroll;const workspace=approvalArea.querySelector('[data-current-approval-user]');if(workspace&&approvalFocus&&!approvalFocus.value){approvalFocus.value=workspace.dataset.currentApprovalUser||'';updateApprovalUrl(approvalFocus.value);}}if(approvalConnection){approvalConnection.classList.remove('offline');approvalConnection.classList.add('online');approvalConnection.querySelector('span').textContent='Kendi kendine güncelleme etkin';}}catch(err){if(approvalConnection){approvalConnection.classList.remove('online');approvalConnection.classList.add('offline');approvalConnection.querySelector('span').textContent='Bağlantı kuruluyor';}}finally{approvalBusy=false;}}
+    if(approvalSearch)approvalSearch.addEventListener('input',()=>{clearTimeout(approvalTypingTimer);approvalTypingTimer=setTimeout(()=>{if(approvalFocus)approvalFocus.value='';approvalActiveCategory='summary';refreshApprovals();},280);});
+    if(approvalStatus)approvalStatus.addEventListener('change',()=>{if(approvalFocus)approvalFocus.value='';approvalActiveCategory='summary';refreshApprovals();});
+    document.addEventListener('click',event=>{const userButton=event.target.closest('[data-approval-select]');if(userButton&&approvalArea&&approvalArea.contains(userButton)){const uid=userButton.dataset.approvalSelect||'';if(approvalFocus)approvalFocus.value=uid;approvalActiveCategory='summary';updateApprovalUrl(uid);refreshApprovals();return;}const categoryButton=event.target.closest('[data-approval-category-target]');if(categoryButton&&approvalArea&&approvalArea.contains(categoryButton)){setApprovalCategory(categoryButton.dataset.approvalCategoryTarget);}});
+    setApprovalCategory('summary');
+    const initialApprovalWorkspace=approvalArea?approvalArea.querySelector('[data-current-approval-user]'):null;if(initialApprovalWorkspace&&approvalFocus&&!approvalFocus.value){approvalFocus.value=initialApprovalWorkspace.dataset.currentApprovalUser||'';}
     setInterval(refreshApprovals,5000);
     document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshApprovals();});
 
@@ -9249,9 +9438,9 @@ def admin():
     signer_online = bool(WITHDRAW_SIGNER_URL)
     active_title = next((label for slug, label, number, group in nav_items if slug == active_view), "Kontrol Merkezi")
     return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='color-scheme' content='dark'>
-    <title>Nerlo Yönetim Merkezi · V12</title><style>{panel_css}</style></head><body>{notice_html}
+    <title>Nerlo Yönetim Merkezi · V14</title><style>{panel_css}</style></head><body>{notice_html}
     <div class='control-shell'>
-      <aside class='sidebar'><div class='brand'><div class='brand-mark'>N</div><div><strong>Nerlo Wallet</strong><small>Yönetim Merkezi · V12</small></div></div><nav class='nav-scroll'>{nav_html}</nav>
+      <aside class='sidebar'><div class='brand'><div class='brand-mark'>N</div><div><strong>Nerlo Wallet</strong><small>Yönetim Merkezi · V14</small></div></div><nav class='nav-scroll'>{nav_html}</nav>
         <div class='sidebar-footer'><div class='operator'><div class='operator-avatar'>{h(current_panel_username()[:1].upper() or 'N')}</div><div><strong>{h(current_panel_username())}</strong><small>Yetkili operasyon hesabı</small></div></div><a class='signout' href='/logout'>Güvenli çıkış yap</a></div>
       </aside>
       <section class='workspace'><header class='topbar'><div class='topbar-left'><button id='menu-toggle' class='menu-toggle' type='button'>☰</button><div class='breadcrumbs'><span>NERLO / OPERASYON</span><h1 id='page-title'>{h(active_title)}</h1></div></div><div class='system-health'><span class='health-chip'><i></i>Bakiye defteri aktif</span><span class='health-chip {'warn' if not signer_online else ''}'><i></i>{'İmzalama servisi bağlı' if signer_online else 'İmzalama servisi bekliyor'}</span><span class='health-chip'><i></i>Çevrim içi</span></div></header>
