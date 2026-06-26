@@ -18,7 +18,7 @@ import traceback
 import unicodedata
 from urllib.parse import urlparse
 from collections import defaultdict, deque
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from html import escape, unescape
 
@@ -54,6 +54,12 @@ ALCHEMY_KEY = os.getenv("ALCHEMY_KEY", "").strip()
 TRONGRID_KEY = os.getenv("TRONGRID_KEY", "").strip()
 WALLET_SCAN_SECONDS = max(30, int(os.getenv("WALLET_SCAN_SECONDS", "60")))
 R10_FETCH_HARD_TIMEOUT = max(10, min(60, int(os.getenv("R10_FETCH_HARD_TIMEOUT", "25"))))
+R10_KEY_VALID_HOURS = 24
+R10_CONTACT_PROFILE_URL = os.getenv(
+    "R10_CONTACT_PROFILE_URL",
+    "https://www.r10.net/profil/212516-sorrymama.html",
+).strip()
+R10_KEY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 # Exchange core / blockchain infrastructure
 EXCHANGE_MODE = os.getenv("EXCHANGE_MODE", "on").strip().lower() == "on"
@@ -119,8 +125,8 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V15"
-PANEL_RELEASE = "TREASURY-CONTROL-CENTER-V11"
+BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V16"
+PANEL_RELEASE = "TREASURY-CONTROL-CENTER-V12"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
 SWEEP_RELEASE = "TRON-HD-DEPOSIT-SWEEP-V1"
@@ -3296,6 +3302,16 @@ DEFAULT_MESSAGES = {
     "withdraw_locked": "Çekim işlemleriniz geçici olarak kilitlidir.",
     "deposit_crypto_intro": "Yalnızca belirtilen ağ üzerinden gönderim yapınız. Farklı ağdan yapılan transferler kaybolabilir.",
     "deposit_received": "Yatırım bildiriminiz alındı. Kontrol ve onay sonrasında bakiyenize yansıtılacaktır.",
+    "r10_key_ready_personal": "Sayın {hitap},\n\nR10 doğrulama profiliniz başarıyla incelendi. Aşağıdaki güvenli Key'i 24 saat içinde NerloWallet R10 hesabına özel mesaj yoluyla gönderiniz.\n\nKey: {key}\nGeçerlilik süresi: {key_suresi}\n\nGönderimden sonra ‘Keyi Gönderdim’ düğmesine dokununuz.",
+    "r10_key_ready_corporate": "Sayın {hitap},\n\nKurumsal R10 profiliniz başarıyla incelendi. Aşağıdaki güvenli Key'i ve kurumsal banka hesabınızın ad-soyad bilgisini 24 saat içinde NerloWallet R10 hesabına özel mesaj yoluyla gönderiniz.\n\nKey: {key}\nGeçerlilik süresi: {key_suresi}\n\nGönderimden sonra ‘Keyi Gönderdim’ düğmesine dokununuz.",
+    "r10_key_sent_confirmation": "Sayın {hitap},\n\nKey gönderim bildiriminiz alınmıştır. R10 üzerinden ilettiğiniz Key kontrol edildikten sonra doğrulama sonucunuz size bildirilecektir.",
+    "r10_key_already_sent": "Sayın {hitap},\n\nKey gönderim bildiriminiz daha önce alınmıştır. Doğrulamanız inceleme sırasındadır; sonuçlandığında size bilgi verilecektir.",
+    "r10_approved_notice": "Sayın {hitap},\n\nR10 doğrulamanız başarıyla tamamlandı. TL bakiye yükleme ve çekme işlemleriniz kullanıma açılmıştır.\n\nNerlo Wallet'ı tercih ettiğiniz için teşekkür ederiz.",
+    "r10_rejected_notice": "Sayın {hitap},\n\nR10 doğrulama başvurunuz onaylanamadı.\n\nRed nedeni: {red_nedeni}\n\nBilgilerinizi kontrol ederek yeniden doğrulama başlatabilirsiniz.",
+    "r10_revoked_notice": "Sayın {hitap},\n\nR10 doğrulamanız yönetim kontrolü sonucunda kaldırılmıştır.\n\nAçıklama: {red_nedeni}\n\nTL işlemlerini yeniden kullanabilmek için doğrulama adımlarını tekrar tamamlamanız gerekir.",
+    "r10_reverify_notice": "Sayın {hitap},\n\nHesabınız için yeniden R10 doğrulaması gerekmektedir. Lütfen Nerlo Wallet menüsündeki R10 Doğrulama bölümünden güncel profil bağlantınızı gönderiniz.",
+    "r10_key_expired_notice": "Sayın {hitap},\n\nR10 doğrulama Key'inizin 24 saatlik geçerlilik süresi dolmuştur. Güvenliğiniz için eski Key iptal edilmiştir. Lütfen yeniden doğrulama başlatarak yeni bir Key oluşturunuz.",
+    "r10_admin_key_sent": "Yeni onay bekleyen kullanıcı Key gönderdi.\n\nTelegram: @{telegram_kullanici}\nKullanıcı kimliği: {kullanici_id}\nHitap: {hitap}\nR10 hesabı: {r10_kullanici}\nHesap türü: {hesap_turu}\nKey son kullanım: {key_bitis}",
 }
 
 
@@ -3323,6 +3339,15 @@ EN_MESSAGES = {
     "withdraw_locked": "Your withdrawals are temporarily locked.",
     "deposit_crypto_intro": "Send only through the specified network. Transfers made through a different network may be lost.",
     "deposit_received": "Your deposit notification has been received. It will be credited after review and approval.",
+    "r10_key_ready_personal": "Dear {hitap},\n\nYour R10 profile has been reviewed. Send the secure Key below to the NerloWallet R10 account by private message within 24 hours.\n\nKey: {key}\nValid for: {key_suresi}\n\nThen tap ‘I Sent the Key’.",
+    "r10_key_ready_corporate": "Dear {hitap},\n\nYour corporate R10 profile has been reviewed. Send the secure Key and the bank account holder's full name to the NerloWallet R10 account by private message within 24 hours.\n\nKey: {key}\nValid for: {key_suresi}\n\nThen tap ‘I Sent the Key’.",
+    "r10_key_sent_confirmation": "Dear {hitap},\n\nYour Key submission notice has been received. You will be notified after the Key sent through R10 is reviewed.",
+    "r10_key_already_sent": "Dear {hitap},\n\nYour Key submission notice was already received. Your verification is being reviewed.",
+    "r10_approved_notice": "Dear {hitap},\n\nYour R10 verification has been approved. TRY deposit and withdrawal features are now available.",
+    "r10_rejected_notice": "Dear {hitap},\n\nYour R10 verification request was rejected.\n\nReason: {red_nedeni}",
+    "r10_revoked_notice": "Dear {hitap},\n\nYour R10 verification has been revoked.\n\nReason: {red_nedeni}",
+    "r10_reverify_notice": "Dear {hitap},\n\nYour account requires R10 verification again. Start the verification flow from the bot menu.",
+    "r10_key_expired_notice": "Dear {hitap},\n\nYour R10 verification Key has expired after 24 hours. Start verification again to create a new Key.",
 }
 
 BOT_TEXTS = {
@@ -3385,9 +3410,12 @@ BOT_TEXTS = {
         "r10_hidden_name": "Lütfen r10 profilinizde ad soyad gizlemesini kapatıp tekrar deneyiniz.",
         "r10_duplicate": "Bu r10 profili başka Telegram hesabına bağlı.",
         "r10_rules_failed": "Bireysel hesap için en az 6 aylık üyelik ve en az 5 trade gerekir.",
-        "r10_pending": "R10 doğrulamanız admin onayı bekliyor.",
+        "r10_pending": "R10 doğrulamanız yönetici onayı bekliyor.",
+        "r10_key_waiting": "R10 doğrulamanızı tamamlamak için verilen Key'i NerloWallet R10 hesabına gönderiniz.",
         "r10_required": "TL işlemleri için önce R10 doğrulaması gerekir.",
         "r10_name_mismatch": "Ad soyad R10 profilinizle uyuşmuyor.",
+        "r10_copy_key": "Keyi Kopyala", "r10_contact_button": "NerloWallet R10",
+        "r10_key_sent_button": "Keyi Gönderdim", "r10_start_again": "Yeni Key Oluştur",
     },
     "en": {
         "choose_language": "Please select your preferred language.\n\nLütfen kullanmak istediğiniz dili seçin.",
@@ -3448,9 +3476,12 @@ BOT_TEXTS = {
         "r10_hidden_name": "Please disable name hiding on your r10 profile and try again.",
         "r10_duplicate": "This r10 profile is already linked to another Telegram account.",
         "r10_rules_failed": "Personal accounts require at least 6 months membership and at least 5 trades.",
-        "r10_pending": "Your R10 verification is waiting for admin approval.",
+        "r10_pending": "Your R10 verification is waiting for administrator approval.",
+        "r10_key_waiting": "Send the issued Key to the NerloWallet R10 account to complete verification.",
         "r10_required": "R10 verification is required for TRY transactions.",
         "r10_name_mismatch": "The name does not match your R10 profile.",
+        "r10_copy_key": "Copy Key", "r10_contact_button": "NerloWallet R10",
+        "r10_key_sent_button": "I Sent the Key", "r10_start_again": "Create New Key",
     },
 }
 
@@ -3537,6 +3568,7 @@ DEFAULT_SETTINGS = {
     "daily_withdraw_limit_LTC": "10",
     "daily_withdraw_limit_TRX": "50000",
     "daily_withdraw_limit_XMR": "5",
+    "r10_contact_profile_url": R10_CONTACT_PROFILE_URL,
     "maintenance_mode": "off",
     "maintenance_message": "",
     "announcement_active": "off",
@@ -3827,6 +3859,30 @@ def msg(uid, key):
     return EN_MESSAGES.get(key, DEFAULT_MESSAGES.get(key, key)) if lang_of(uid) == "en" else messages.get(key, DEFAULT_MESSAGES.get(key, key))
 
 
+class _SafeTemplateValues(dict):
+    def __missing__(self, key):
+        return "{" + str(key) + "}"
+
+
+def render_message_template(uid, key, **values):
+    """Render a panel-editable message without letting a malformed template break the bot."""
+    refresh_runtime_state(_db_key(FILES["messages"]), messages)
+    template = messages.get(key, DEFAULT_MESSAGES.get(key, key))
+    try:
+        return str(template).format_map(_SafeTemplateValues({k: str(v) for k, v in values.items()}))
+    except (ValueError, TypeError):
+        return str(template)
+
+
+def render_admin_message(key, **values):
+    refresh_runtime_state(_db_key(FILES["messages"]), messages)
+    template = messages.get(key, DEFAULT_MESSAGES.get(key, key))
+    try:
+        return str(template).format_map(_SafeTemplateValues({k: str(v) for k, v in values.items()}))
+    except (ValueError, TypeError):
+        return str(template)
+
+
 def language_keyboard():
     return {"inline_keyboard": [[
         inline_button("🇹🇷 Türkçe", "lang:tr"),
@@ -3922,9 +3978,27 @@ def r10_tl_ready(uid):
     return info.get("status") == "approved"
 
 
+def r10_status_label(value):
+    return {
+        "pending": "Key gönderimi bekleniyor",
+        "key_sent": "Key gönderildi · Onay bekliyor",
+        "approved": "Onaylandı",
+        "rejected": "Reddedildi",
+        "revoked": "Onay kaldırıldı",
+        "expired": "Key süresi doldu",
+        "reverify_required": "Yeniden doğrulama gerekli",
+    }.get(str(value or ""), "Doğrulama bulunmuyor")
+
+
+def r10_account_type_label(value):
+    return "Kurumsal" if str(value or "") == "corporate" else "Bireysel"
+
+
 def r10_required_text(uid):
-    info = users.get(str(uid), {}).get("r10_verification", {})
-    if info.get("status") == "pending":
+    info = users.get(str(uid), {}).get("r10_verification", {}) or {}
+    if info.get("status") == "pending" and not r10_key_is_expired(info):
+        return t(uid, "r10_key_waiting")
+    if info.get("status") == "key_sent" and not r10_key_is_expired(info):
         return t(uid, "r10_pending")
     return t(uid, "r10_required")
 
@@ -3946,6 +4020,237 @@ def validate_r10_name(uid, full_name):
     if len(parts) < 2 or not first or not last:
         return False
     return _tr_lower(parts[0]).startswith(first) and _tr_lower(parts[-1]).startswith(last)
+
+
+def _parse_r10_time(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text[:19], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _format_r10_time(value):
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def generate_r10_key():
+    existing_digests = {
+        str(((user or {}).get("r10_verification", {}) or {}).get("key_digest") or "")
+        for user in globals().get("users", {}).values()
+    }
+    for _ in range(32):
+        groups = ["".join(secrets.choice(R10_KEY_ALPHABET) for _ in range(5)) for _ in range(4)]
+        candidate = "NERLO-" + "-".join(groups)
+        if hashlib.sha256(candidate.encode("utf-8")).hexdigest() not in existing_digests:
+            return candidate
+    raise RuntimeError("Benzersiz R10 Key üretilemedi")
+
+
+def normalize_r10_key(value):
+    text = str(value or "").strip().upper().replace("–", "-").replace("—", "-")
+    return re.sub(r"\s+", "", text)
+
+
+def r10_key_digest(value):
+    return hashlib.sha256(normalize_r10_key(value).encode("utf-8")).hexdigest()
+
+
+def r10_key_deadline(info):
+    explicit = _parse_r10_time(info.get("key_expires_at"))
+    if explicit:
+        return explicit
+    created = _parse_r10_time(info.get("key_created_at") or info.get("created_at"))
+    return created + timedelta(hours=R10_KEY_VALID_HOURS) if created else None
+
+
+def r10_key_is_expired(info, reference=None):
+    if not info or info.get("status") not in ("pending", "key_sent"):
+        return False
+    deadline = r10_key_deadline(info)
+    return bool(deadline and (reference or datetime.now()) >= deadline)
+
+
+def r10_key_time_left(info):
+    deadline = r10_key_deadline(info)
+    if not deadline:
+        return "24 saat"
+    seconds = max(0, int((deadline - datetime.now()).total_seconds()))
+    hours, remainder = divmod(seconds, 3600)
+    minutes = remainder // 60
+    if hours:
+        return f"{hours} saat {minutes} dakika"
+    return f"{minutes} dakika"
+
+
+def r10_salutation(info):
+    if not isinstance(info, dict):
+        return "Değerli kullanıcımız"
+    if info.get("account_type") == "corporate":
+        return str(info.get("company_title") or info.get("masked_name") or "Kurumsal müşterimiz").strip()
+    return str(info.get("masked_name") or "Değerli kullanıcımız").strip()
+
+
+def r10_template_values(uid, info, **extra):
+    uid = str(uid)
+    user = users.get(uid, {}) or {}
+    values = {
+        "hitap": r10_salutation(info),
+        "r10_kullanici": str(info.get("profile_slug") or "-") if isinstance(info, dict) else "-",
+        "key": str(info.get("key") or "-") if isinstance(info, dict) else "-",
+        "key_suresi": r10_key_time_left(info) if isinstance(info, dict) else "24 saat",
+        "key_bitis": _format_r10_time(r10_key_deadline(info)) if isinstance(info, dict) and r10_key_deadline(info) else "-",
+        "kullanici_id": uid,
+        "telegram_kullanici": username_label(user.get("username")),
+        "hesap_turu": r10_account_type_label(info.get("account_type")) if isinstance(info, dict) else "-",
+        "red_nedeni": "-",
+    }
+    values.update(extra)
+    return values
+
+
+def verify_r10_key_value(info, candidate):
+    candidate_normalized = normalize_r10_key(candidate)
+    if not candidate_normalized:
+        return False
+    expected_digest = str(info.get("key_digest") or "").strip()
+    if expected_digest:
+        return secrets.compare_digest(expected_digest, r10_key_digest(candidate_normalized))
+    expected = normalize_r10_key(info.get("key"))
+    return bool(expected) and secrets.compare_digest(expected, candidate_normalized)
+
+
+def r10_key_keyboard(uid, info):
+    key = str(info.get("key") or "").strip()
+    profile_url = str(settings.get("r10_contact_profile_url") or R10_CONTACT_PROFILE_URL).strip()
+    rows = []
+    copy = copy_button(t(uid, "r10_copy_key"), key)
+    if copy:
+        rows.append([copy])
+    if profile_url:
+        rows.append([{"text": t(uid, "r10_contact_button"), "url": profile_url}])
+    rows.append([inline_button(t(uid, "r10_key_sent_button"), "r10:key_sent")])
+    return {"inline_keyboard": rows}
+
+
+def send_r10_key_screen(chat_id, info):
+    uid = str(chat_id)
+    template_key = "r10_key_ready_corporate" if info.get("account_type") == "corporate" else "r10_key_ready_personal"
+    text = render_message_template(uid, template_key, **r10_template_values(uid, info))
+    return send(chat_id, text, r10_key_keyboard(uid, info))
+
+
+def notify_admin_r10_key_sent(uid, info):
+    if not ADMIN_CHAT_ID:
+        return {"ok": False, "description": "ADMIN_CHAT_ID tanımlı değil"}
+    values = r10_template_values(uid, info)
+    text = render_admin_message("r10_admin_key_sent", **values)
+    keyboard = None
+    if PUBLIC_BASE_URL:
+        keyboard = {"inline_keyboard": [[{
+            "text": "Kullanıcı Onayını Aç",
+            "url": f"{PUBLIC_BASE_URL}/admin?view=approvals&focus_uid={uid}",
+        }]]}
+    return send(ADMIN_CHAT_ID, text, keyboard)
+
+
+def invalidate_r10_key(info, used=False, actor=""):
+    current_key = str(info.get("key") or "")
+    if current_key:
+        info["key_preview"] = "••••-" + current_key[-4:]
+    info["key"] = ""
+    info["key_used"] = bool(used)
+    if used:
+        info["key_used_at"] = now()
+        info["key_used_by"] = str(actor or "")
+
+
+def expire_r10_profile(uid, profile, notify=True):
+    uid = str(uid)
+    info = (profile or {}).get("r10_verification", {}) or {}
+    if not r10_key_is_expired(info):
+        return False
+    info["status"] = "expired"
+    info["expired_at"] = now()
+    invalidate_r10_key(info, used=False)
+    profile["r10_verification"] = info
+    exchange_save_profile(uid, profile)
+    with data_lock:
+        users[uid] = profile
+    add_admin_log("expire_r10_key", "24 saatlik R10 Key süresi doldu", uid)
+    if notify and not info.get("expiry_notified_at"):
+        info["expiry_notified_at"] = now()
+        exchange_save_profile(uid, profile)
+        try:
+            send(uid, render_message_template(uid, "r10_key_expired_notice", **r10_template_values(uid, info)), reply_keyboard(uid))
+        except Exception as exc:
+            print("R10 EXPIRY MESSAGE ERROR:", exc)
+    return True
+
+
+def expire_r10_keys_once():
+    profiles = exchange_load_all_profiles()
+    expired_count = 0
+    for uid, profile in profiles.items():
+        try:
+            if expire_r10_profile(uid, profile, notify=True):
+                expired_count += 1
+        except Exception as exc:
+            print("R10 KEY EXPIRY ERROR:", uid, exc)
+    return expired_count
+
+
+def approve_r10_verification(uid, info, iban_owner="", actor="", method="key_match"):
+    uid = str(uid)
+    if r10_profile_used_by(info.get("profile_slug"), uid):
+        raise ValueError("Bu R10 profili başka bir hesaba bağlıdır.")
+    if r10_key_is_expired(info):
+        expire_r10_profile(uid, users[uid], notify=True)
+        raise ValueError("Key'in 24 saatlik geçerlilik süresi dolmuştur.")
+
+    locked_owner = normalize_person_name(info.get("iban_owner", "")) if info.get("iban_owner_locked") else ""
+    owner = locked_owner or normalize_person_name(iban_owner)
+    if info.get("account_type") == "corporate":
+        if len(_name_parts(owner)) < 2:
+            raise ValueError("Kurumsal hesap için banka hesabı sahibinin ad-soyadı zorunludur.")
+        duplicate_uid = r10_iban_owner_used_by(owner, uid)
+        if duplicate_uid:
+            raise ValueError("Bu banka hesabı sahibi başka bir kullanıcıda kayıtlıdır.")
+        info["iban_owner"] = owner
+        info["iban_owner_locked"] = True
+
+    info["status"] = "approved"
+    info["approved_at"] = now()
+    info["approved_by"] = str(actor or "")
+    info["approval_method"] = method
+    invalidate_r10_key(info, used=True, actor=actor)
+    save_user_profile(uid)
+    add_admin_log("verify_r10_key", f"R10 Key eşleşti ve TL doğrulaması onaylandı · {info.get('profile_slug','')} · Yetkili: {actor or 'sistem'}", uid)
+    send(uid, render_message_template(uid, "r10_approved_notice", **r10_template_values(uid, info)), reply_keyboard(uid))
+    return info
+
+
+def reject_r10_verification(uid, reason, actor=""):
+    uid = str(uid)
+    info = users.get(uid, {}).get("r10_verification", {}) or {}
+    reason = str(reason or "").strip()
+    if not info:
+        raise ValueError("R10 doğrulama kaydı bulunamadı.")
+    if not reason:
+        raise ValueError("Red nedeni zorunludur.")
+    info["status"] = "rejected"
+    info["rejected_at"] = now()
+    info["rejected_by"] = str(actor or "")
+    info["rejection_reason"] = reason
+    invalidate_r10_key(info, used=False)
+    save_user_profile(uid)
+    add_admin_log("reject_r10_tl", f"R10 doğrulaması reddedildi · {reason} · Yetkili: {actor or 'sistem'}", uid)
+    send(uid, render_message_template(uid, "r10_rejected_notice", **r10_template_values(uid, info, red_nedeni=reason)), reply_keyboard(uid))
+    return info
 
 
 def normalize_r10_profile_url(profile_url):
@@ -3977,7 +4282,7 @@ def r10_profile_used_by(profile_slug, except_uid=""):
         if str(other_uid) == str(except_uid):
             continue
         info = (user or {}).get("r10_verification", {}) or {}
-        if slug and str(info.get("profile_slug", "")).lower() == slug and info.get("status") in ("pending", "approved"):
+        if slug and str(info.get("profile_slug", "")).lower() == slug:
             return str(other_uid)
     return ""
 
@@ -4040,7 +4345,7 @@ def _r10_mask_name(first, last):
         letters = re.sub(r"[^A-Za-zÇĞİÖŞÜçğıöşü]", "", str(value or ""))
         if len(letters) < 2:
             return ""
-        return letters[:2] + "*" * max(4, len(letters) - 2)
+        return letters[:2] + "*" * max(3, len(letters) - 2)
 
     return f"{mask_part(first)} {mask_part(last)}".strip()
 
@@ -4141,6 +4446,16 @@ def fetch_r10_profile_mask(profile_url):
 
 def begin_r10_verification(chat_id):
     uid = str(chat_id)
+    info = users.get(uid, {}).get("r10_verification", {}) or {}
+    if info.get("status") in ("pending", "key_sent"):
+        if r10_key_is_expired(info):
+            expire_r10_profile(uid, users[uid], notify=True)
+        elif info.get("key"):
+            send_r10_key_screen(chat_id, info)
+            return
+    if info.get("status") == "approved":
+        send(chat_id, render_message_template(uid, "r10_approved_notice", **r10_template_values(uid, info)), reply_keyboard(uid))
+        return
     user_state[uid] = {"flow": "r10_verify", "step": "profile_link"}
     send(chat_id, t(uid, "r10_link_question"))
 
@@ -4203,31 +4518,50 @@ def _r10_complete_profile_check(chat_id, uid, profile_text, check_token, result_
             user_state.pop(uid, None)
             return
 
-        key = "NERLO-" + secrets.token_hex(3).upper()
+        existing = users.get(uid, {}).get("r10_verification", {}) or {}
+        locked_owner = (
+            normalize_person_name(existing.get("iban_owner", ""))
+            if parsed.get("account_type") == "corporate"
+            and existing.get("iban_owner")
+            and (existing.get("iban_owner_locked") or existing.get("status") == "approved")
+            else ""
+        )
+        key_value = generate_r10_key()
+        created_at = datetime.now()
         users[uid]["r10_verification"] = {
             "status": "pending",
             "profile_url": parsed.get("profile_url", profile_text),
             "profile_slug": parsed.get("profile_slug", ""),
             "masked_name": parsed["masked"],
+            "company_title": parsed.get("company_title", ""),
             "account_type": parsed.get("account_type", "personal"),
             "first2": parsed.get("first2", ""),
             "last2": parsed.get("last2", ""),
-            "key": key,
+            "key": key_value,
+            "key_digest": r10_key_digest(key_value),
+            "key_preview": "••••-" + key_value[-4:],
+            "key_created_at": _format_r10_time(created_at),
+            "key_expires_at": _format_r10_time(created_at + timedelta(hours=R10_KEY_VALID_HOURS)),
+            "key_used": False,
             "r10_months": int(parsed.get("months") or 0),
             "r10_trades": int(parsed.get("trades") or 0),
-            "iban_owner": "",
+            "membership_date": parsed.get("membership_date", ""),
+            "r10_plus_negative": parsed.get("r10_plus_negative"),
+            "r10_plus_neutral": parsed.get("r10_plus_neutral"),
+            "r10_plus_positive": parsed.get("r10_plus_positive"),
+            "iban_owner": locked_owner,
+            "iban_owner_locked": bool(locked_owner),
             "created_at": now(),
             "approved_at": "",
             "approved_by": "",
+            "key_sent_at": "",
+            "admin_notified_at": "",
         }
+        info = users[uid]["r10_verification"]
         save_user_profile(uid)
-        add_admin_log("r10_verify_started", "R10 doğrulama başlatıldı", uid)
+        add_admin_log("r10_verify_started", f"R10 doğrulaması başlatıldı · {info.get('profile_slug','')}", uid)
         user_state.pop(uid, None)
-
-        if parsed.get("account_type") == "corporate":
-            send(chat_id, t(uid, "r10_corporate_key_sent", key=key), reply_keyboard(uid))
-        else:
-            send(chat_id, t(uid, "r10_key_sent", name=parsed["masked"], key=key), reply_keyboard(uid))
+        send_r10_key_screen(chat_id, info)
     except Exception as exc:
         print("R10 PROFILE COMPLETE ERROR:", repr(exc))
         send(chat_id, t(uid, "r10_fetch_failed"))
@@ -4261,7 +4595,6 @@ def start_r10_profile_check(chat_id, uid, profile_text):
         name=f"r10-complete-{uid}",
     ).start()
     return True
-
 
 def hash_pin(pin):
     return generate_password_hash(str(pin), method="scrypt")
@@ -5416,6 +5749,45 @@ def handle_callback(chat_id, username, data, cb_id):
     if data == "r10:start":
         begin_r10_verification(chat_id)
         return
+    if data == "r10:key_sent":
+        info = users.get(uid, {}).get("r10_verification", {}) or {}
+        if not info:
+            send(chat_id, t(uid, "r10_required"), reply_keyboard(uid))
+            return
+        if r10_key_is_expired(info):
+            expire_r10_profile(uid, users[uid], notify=True)
+            return
+        if info.get("status") == "pending":
+            info["status"] = "key_sent"
+            info["key_sent_at"] = now()
+            save_user_profile(uid)
+            add_admin_log("r10_key_sent", "Kullanıcı R10 üzerinden Key gönderdiğini bildirdi", uid)
+            send(chat_id, render_message_template(uid, "r10_key_sent_confirmation", **r10_template_values(uid, info)), reply_keyboard(uid))
+            if not info.get("admin_notified_at"):
+                try:
+                    notify_result = notify_admin_r10_key_sent(uid, info)
+                    if notify_result.get("ok"):
+                        info["admin_notified_at"] = now()
+                        save_user_profile(uid)
+                except Exception as exc:
+                    print("R10 ADMIN NOTIFY ERROR:", exc)
+            return
+        if info.get("status") == "key_sent":
+            if not info.get("admin_notified_at"):
+                try:
+                    notify_result = notify_admin_r10_key_sent(uid, info)
+                    if notify_result.get("ok"):
+                        info["admin_notified_at"] = now()
+                        save_user_profile(uid)
+                except Exception as exc:
+                    print("R10 ADMIN NOTIFY RETRY ERROR:", exc)
+            send(chat_id, render_message_template(uid, "r10_key_already_sent", **r10_template_values(uid, info)), reply_keyboard(uid))
+            return
+        if info.get("status") == "approved":
+            send(chat_id, render_message_template(uid, "r10_approved_notice", **r10_template_values(uid, info)), reply_keyboard(uid))
+            return
+        send(chat_id, t(uid, "r10_required"), {"inline_keyboard": [[inline_button(t(uid, "r10_start_again"), "r10:start")]]})
+        return
     if data.startswith("detail:"):
         rid = data.split(":", 1)[1]
         if requests_db.get(rid, {}).get("user_id") == uid:
@@ -5674,7 +6046,7 @@ PANEL_PERMISSION_LABELS = {
     "pool": "Havuz ve sweep işlemleri",
     "requests": "İşlem talepleri",
     "users": "Kullanıcı yönetimi",
-    "approvals": "Kullanıcı onay menüsü",
+    "approvals": "Kullanıcı doğrulama merkezi",
     "broadcast": "Duyuru gönderme",
     "settings": "Ayar yönetimi",
     "logs": "Yönetim kayıtları",
@@ -5691,6 +6063,8 @@ ACTION_PERMISSIONS = {
     "adjust_balance": "users",
     "update_user_profile": "users",
     "approve_r10_tl": "approvals",
+    "verify_r10_key": "approvals",
+    "reject_r10_tl": "approvals",
     "revoke_r10_tl": "approvals",
     "request_r10_reverify": "approvals",
     "freeze_user": "users",
@@ -7171,6 +7545,15 @@ ADMIN_ACTION_LABELS = {
     "reject_request": "İşlemi reddetme",
     "adjust_balance": "Bakiye düzeltme",
     "update_user_profile": "Kullanıcı profilini güncelleme",
+    "r10_verify_started": "R10 doğrulamasını başlatma",
+    "r10_key_sent": "R10 Key gönderim bildirimi",
+    "verify_r10_key": "R10 Key doğrulama",
+    "verify_r10_key_failed": "Başarısız R10 Key doğrulama",
+    "approve_r10_tl": "R10 doğrulamasını onaylama",
+    "reject_r10_tl": "R10 doğrulamasını reddetme",
+    "revoke_r10_tl": "R10 doğrulamasını kaldırma",
+    "request_r10_reverify": "Yeniden R10 doğrulaması isteme",
+    "expire_r10_key": "R10 Key süresini sonlandırma",
     "freeze_user": "Hesabı dondurma",
     "unfreeze_user": "Hesabı açma",
     "lock_withdraw": "Çekimi kilitleme",
@@ -7205,6 +7588,16 @@ MESSAGE_LABELS = {
     "withdraw_locked": "Kilitli çekim mesajı",
     "deposit_crypto_intro": "Kripto para yükleme uyarısı",
     "deposit_received": "Yükleme bildirimi alındı mesajı",
+    "r10_key_ready_personal": "Bireysel kullanıcıya Key mesajı",
+    "r10_key_ready_corporate": "Kurumsal kullanıcıya Key mesajı",
+    "r10_key_sent_confirmation": "Key gönderildi bildirimi",
+    "r10_key_already_sent": "Tekrarlanan Key gönderildi bildirimi",
+    "r10_approved_notice": "R10 onaylandı mesajı",
+    "r10_rejected_notice": "R10 reddedildi mesajı",
+    "r10_revoked_notice": "R10 onayı kaldırıldı mesajı",
+    "r10_reverify_notice": "Yeniden doğrulama mesajı",
+    "r10_key_expired_notice": "Key süresi doldu mesajı",
+    "r10_admin_key_sent": "Yöneticiye yeni Key bildirimi",
 }
 
 ICON_LABELS = {
@@ -7289,6 +7682,7 @@ def setting_label(key):
         "network_BTC": "BTC ağı",
         "network_ETH": "ETH ağı",
         "network_TON": "TON ağı",
+        "r10_contact_profile_url": "NerloWallet R10 profil bağlantısı",
     }
     if key in direct:
         return direct[key]
@@ -7336,7 +7730,10 @@ def setting_field(key):
 
 
 def message_field(key):
-    return f"<div class='field'><label>{h(MESSAGE_LABELS.get(key, 'Bot mesajı'))}</label><textarea name='{h(key)}'>{h(messages.get(key, ''))}</textarea></div>"
+    help_text = ""
+    if key.startswith("r10_"):
+        help_text = "<small class='field-help'>Kullanılabilir alanlar: {hitap}, {r10_kullanici}, {key}, {key_suresi}, {red_nedeni}, {kullanici_id}, {telegram_kullanici}, {hesap_turu}, {key_bitis}</small>"
+    return f"<div class='field message-field'><label>{h(MESSAGE_LABELS.get(key, 'Bot mesajı'))}</label><textarea name='{h(key)}'>{h(messages.get(key, ''))}</textarea>{help_text}</div>"
 
 
 def sweep_status_label(value):
@@ -7617,14 +8014,10 @@ def render_user_management(uid):
     ) or "<tr><td colspan='5' class='muted-cell'>Bakiye hareketi yok.</td></tr>"
 
     r10 = u.get("r10_verification", {}) or {}
-    r10_status = r10.get("status") or "yok"
+    r10_status = r10_status_label(r10.get("status"))
     r10_action = ""
-    if r10.get("status") == "pending":
-        r10_action = (
-            f"<form method='post'><input type='hidden' name='user_id' value='{h(uid)}'>"
-            f"<input type='hidden' name='return_to' value='{return_to}'>"
-            f"<button class='btn primary' name='action' value='approve_r10_tl'>TL işlemlerini aç</button></form>"
-        )
+    if r10.get("status") in ("pending", "key_sent"):
+        r10_action = f"<a class='btn primary' href='/admin?view=approvals&focus_uid={h(uid)}'>Güvenli Onay Ekranını Aç</a>"
     security_forms = []
     security_actions = [
         ("freeze_user", "Hesabı Dondur", "danger"),
@@ -7672,8 +8065,10 @@ def render_user_management(uid):
       <div class='section-head'><div><span class='eyebrow'>R10</span><h3>TL Doğrulama</h3></div><p>Durum: {h(r10_status)}</p></div>
       <div class='table-wrap'><table><tbody>
         <tr><th>Profil</th><td>{('<a href="' + h(r10.get('profile_url')) + '" target="_blank">' + h(r10.get('profile_url')) + '</a>') if r10.get('profile_url') else '-'}</td></tr>
-        <tr><th>Gizli ad</th><td>{h(r10.get('masked_name') or '-')}</td></tr>
-        <tr><th>Key</th><td><b>{h(r10.get('key') or '-')}</b></td></tr>
+        <tr><th>Hitap</th><td>{h(r10_salutation(r10))}</td></tr>
+        <tr><th>Hesap türü</th><td>{h(r10_account_type_label(r10.get('account_type')))}</td></tr>
+        <tr><th>Key</th><td><b>{h(r10.get('key') or r10.get('key_preview') or '-')}</b></td></tr>
+        <tr><th>Key son kullanım</th><td>{h(_format_r10_time(r10_key_deadline(r10)) if r10_key_deadline(r10) else '-')}</td></tr>
         <tr><th>Onay</th><td>{h(r10.get('approved_at') or '-')}</td></tr>
       </tbody></table></div>
       <div class='security-actions'>{r10_action}</div>
@@ -7689,25 +8084,179 @@ def render_user_management(uid):
     """
 
 
-def render_r10_approval_menu():
-    rows = []
-    for uid, u in sorted(users.items(), key=lambda item: (item[1].get("r10_verification", {}) or {}).get("created_at", ""), reverse=True):
-        info = (u or {}).get("r10_verification", {}) or {}
-        if not info:
-            continue
-        owner_input = ""
-        if info.get("account_type") == "corporate" and info.get("status") == "pending":
-            owner_input = f"<input name='iban_owner' placeholder='Kurumsal IBAN ad soyad' required>"
-        actions = []
-        if info.get("status") == "pending":
-            actions.append(f"<form method='post' class='inline-form'><input type='hidden' name='action' value='approve_r10_tl'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='/admin?view=approvals'>{owner_input}<button class='btn primary'>Onayla</button></form>")
-        if info.get("status") == "approved":
-            actions.append(f"<form method='post' class='inline-form'><input type='hidden' name='action' value='revoke_r10_tl'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='/admin?view=approvals'><button class='btn danger'>Onayı kaldır</button></form>")
-            actions.append(f"<form method='post' class='inline-form'><input type='hidden' name='action' value='request_r10_reverify'><input type='hidden' name='user_id' value='{h(uid)}'><input type='hidden' name='return_to' value='/admin?view=approvals'><button class='btn ghost'>Yeniden doğrulama iste</button></form>")
-        rows.append(f"<tr><td>{h(uid)}<br><small>@{h(username_label(u.get('username')))}</small></td><td>{h(info.get('status') or '-')}</td><td>{h(info.get('account_type') or '-')}</td><td><a href='{h(info.get('profile_url') or '#')}' target='_blank'>{h(info.get('profile_slug') or info.get('profile_url') or '-')}</a></td><td>{h(info.get('masked_name') or '-')}<br><small>{h(str(info.get('r10_months', 0)))} ay · {h(str(info.get('r10_trades', 0)))} trade</small></td><td><b>{h(info.get('key') or '-')}</b><br><small>{h(info.get('iban_owner') or '-')}</small></td><td>{h(info.get('approved_by') or '-')}<br><small>{h(info.get('approved_at') or '-')}</small></td><td><div class='security-actions'>{''.join(actions)}</div></td></tr>")
-    body = ''.join(rows) or "<tr><td colspan='8' class='muted-cell'>R10 doğrulama kaydı yok.</td></tr>"
-    return f"<section class='surface'><div class='surface-head'><div><span>R10</span><h3>Kullanıcı onay menüsü</h3></div><small>PM key kontrolünden sonra manuel onay verin.</small></div><div class='table-wrap'><table><thead><tr><th>Kullanıcı</th><th>Durum</th><th>Tip</th><th>Profil</th><th>Bilgi</th><th>Key / IBAN adı</th><th>Onay</th><th>İşlem</th></tr></thead><tbody>{body}</tbody></table></div></section>"
+def render_r10_approval_menu(focus_uid=""):
+    focus_uid = str(focus_uid or "").strip()
+    records = []
+    for uid, user in users.items():
+        info = (user or {}).get("r10_verification", {}) or {}
+        if info:
+            records.append((str(uid), user or {}, info))
 
+    priority = {
+        "key_sent": 0,
+        "pending": 1,
+        "reverify_required": 2,
+        "rejected": 3,
+        "expired": 4,
+        "approved": 5,
+        "revoked": 6,
+    }
+    def _approval_sort_key(item):
+        info = item[2]
+        stamp = _parse_r10_time(info.get("key_sent_at") or info.get("created_at"))
+        newest_first = -(stamp.timestamp() if stamp else 0)
+        return priority.get(str(info.get("status") or ""), 99), newest_first
+
+    records.sort(key=_approval_sort_key)
+
+    counts = defaultdict(int)
+    for _, _, info in records:
+        counts[str(info.get("status") or "unknown")] += 1
+
+    summary = f"""
+    <div class='r10-summary-grid'>
+      <div class='r10-summary-card attention'><span>Key gönderildi</span><strong>{counts.get('key_sent', 0)}</strong><small>Öncelikli kontrol bekliyor</small></div>
+      <div class='r10-summary-card'><span>Key bekleniyor</span><strong>{counts.get('pending', 0)}</strong><small>Kullanıcı gönderimi bekleniyor</small></div>
+      <div class='r10-summary-card success'><span>Onaylanan</span><strong>{counts.get('approved', 0)}</strong><small>TL işlemleri açık</small></div>
+      <div class='r10-summary-card danger'><span>İşlem gereken</span><strong>{counts.get('rejected', 0) + counts.get('expired', 0) + counts.get('reverify_required', 0)}</strong><small>Red, süre dolumu veya yeniden doğrulama</small></div>
+    </div>
+    """
+
+    cards = []
+    for uid, user, info in records:
+        status = str(info.get("status") or "")
+        account_type = str(info.get("account_type") or "personal")
+        username = username_label(user.get("username"))
+        title = r10_salutation(info)
+        key_value = str(info.get("key") or info.get("key_preview") or "-")
+        deadline = r10_key_deadline(info)
+        deadline_text = _format_r10_time(deadline) if deadline else "-"
+        membership = str(info.get("membership_date") or "-")
+        profile_url = str(info.get("profile_url") or "#")
+        profile_slug = str(info.get("profile_slug") or "-")
+        owner = str(info.get("iban_owner") or "")
+        owner_locked = bool(info.get("iban_owner_locked"))
+        card_classes = ["r10-approval-card", f"r10-status-{h(status or 'unknown')}"]
+        if uid == focus_uid:
+            card_classes.append("focus-card")
+
+        status_note = ""
+        if status == "key_sent":
+            status_note = f"Kullanıcı Key'i gönderdiğini {h(info.get('key_sent_at') or '-')} tarihinde bildirdi."
+        elif status == "pending":
+            status_note = "Kullanıcının R10 üzerinden Key göndermesi bekleniyor."
+        elif status == "approved":
+            status_note = f"{h(info.get('approved_by') or '-')} tarafından {h(info.get('approved_at') or '-')} tarihinde onaylandı."
+        elif status == "rejected":
+            status_note = f"Red nedeni: {h(info.get('rejection_reason') or '-')}"
+        elif status == "revoked":
+            status_note = f"Kaldırma nedeni: {h(info.get('revocation_reason') or '-')}"
+        elif status == "expired":
+            status_note = f"Key süresi {h(info.get('expired_at') or deadline_text)} tarihinde doldu."
+        elif status == "reverify_required":
+            status_note = "Kullanıcıdan yeniden R10 doğrulaması istendi."
+
+        key_area = f"""
+        <div class='r10-key-box'>
+          <div><span>Güvenli Key</span><code>{h(key_value)}</code></div>
+          {f"<button type='button' class='copy-control' data-copy='{h(info.get('key'))}'>Keyi Kopyala</button>" if info.get('key') else ""}
+        </div>
+        """
+
+        actions = ""
+        if status in ("pending", "key_sent"):
+            owner_field = ""
+            if account_type == "corporate":
+                if owner_locked:
+                    owner_field = f"<div class='r10-locked-owner'><span>Banka hesabı sahibi</span><strong>{h(owner)}</strong><small>Onaydan sonra değiştirilemez.</small></div>"
+                else:
+                    owner_field = "<label>Banka hesabı sahibinin ad-soyadı<input name='iban_owner' autocomplete='off' placeholder='Ad Soyad' required></label>"
+            actions = f"""
+            <div class='r10-action-grid'>
+              <form method='post' class='r10-action-panel verify-panel' data-r10-form='verify:{h(uid)}'>
+                <input type='hidden' name='action' value='verify_r10_key'>
+                <input type='hidden' name='user_id' value='{h(uid)}'>
+                <input type='hidden' name='return_to' value='/admin?view=approvals&focus_uid={h(uid)}'>
+                <div class='r10-action-title'><span>GÜVENLİ EŞLEŞTİRME</span><strong>R10’dan gelen Key'i doğrula</strong><small>R10 özel mesajında gelen Key'i eksiksiz girin. Doğru eşleşmede kullanıcı otomatik onaylanır.</small></div>
+                <label>R10’dan gelen Key<input name='received_key' autocomplete='off' spellcheck='false' placeholder='NERLO-XXXXX-XXXXX-XXXXX-XXXXX' required></label>
+                {owner_field}
+                <button class='btn primary' type='submit'>Key'i Doğrula ve Onayla</button>
+              </form>
+              <form method='post' class='r10-action-panel reject-panel' data-r10-form='reject:{h(uid)}'>
+                <input type='hidden' name='action' value='reject_r10_tl'>
+                <input type='hidden' name='user_id' value='{h(uid)}'>
+                <input type='hidden' name='return_to' value='/admin?view=approvals&focus_uid={h(uid)}'>
+                <div class='r10-action-title'><span>KONTROLLÜ RED</span><strong>Başvuruyu reddet</strong><small>Red nedeni kullanıcıya Nerlo Wallet üzerinden gönderilir ve denetim kaydına eklenir.</small></div>
+                <label>Red nedeni<textarea name='reason' placeholder='Açık ve anlaşılır red nedeni' required></textarea></label>
+                <button class='btn danger' type='submit'>Başvuruyu Reddet</button>
+              </form>
+            </div>
+            """
+        elif status == "approved":
+            actions = f"""
+            <div class='r10-action-grid compact-actions'>
+              <form method='post' class='r10-action-panel reject-panel' data-r10-form='revoke:{h(uid)}'>
+                <input type='hidden' name='action' value='revoke_r10_tl'>
+                <input type='hidden' name='user_id' value='{h(uid)}'>
+                <input type='hidden' name='return_to' value='/admin?view=approvals&focus_uid={h(uid)}'>
+                <div class='r10-action-title'><span>GÜVENLİK İŞLEMİ</span><strong>Onayı kaldır</strong><small>Açıklama kullanıcıya gönderilir ve TL işlemleri kapatılır.</small></div>
+                <label>Açıklama<textarea name='reason' placeholder='Onayın kaldırılma nedeni' required></textarea></label>
+                <button class='btn danger' type='submit'>Onayı Kaldır</button>
+              </form>
+              <form method='post' class='r10-action-panel' data-r10-form='reverify:{h(uid)}'>
+                <input type='hidden' name='action' value='request_r10_reverify'>
+                <input type='hidden' name='user_id' value='{h(uid)}'>
+                <input type='hidden' name='return_to' value='/admin?view=approvals&focus_uid={h(uid)}'>
+                <div class='r10-action-title'><span>YENİDEN KONTROL</span><strong>Yeniden doğrulama iste</strong><small>Mevcut banka hesabı sahibi kilidi korunur.</small></div>
+                <button class='btn ghost' type='submit'>Yeniden Doğrulama İste</button>
+              </form>
+            </div>
+            """
+        else:
+            actions = f"""
+            <div class='r10-action-grid compact-actions'>
+              <form method='post' class='r10-action-panel' data-r10-form='reverify:{h(uid)}'>
+                <input type='hidden' name='action' value='request_r10_reverify'>
+                <input type='hidden' name='user_id' value='{h(uid)}'>
+                <input type='hidden' name='return_to' value='/admin?view=approvals&focus_uid={h(uid)}'>
+                <div class='r10-action-title'><span>YENİ BAŞVURU</span><strong>Yeniden doğrulama iste</strong><small>Kullanıcıya yeni doğrulama başlatması için bot mesajı gönderilir.</small></div>
+                <button class='btn ghost' type='submit'>Yeniden Doğrulama İste</button>
+              </form>
+            </div>
+            """
+
+        cards.append(f"""
+        <article class='{' '.join(card_classes)}' data-r10-user='{h(uid)}'>
+          <header class='r10-card-head'>
+            <div class='r10-person'>
+              <div class='r10-avatar'>{h((username[:1] or 'N').upper())}</div>
+              <div><span>@{h(username)} · {h(uid)}</span><h3>{h(title)}</h3><small>{h(r10_account_type_label(account_type))} hesap</small></div>
+            </div>
+            <div class='r10-card-state'><span class='r10-state-pill state-{h(status)}'>{h(r10_status_label(status))}</span><small>{status_note}</small></div>
+          </header>
+          <div class='r10-information-grid'>
+            <a class='r10-info-box profile-link' href='{h(profile_url)}' target='_blank' rel='noopener noreferrer'><span>R10 profili</span><strong>{h(profile_slug)}</strong><small>Profili yeni sekmede aç</small></a>
+            <div class='r10-info-box'><span>Üyelik</span><strong>{h(membership)}</strong><small>{h(info.get('r10_months', 0))} aylık hesap</small></div>
+            <div class='r10-info-box'><span>R10+ başarılı işlem</span><strong>{h(info.get('r10_trades', 0))}</strong><small>Profil üzerinden okundu</small></div>
+            <div class='r10-info-box'><span>Key son kullanım</span><strong>{h(deadline_text)}</strong><small>{h(r10_key_time_left(info)) if status in ('pending','key_sent') else 'İşlem tamamlandı'}</small></div>
+          </div>
+          {key_area}
+          {f"<div class='r10-owner-strip'><span>Banka hesabı sahibi</span><strong>{h(owner)}</strong><small>Değiştirilemez</small></div>" if owner else ""}
+          {actions}
+        </article>
+        """)
+
+    body = "".join(cards) or "<div class='empty-state'><b>R10 doğrulama kaydı bulunmuyor.</b><span>Yeni başvurular burada otomatik olarak görünecektir.</span></div>"
+    return f"""
+    <section class='r10-approval-workspace'>
+      <div class='r10-workspace-head'>
+        <div><span>KULLANICI DOĞRULAMA MERKEZİ</span><h3>R10 ve TL işlem onayları</h3><p>Key eşleştirme, kurumsal banka hesabı sahibi kontrolü ve kullanıcı bildirimleri tek güvenli akışta yönetilir.</p></div>
+        <div class='r10-live-state' data-r10-live><i></i><div><strong>Otomatik güncelleniyor</strong><small>Sayfa yenilenmeden yeni başvurular alınır</small></div></div>
+      </div>
+      {summary}
+      <div class='r10-approval-list'>{body}</div>
+    </section>
+    """
 
 def permission_options(selected_permissions):
     selected = set(selected_permissions or [])
@@ -7788,6 +8337,21 @@ def admin_user_fragment():
     return render_user_management(uid)
 
 
+@app.route("/admin/approvals-fragment")
+def admin_approvals_fragment():
+    if not logged_in():
+        return "", 401
+    if not has_panel_permission("approvals"):
+        return "", 403
+    refresh_all_user_profiles()
+    for uid, profile in list(users.items()):
+        try:
+            expire_r10_profile(uid, profile, notify=True)
+        except Exception as exc:
+            print("R10 APPROVAL FRAGMENT EXPIRY ERROR:", uid, exc)
+    return render_r10_approval_menu(request.args.get("focus_uid", ""))
+
+
 def safe_admin_return(default="/admin"):
     target = str(request.form.get("return_to", default) or default)
     if not target.startswith("/admin") or target.startswith("//"):
@@ -7806,6 +8370,11 @@ EDITABLE_SETTING_KEYS = [key for key in DEFAULT_SETTINGS if not key.startswith("
 def admin():
     if not logged_in(): return redirect("/login")
     refresh_all_user_profiles()
+    for _r10_uid, _r10_profile in list(users.items()):
+        try:
+            expire_r10_profile(_r10_uid, _r10_profile, notify=True)
+        except Exception as exc:
+            print("R10 ADMIN EXPIRY ERROR:", _r10_uid, exc)
     refresh_request_cache()
     refresh_runtime_state(_db_key(FILES["settings"]), settings, min_interval=0, force=True)
     refresh_runtime_state(_db_key(FILES["messages"]), messages, min_interval=0, force=True)
@@ -7835,6 +8404,12 @@ def admin():
                         validation_error = f"{setting_label(key)} için 0 ile 100 arasında bir değer girin."
                         break
                     raw_value = format(percentage, "f")
+                elif key == "r10_contact_profile_url":
+                    try:
+                        raw_value, _ = normalize_r10_profile_url(raw_value)
+                    except ValueError:
+                        validation_error = "NerloWallet R10 profil bağlantısı geçerli bir r10.net profil bağlantısı olmalıdır."
+                        break
                 pending_settings[key] = raw_value
 
             if validation_error:
@@ -7920,53 +8495,89 @@ def admin():
                 set_admin_notice("Kullanıcı profili kaydedildi.")
             else:
                 set_admin_notice("Kullanıcı bulunamadı.", "error")
-        elif action == "approve_r10_tl":
-            uid = request.form.get("user_id", "")
-            if uid in users and users[uid].get("r10_verification", {}).get("status") == "pending":
-                info = users[uid]["r10_verification"]
-                if r10_profile_used_by(info.get("profile_slug"), uid):
-                    set_admin_notice("Bu r10 profili başka hesaba bağlı.", "error")
+        elif action in ("verify_r10_key", "approve_r10_tl"):
+            uid = str(request.form.get("user_id", "")).strip()
+            info = users.get(uid, {}).get("r10_verification", {}) or {}
+            if uid not in users or info.get("status") not in ("pending", "key_sent"):
+                set_admin_notice("Key doğrulaması bekleyen kullanıcı bulunamadı.", "error")
+            elif r10_key_is_expired(info):
+                expire_r10_profile(uid, users[uid], notify=True)
+                set_admin_notice("Key'in 24 saatlik geçerlilik süresi dolmuş.", "error")
+            else:
+                received_key = request.form.get("received_key", "")
+                if not verify_r10_key_value(info, received_key):
+                    info["failed_key_attempts"] = int(info.get("failed_key_attempts") or 0) + 1
+                    info["last_failed_key_at"] = now()
+                    info["last_failed_key_by"] = current_panel_username()
+                    save_user_profile(uid)
+                    add_admin_log("verify_r10_key_failed", f"R10 Key eşleşmedi; kullanıcı onaylanmadı · Yetkili: {current_panel_username()}", uid)
+                    set_admin_notice("Girilen Key kullanıcıya verilen Key ile eşleşmiyor. Onay işlemi yapılmadı.", "error")
                 else:
-                    iban_owner = normalize_person_name(request.form.get("iban_owner", "")) if info.get("account_type") == "corporate" else ""
-                    if info.get("account_type") == "corporate" and len(_name_parts(iban_owner)) < 2:
-                        set_admin_notice("Kurumsal hesap için IBAN ad soyad zorunlu.", "error")
-                    elif iban_owner and r10_iban_owner_used_by(iban_owner, uid):
-                        set_admin_notice("Bu IBAN ad soyad başka hesapta kayıtlı.", "error")
-                    else:
-                        info["status"] = "approved"
-                        info["approved_at"] = now()
-                        info["approved_by"] = current_panel_username()
-                        if iban_owner:
-                            info["iban_owner"] = iban_owner
-                        save_user_profile(uid)
-                        add_admin_log("approve_r10_tl", f"R10 TL doğrulaması onaylandı · {info.get('profile_slug','')}", uid)
-                        set_admin_notice("TL işlemleri açıldı.")
+                    try:
+                        approve_r10_verification(
+                            uid,
+                            info,
+                            iban_owner=request.form.get("iban_owner", ""),
+                            actor=current_panel_username(),
+                            method="r10_key_match",
+                        )
+                        set_admin_notice("Key güvenli şekilde eşleşti. Kullanıcı otomatik olarak onaylandı.")
+                    except ValueError as exc:
+                        set_admin_notice(str(exc), "error")
+                    except Exception as exc:
+                        print("R10 APPROVAL ERROR:", exc)
+                        set_admin_notice("Onay işlemi sırasında hata oluştu. Kullanıcı durumunu ve denetim kaydını kontrol edin.", "error")
+        elif action == "reject_r10_tl":
+            uid = str(request.form.get("user_id", "")).strip()
+            info = users.get(uid, {}).get("r10_verification", {}) or {}
+            if uid not in users or info.get("status") not in ("pending", "key_sent"):
+                set_admin_notice("Reddedilebilecek bekleyen doğrulama bulunamadı.", "error")
             else:
-                set_admin_notice("Onay bekleyen R10 doğrulaması yok.", "error")
-        elif action == "revoke_r10_tl":
-            uid = request.form.get("user_id", "")
-            if uid in users and users[uid].get("r10_verification"):
-                users[uid]["r10_verification"]["status"] = "revoked"
-                users[uid]["r10_verification"]["revoked_at"] = now()
-                users[uid]["r10_verification"]["revoked_by"] = current_panel_username()
-                save_user_profile(uid)
-                add_admin_log("revoke_r10_tl", "R10 TL onayı kaldırıldı", uid)
-                set_admin_notice("TL onayı kaldırıldı.")
-            else:
-                set_admin_notice("R10 doğrulama kaydı yok.", "error")
-        elif action == "request_r10_reverify":
-            uid = request.form.get("user_id", "")
-            if uid in users:
-                users[uid]["r10_verification"] = {"status": "reverify_required", "requested_at": now(), "requested_by": current_panel_username()}
-                save_user_profile(uid)
-                add_admin_log("request_r10_reverify", "Yeniden R10 doğrulama istendi", uid)
                 try:
-                    send(uid, "TL işlemleri için yeniden R10 doğrulaması yapmanız gerekiyor.", reply_keyboard(uid))
-                except Exception:
-                    pass
-                set_admin_notice("Yeniden doğrulama istendi.")
+                    reject_r10_verification(uid, request.form.get("reason", ""), current_panel_username())
+                    set_admin_notice("Başvuru reddedildi ve kullanıcıya açıklamalı bildirim gönderildi.")
+                except ValueError as exc:
+                    set_admin_notice(str(exc), "error")
+                except Exception as exc:
+                    print("R10 REJECTION ERROR:", exc)
+                    set_admin_notice("Red işlemi tamamlanamadı.", "error")
+        elif action == "revoke_r10_tl":
+            uid = str(request.form.get("user_id", "")).strip()
+            info = users.get(uid, {}).get("r10_verification", {}) or {}
+            reason = str(request.form.get("reason", "")).strip()
+            if uid not in users or info.get("status") != "approved":
+                set_admin_notice("Onayı kaldırılabilecek doğrulama bulunamadı.", "error")
+            elif not reason:
+                set_admin_notice("Onayın kaldırılma nedeni zorunludur.", "error")
             else:
-                set_admin_notice("Kullanıcı bulunamadı.", "error")
+                info["status"] = "revoked"
+                info["revoked_at"] = now()
+                info["revoked_by"] = current_panel_username()
+                info["revocation_reason"] = reason
+                save_user_profile(uid)
+                add_admin_log("revoke_r10_tl", f"R10 TL onayı kaldırıldı · {reason} · Yetkili: {current_panel_username()}", uid)
+                try:
+                    send(uid, render_message_template(uid, "r10_revoked_notice", **r10_template_values(uid, info, red_nedeni=reason)), reply_keyboard(uid))
+                except Exception as exc:
+                    print("R10 REVOKE MESSAGE ERROR:", exc)
+                set_admin_notice("TL onayı kaldırıldı ve kullanıcıya bilgi verildi.")
+        elif action == "request_r10_reverify":
+            uid = str(request.form.get("user_id", "")).strip()
+            info = users.get(uid, {}).get("r10_verification", {}) or {}
+            if uid in users and info:
+                info["status"] = "reverify_required"
+                info["requested_at"] = now()
+                info["requested_by"] = current_panel_username()
+                invalidate_r10_key(info, used=False)
+                save_user_profile(uid)
+                add_admin_log("request_r10_reverify", f"Yeniden R10 doğrulaması istendi · Yetkili: {current_panel_username()}", uid)
+                try:
+                    send(uid, render_message_template(uid, "r10_reverify_notice", **r10_template_values(uid, info)), {"inline_keyboard": [[inline_button(t(uid, "r10_start_again"), "r10:start")]]})
+                except Exception as exc:
+                    print("R10 REVERIFY MESSAGE ERROR:", exc)
+                set_admin_notice("Yeniden doğrulama isteği kullanıcıya gönderildi.")
+            else:
+                set_admin_notice("Kullanıcıya ait R10 doğrulama kaydı bulunamadı.", "error")
         elif action in ("freeze_user", "unfreeze_user", "lock_withdraw", "unlock_withdraw"):
             uid = request.form.get("user_id", "")
             if uid in users:
@@ -8087,6 +8698,10 @@ def admin():
     )
     frozen_users = sum(1 for u in users.values() if u.get("status") == "frozen")
     locked_users = sum(1 for u in users.values() if u.get("withdraw_locked"))
+    approval_waiting_count = sum(
+        1 for u in users.values()
+        if (u.get("r10_verification", {}) or {}).get("status") in ("pending", "key_sent")
+    )
 
     recent_requests = sorted(requests_db.items(), key=lambda item: item[1].get("created_at", ""), reverse=True)[:8]
     recent_activity = "".join(
@@ -8115,8 +8730,9 @@ def admin():
         ("fees", "Komisyonlar", [k for k in EDITABLE_SETTING_KEYS if k.startswith("fee_") and k not in ("fee_convert_tl_percent", "fee_convert_crypto_percent")]),
         ("limits", "Limitler", [k for k in EDITABLE_SETTING_KEYS if k.startswith("min_") or k.startswith("daily_")]),
         ("wallets", "Cüzdan ve Ağ", [k for k in EDITABLE_SETTING_KEYS if k.startswith("wallet_") or k.startswith("network_") or k in ("bank_name", "iban", "iban_owner")]),
-        ("system", "Sistem ve Duyuru", [k for k in EDITABLE_SETTING_KEYS if k.startswith("maintenance_") or k.startswith("announcement_")]),
-        ("messages", "Bot Mesajları", list(DEFAULT_MESSAGES.keys())),
+        ("system", "Sistem ve Duyuru", [k for k in EDITABLE_SETTING_KEYS if k.startswith("maintenance_") or k.startswith("announcement_") or k.startswith("r10_")]),
+        ("messages", "Bot Mesajları", [k for k in DEFAULT_MESSAGES if not k.startswith("r10_")]),
+        ("verification_messages", "Kullanıcı Doğrulama Mesajları", [k for k in DEFAULT_MESSAGES if k.startswith("r10_")]),
     ]
     settings_tabs = "".join(
         f"<button type='button' class='setting-tab {'active' if i == 0 else ''}' data-setting-target='{h(slug)}'>{h(title)}</button>"
@@ -8124,7 +8740,7 @@ def admin():
     )
     settings_panes = []
     for index, (slug, title, keys) in enumerate(settings_groups):
-        fields = "".join(message_field(key) for key in keys) if slug == "messages" else "".join(setting_field(key) for key in keys)
+        fields = "".join(message_field(key) for key in keys) if slug in ("messages", "verification_messages") else "".join(setting_field(key) for key in keys)
         settings_panes.append(
             f"<div class='setting-pane {'active' if index == 0 else ''}' data-setting-pane='{h(slug)}'><div class='section-title compact'><div><span>AYAR GRUBU</span><h3>{h(title)}</h3></div></div><div class='settings-grid'>{fields}</div></div>"
         )
@@ -8163,6 +8779,8 @@ def admin():
             badge = f"<em>{pending_count}</em>"
         elif slug == "pool" and pool_review_count:
             badge = f"<em class='alert-badge'>{pool_review_count}</em>"
+        elif slug == "approvals" and approval_waiting_count:
+            badge = f"<em class='alert-badge'>{approval_waiting_count}</em>"
         nav_parts.append(
             f"<button class='nav-entry {'active' if slug == active_view else ''}' data-view-target='{slug}' data-view-title='{h(label)}'><span>{number}</span><b>{h(label)}</b>{badge}</button>"
         )
@@ -8215,8 +8833,8 @@ def admin():
     </section>""" if "users" in allowed_views else ""
 
     approvals_section = f"""<section class='page-view {'active' if active_view == 'approvals' else ''}' data-view='approvals'>
-      <div class='page-heading'><div><span>R10 VE TL ERİŞİMİ</span><h2>Kullanıcı onay menüsü</h2><p>R10 profili, key ve IBAN adı kontrolünü buradan yönetin.</p></div></div>
-      {render_r10_approval_menu()}
+      <div class='page-heading'><div><span>R10 VE TL ERİŞİMİ</span><h2>Kullanıcı doğrulama merkezi</h2><p>R10 profili, güvenli Key eşleştirmesi ve kurumsal banka hesabı sahibi kontrolünü tek ekrandan yönetin.</p></div></div>
+      <div id='r10-approval-board'>{render_r10_approval_menu(request.args.get('focus_uid', ''))}</div>
     </section>""" if "approvals" in allowed_views else ""
 
     broadcast_section = f"""<section class='page-view {'active' if active_view == 'broadcast' else ''}' data-view='broadcast'>
@@ -8272,9 +8890,17 @@ def admin():
     .pill{display:inline-flex;padding:6px 9px;border:1px solid rgba(94,210,155,.18);border-radius:999px;background:rgba(94,210,155,.06);color:var(--green);font-size:8px}.danger-pill{border-color:rgba(255,120,144,.2);background:rgba(255,120,144,.06);color:var(--red)}.status{display:inline-flex;align-items:center;gap:6px;padding:6px 8px;border:1px solid var(--line);border-radius:999px;background:#0b121a;color:#8d9aaa;font-size:8px}.status i{width:6px;height:6px;border-radius:50%;background:#748296}.status.waiting i{background:var(--amber)}.status.working i{background:var(--blue)}.status.done i{background:var(--green)}.status.declined i{background:var(--red)}
     .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:760px}th,td{padding:11px 10px;border-bottom:1px solid rgba(255,255,255,.045);text-align:left;font-size:9px}th{color:#5d6b7c;font-size:8px;text-transform:uppercase;letter-spacing:.05em}td{color:#9eacbb}.muted-cell{text-align:center;color:#5f6d7e;padding:26px}.address-cell,.tx-cell{display:block;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .empty-state{min-height:140px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:20px;border:1px dashed #263446;border-radius:14px;background:rgba(255,255,255,.012);color:#647386;text-align:center}.empty-state b{color:#cbd5df}.compact-empty{min-height:100px}.error-state{border-color:rgba(255,120,144,.24)}.toast{position:fixed;right:22px;top:18px;z-index:60;max-width:min(390px,calc(100vw - 32px));padding:12px 15px;border:1px solid rgba(94,210,155,.24);border-radius:12px;background:#10231c;color:#8ce8b7;box-shadow:0 20px 70px rgba(0,0,0,.42);font-size:10px}.toast-error{border-color:rgba(255,120,144,.25);background:#281219;color:#ff96a8}
-    @media(max-width:1280px){.asset-grid,.mini-balance-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.case-information{grid-template-columns:repeat(2,minmax(0,1fr))}}
-    @media(max-width:980px){.control-shell{grid-template-columns:1fr}.sidebar{position:fixed;left:-300px;width:286px;transition:.22s left;box-shadow:20px 0 80px rgba(0,0,0,.42)}body.sidebar-open .sidebar{left:0}.menu-toggle{display:grid;place-items:center}.system-health .health-chip:not(:first-child){display:none}.dashboard-split,.treasury-layout,.broadcast-layout,.user-workspace{grid-template-columns:1fr}.command-filter{grid-template-columns:1fr 1fr}.search-field{grid-column:1/-1}.case-body{grid-template-columns:1fr}.case-amount{border-right:0;border-bottom:1px solid rgba(255,255,255,.05)}}
-    @media(max-width:640px){.content{padding:20px 13px 42px}.topbar{height:66px;padding:0 13px}.breadcrumbs h1{font-size:17px}.command-hero{min-height:auto;padding:24px;display:block}.hero-copy h2{font-size:33px}.hero-date{margin-top:24px}.kpi-grid,.asset-grid,.mini-balance-grid,.pipeline,.treasury-state,.settings-grid,.permission-grid,.security-actions,.balance-form,.form-grid{grid-template-columns:1fr}.treasury-values{grid-template-columns:1fr}.treasury-values div+div{border-left:0;border-top:1px solid rgba(255,255,255,.08);padding:14px 0 0}.flow-steps{display:grid;grid-template-columns:1fr}.flow-steps>i{display:none}.command-filter,.user-command{grid-template-columns:1fr}.case-identity{align-items:flex-start;flex-direction:column;gap:4px}.case-information{grid-template-columns:1fr}.case-destination,.pool-address,.compose-foot,.page-heading,.section-title,.surface-head,.user-profile-head,.root-account,.admin-account-head{align-items:flex-start;flex-direction:column}.case-actions,.admin-account-actions,.txid-command{display:grid;grid-template-columns:1fr}.case-actions .btn,.admin-account-actions .btn,.copy-control{width:100%}.heading-metrics{display:none}.admin-account-grid{grid-template-columns:1fr}}
+    .field-help{display:block;margin-top:7px;color:#607083;font-size:8px;line-height:1.5}.message-field textarea{min-height:148px}
+    .r10-approval-workspace{display:grid;gap:18px}.r10-workspace-head{display:flex;justify-content:space-between;gap:24px;align-items:center;padding:22px 24px;border:1px solid rgba(106,169,255,.15);border-radius:18px;background:radial-gradient(circle at 10% 0%,rgba(106,169,255,.08),transparent 42%),linear-gradient(135deg,#0e1722,#0a111a)}.r10-workspace-head>div>span{color:#6d8096;font-size:8px;font-weight:950;letter-spacing:.16em}.r10-workspace-head h3{margin:5px 0 3px;font-size:22px}.r10-workspace-head p{margin:0;max-width:720px;color:#7f8da0;font-size:10px}.r10-live-state{display:flex;align-items:center;gap:10px;min-width:225px;padding:12px 14px;border:1px solid rgba(94,210,155,.17);border-radius:13px;background:rgba(94,210,155,.055)}.r10-live-state>i{width:9px;height:9px;border-radius:50%;background:var(--green);box-shadow:0 0 0 6px rgba(94,210,155,.08)}.r10-live-state.offline{border-color:rgba(255,120,144,.22);background:rgba(255,120,144,.05)}.r10-live-state.offline>i{background:var(--red);box-shadow:0 0 0 6px rgba(255,120,144,.08)}.r10-live-state strong,.r10-live-state small{display:block}.r10-live-state strong{color:#a9e8c9;font-size:9px}.r10-live-state small{margin-top:2px;color:#617467;font-size:8px}
+    .r10-summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.r10-summary-card{padding:17px 18px;border:1px solid var(--line);border-radius:15px;background:linear-gradient(180deg,#101924,#0c131c)}.r10-summary-card span,.r10-summary-card small{display:block}.r10-summary-card span{color:#758397;font-size:8px;font-weight:850;text-transform:uppercase;letter-spacing:.08em}.r10-summary-card strong{display:block;margin:4px 0 2px;font-size:25px}.r10-summary-card small{color:#566476;font-size:8px}.r10-summary-card.attention{border-color:rgba(239,195,107,.2);background:linear-gradient(180deg,rgba(239,195,107,.075),#0c131c)}.r10-summary-card.success{border-color:rgba(94,210,155,.18)}.r10-summary-card.danger{border-color:rgba(255,120,144,.18)}
+    .r10-approval-list{display:grid;gap:14px}.r10-approval-card{position:relative;overflow:hidden;padding:20px;border:1px solid var(--line);border-radius:18px;background:linear-gradient(180deg,#101823,#0b121b);box-shadow:0 16px 45px rgba(0,0,0,.14)}.r10-approval-card:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:#536174}.r10-approval-card.r10-status-key_sent:before{background:var(--amber)}.r10-approval-card.r10-status-approved:before{background:var(--green)}.r10-approval-card.r10-status-rejected:before,.r10-approval-card.r10-status-revoked:before,.r10-approval-card.r10-status-expired:before{background:var(--red)}.r10-approval-card.focus-card{border-color:rgba(106,169,255,.5);box-shadow:0 0 0 1px rgba(106,169,255,.16),0 22px 70px rgba(0,0,0,.3)}
+    .r10-card-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}.r10-person{display:flex;gap:12px;align-items:center}.r10-avatar{width:42px;height:42px;display:grid;place-items:center;border:1px solid #263447;border-radius:13px;background:#111d2a;color:#d9e4ef;font-size:14px;font-weight:950}.r10-person span,.r10-person small{display:block;color:#627184;font-size:8px}.r10-person h3{margin:3px 0 2px;font-size:15px}.r10-card-state{max-width:370px;text-align:right}.r10-card-state>small{display:block;margin-top:7px;color:#657487;font-size:8px;line-height:1.45}.r10-state-pill{display:inline-flex;align-items:center;padding:7px 10px;border:1px solid var(--line);border-radius:999px;background:#0b121a;color:#8e9bab;font-size:8px;font-weight:900}.r10-state-pill.state-key_sent{border-color:rgba(239,195,107,.24);background:rgba(239,195,107,.08);color:#f1ca7d}.r10-state-pill.state-approved{border-color:rgba(94,210,155,.22);background:rgba(94,210,155,.07);color:#78dfaa}.r10-state-pill.state-rejected,.r10-state-pill.state-revoked,.r10-state-pill.state-expired{border-color:rgba(255,120,144,.22);background:rgba(255,120,144,.07);color:#ff91a4}
+    .r10-information-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-top:17px}.r10-info-box{display:block;min-width:0;padding:12px 13px;border:1px solid rgba(255,255,255,.055);border-radius:12px;background:#0a1119;text-decoration:none}.r10-info-box span,.r10-info-box small{display:block}.r10-info-box span{color:#59687a;font-size:8px;text-transform:uppercase;letter-spacing:.06em}.r10-info-box strong{display:block;overflow:hidden;margin:4px 0 2px;color:#cbd6e1;font-size:10px;text-overflow:ellipsis;white-space:nowrap}.r10-info-box small{color:#4f5d6d;font-size:8px}.r10-info-box.profile-link:hover{border-color:rgba(106,169,255,.22);background:#0c1621}
+    .r10-key-box{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-top:10px;padding:14px 15px;border:1px solid rgba(106,169,255,.15);border-radius:13px;background:linear-gradient(90deg,rgba(106,169,255,.055),rgba(255,255,255,.015))}.r10-key-box span{display:block;color:#627287;font-size:8px;text-transform:uppercase;letter-spacing:.08em}.r10-key-box code{display:block;margin-top:4px;color:#e6edf5;font-size:12px;font-weight:900;letter-spacing:.055em}.r10-owner-strip,.r10-locked-owner{display:flex;align-items:center;gap:10px;padding:11px 13px;border:1px solid rgba(94,210,155,.14);border-radius:11px;background:rgba(94,210,155,.045)}.r10-owner-strip{margin-top:10px}.r10-owner-strip span,.r10-locked-owner span{color:#687989;font-size:8px}.r10-owner-strip strong,.r10-locked-owner strong{color:#c7d8cf;font-size:9px}.r10-owner-strip small,.r10-locked-owner small{margin-left:auto;color:#587063;font-size:8px}
+    .r10-action-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(280px,.65fr);gap:10px;margin-top:12px}.r10-action-grid.compact-actions{grid-template-columns:repeat(2,minmax(0,1fr))}.r10-action-panel{display:grid;align-content:start;gap:11px;padding:15px;border:1px solid rgba(255,255,255,.065);border-radius:14px;background:#0a1119}.r10-action-panel.verify-panel{border-color:rgba(94,210,155,.16);background:linear-gradient(180deg,rgba(94,210,155,.045),#0a1119)}.r10-action-panel.reject-panel{border-color:rgba(255,120,144,.13)}.r10-action-title span,.r10-action-title strong,.r10-action-title small{display:block}.r10-action-title span{color:#5e7185;font-size:7px;font-weight:950;letter-spacing:.13em}.r10-action-title strong{margin-top:3px;color:#cfd9e4;font-size:10px}.r10-action-title small{margin-top:3px;color:#596778;font-size:8px;line-height:1.45}.r10-action-panel label{display:grid;gap:6px;color:#718095;font-size:8px;font-weight:850}.r10-action-panel input,.r10-action-panel textarea{width:100%;border:1px solid #243244;border-radius:10px;background:#080e15;color:#d8e1eb;outline:none}.r10-action-panel input{height:40px;padding:0 11px}.r10-action-panel textarea{min-height:74px;padding:10px 11px;resize:vertical}.r10-action-panel input:focus,.r10-action-panel textarea:focus{border-color:rgba(106,169,255,.5);box-shadow:0 0 0 3px rgba(106,169,255,.07)}
+    @media(max-width:1280px){.asset-grid,.mini-balance-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.r10-information-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.case-information{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:980px){.control-shell{grid-template-columns:1fr}.sidebar{position:fixed;left:-300px;width:286px;transition:.22s left;box-shadow:20px 0 80px rgba(0,0,0,.42)}body.sidebar-open .sidebar{left:0}.menu-toggle{display:grid;place-items:center}.system-health .health-chip:not(:first-child){display:none}.dashboard-split,.treasury-layout,.broadcast-layout,.user-workspace,.r10-action-grid,.r10-action-grid.compact-actions{grid-template-columns:1fr}.command-filter{grid-template-columns:1fr 1fr}.search-field{grid-column:1/-1}.case-body{grid-template-columns:1fr}.case-amount{border-right:0;border-bottom:1px solid rgba(255,255,255,.05)}}
+    @media(max-width:640px){.content{padding:20px 13px 42px}.topbar{height:66px;padding:0 13px}.breadcrumbs h1{font-size:17px}.command-hero{min-height:auto;padding:24px;display:block}.hero-copy h2{font-size:33px}.hero-date{margin-top:24px}.kpi-grid,.asset-grid,.mini-balance-grid,.pipeline,.treasury-state,.settings-grid,.permission-grid,.security-actions,.balance-form,.form-grid,.r10-summary-grid,.r10-information-grid{grid-template-columns:1fr}.treasury-values{grid-template-columns:1fr}.treasury-values div+div{border-left:0;border-top:1px solid rgba(255,255,255,.08);padding:14px 0 0}.flow-steps{display:grid;grid-template-columns:1fr}.flow-steps>i{display:none}.command-filter,.user-command{grid-template-columns:1fr}.case-identity{align-items:flex-start;flex-direction:column;gap:4px}.case-information{grid-template-columns:1fr}.case-destination,.pool-address,.compose-foot,.page-heading,.section-title,.surface-head,.user-profile-head,.root-account,.admin-account-head,.r10-workspace-head,.r10-card-head,.r10-key-box{align-items:flex-start;flex-direction:column}.case-actions,.admin-account-actions,.txid-command{display:grid;grid-template-columns:1fr}.case-actions .btn,.admin-account-actions .btn,.copy-control{width:100%}.heading-metrics{display:none}.admin-account-grid{grid-template-columns:1fr}}
     """
 
     panel_script = r"""
@@ -8299,6 +8925,55 @@ def admin():
     const requestView=document.querySelector('[data-view="requests"]');setInterval(()=>{if(requestView&&requestView.classList.contains('active'))refreshRequests();},20000);
     document.addEventListener('visibilitychange',()=>{if(!document.hidden&&requestView&&requestView.classList.contains('active'))refreshRequests();});
 
+    const approvalView=document.querySelector('[data-view="approvals"]');
+    let approvalRefreshBusy=false;
+    function captureApprovalForms(board){
+      const values={};
+      if(!board)return values;
+      board.querySelectorAll('[data-r10-form]').forEach(form=>{
+        const key=form.dataset.r10Form||'';values[key]={};
+        form.querySelectorAll('input:not([type="hidden"]),textarea,select').forEach(field=>{if(field.name)values[key][field.name]=field.value;});
+      });
+      return values;
+    }
+    function restoreApprovalForms(board,values){
+      if(!board)return;
+      board.querySelectorAll('[data-r10-form]').forEach(form=>{
+        const saved=values[form.dataset.r10Form||''];if(!saved)return;
+        form.querySelectorAll('input:not([type="hidden"]),textarea,select').forEach(field=>{if(field.name&&Object.prototype.hasOwnProperty.call(saved,field.name))field.value=saved[field.name];});
+      });
+    }
+    async function refreshApprovals(){
+      const board=document.getElementById('r10-approval-board');
+      if(!board||approvalRefreshBusy||!approvalView||!approvalView.classList.contains('active'))return;
+      approvalRefreshBusy=true;
+      const saved=captureApprovalForms(board);
+      const active=document.activeElement;
+      const activeForm=active&&active.closest?active.closest('[data-r10-form]'):null;
+      const activeKey=activeForm?activeForm.dataset.r10Form:'';
+      const activeName=active&&active.name?active.name:'';
+      const selection=active&&typeof active.selectionStart==='number'?[active.selectionStart,active.selectionEnd]:null;
+      try{
+        const url=new URL('/admin/approvals-fragment',location.origin);
+        const focusUid=new URL(location.href).searchParams.get('focus_uid');if(focusUid)url.searchParams.set('focus_uid',focusUid);
+        const res=await fetch(url.toString(),{cache:'no-store',headers:{'X-Requested-With':'fetch'}});
+        if(res.ok){
+          board.innerHTML=await res.text();restoreApprovalForms(board,saved);
+          if(activeKey&&activeName){
+            const form=[...board.querySelectorAll('[data-r10-form]')].find(item=>item.dataset.r10Form===activeKey);
+            const field=form?[...form.querySelectorAll('input,textarea,select')].find(item=>item.name===activeName):null;
+            if(field){field.focus({preventScroll:true});if(selection&&field.setSelectionRange)field.setSelectionRange(selection[0],selection[1]);}
+          }
+        }
+      }catch(error){
+        console.log('Kullanıcı onay ekranı güncellenemedi',error);
+        const live=board.querySelector('[data-r10-live]');
+        if(live){live.classList.add('offline');const strong=live.querySelector('strong');const small=live.querySelector('small');if(strong)strong.textContent='Bağlantı yeniden kuruluyor';if(small)small.textContent='Ekran otomatik olarak tekrar bağlanacak';}
+      }finally{approvalRefreshBusy=false;}
+    }
+    setInterval(refreshApprovals,6000);
+    document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshApprovals();});
+
     const lookup=document.getElementById('user-lookup');if(lookup)lookup.addEventListener('submit',async e=>{e.preventDefault();const uid=document.getElementById('manage-user-id').value.trim();const result=document.getElementById('user-management-result');result.innerHTML="<div class='empty-state'>Kullanıcı yükleniyor…</div>";try{const res=await fetch('/admin/user-fragment?uid='+encodeURIComponent(uid),{cache:'no-store'});result.innerHTML=res.ok?await res.text():"<div class='empty-state error-state'>Kullanıcı bilgisi alınamadı.</div>";const url=new URL(location.href);url.searchParams.set('view','users');if(uid)url.searchParams.set('manage_user_id',uid);else url.searchParams.delete('manage_user_id');history.replaceState(null,'',url);}catch(err){result.innerHTML="<div class='empty-state error-state'>Bağlantı hatası oluştu.</div>";}});
 
     const tabs=[...document.querySelectorAll('[data-setting-target]')],panes=[...document.querySelectorAll('[data-setting-pane]')];tabs.forEach(tab=>tab.addEventListener('click',()=>{tabs.forEach(x=>x.classList.toggle('active',x===tab));panes.forEach(p=>p.classList.toggle('active',p.dataset.settingPane===tab.dataset.settingTarget));}));
@@ -8309,9 +8984,9 @@ def admin():
     signer_online = bool(WITHDRAW_SIGNER_URL)
     active_title = next((label for slug, label, number, group in nav_items if slug == active_view), "Kontrol Merkezi")
     return f"""<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='color-scheme' content='dark'>
-    <title>Nerlo Treasury Control · V11</title><style>{panel_css}</style></head><body>{notice_html}
+    <title>Nerlo Treasury Control · V12</title><style>{panel_css}</style></head><body>{notice_html}
     <div class='control-shell'>
-      <aside class='sidebar'><div class='brand'><div class='brand-mark'>N</div><div><strong>Nerlo Wallet</strong><small>Treasury Control · V11</small></div></div><nav class='nav-scroll'>{nav_html}</nav>
+      <aside class='sidebar'><div class='brand'><div class='brand-mark'>N</div><div><strong>Nerlo Wallet</strong><small>Treasury Control · V12</small></div></div><nav class='nav-scroll'>{nav_html}</nav>
         <div class='sidebar-footer'><div class='operator'><div class='operator-avatar'>{h(current_panel_username()[:1].upper() or 'N')}</div><div><strong>{h(current_panel_username())}</strong><small>Yetkili operasyon hesabı</small></div></div><a class='signout' href='/logout'>Güvenli çıkış yap</a></div>
       </aside>
       <section class='workspace'><header class='topbar'><div class='topbar-left'><button id='menu-toggle' class='menu-toggle' type='button'>☰</button><div class='breadcrumbs'><span>NERLO / OPERASYON</span><h1 id='page-title'>{h(active_title)}</h1></div></div><div class='system-health'><span class='health-chip'><i></i>Ledger aktif</span><span class='health-chip {'warn' if not signer_online else ''}'><i></i>{'Signer bağlı' if signer_online else 'Signer bekliyor'}</span><span class='health-chip'><i></i>Çevrim içi</span></div></header>
@@ -8379,6 +9054,12 @@ def start_background_services_once():
             args=("live-rates", update_live_rates, RATE_UPDATE_SECONDS),
             daemon=True,
             name="live-rates",
+        ).start()
+        threading.Thread(
+            target=_run_singleton_polling_service,
+            args=("r10-key-expiry", expire_r10_keys_once, 60),
+            daemon=True,
+            name="r10-key-expiry",
         ).start()
         start_exchange_threads()
         _background_services_started = True
