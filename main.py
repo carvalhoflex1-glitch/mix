@@ -122,12 +122,12 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-26-R10-VISIBLE-NAME-MATCH-V25"
-PANEL_RELEASE = "NERLO-CONTROL-CENTER-V18-R10-VISIBLE-NAME-MATCH"
+BUILD_VERSION = "NERLO-2026-06-26-R10-BIRTHDAY-REMOVED-V27"
+PANEL_RELEASE = "NERLO-CONTROL-CENTER-V19-R10-BIRTHDAY-REMOVED"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
 SWEEP_RELEASE = "TRON-HD-DEPOSIT-SWEEP-V1"
-SOURCE_BASE_SHA256 = "b181e38a3b6a642fe18a27d547d4dc7600709d83373cef93a870c95a4bc837c7"
+SOURCE_BASE_SHA256 = "16e7694b70fbce6a88c271675bb5832ddd503d05b4a92e76c77fdffa3c4c9d45"
 
 CONFIRMATION_THRESHOLDS = {
     "BTC": max(1, int(os.getenv("BTC_CONFIRMATIONS", "3"))),
@@ -4049,6 +4049,20 @@ _NAME_NOISE_KEYS = {
     "adina", "ad", "soyad", "soyadi", "tc", "turkiye",
 }
 
+# R10 bazen Ad Soyad alanının sonuna bir sonraki profil alanını ekliyor.
+# Bu kelimeler adın parçası değildir; görüldüğünde isim okuma durur.
+_R10_NAME_FIELD_STOP_KEYS = {
+    "dogum", "gunu", "dogumtarihi", "yas", "burc", "cinsiyet", "meslek",
+    "uyelik", "tarihi", "songiris", "songorulme", "sube", "il", "unvan",
+    "konu", "sayisi", "mesaj", "sikayet", "begeniler", "ziyareti",
+    "hakkinda", "arkadaslar", "uzmanliklar", "ticaret", "cezalar", "diger",
+    "kapat", "profil", "gonder",
+}
+
+
+def _is_r10_name_field_stop(value):
+    return _name_match_key(value) in _R10_NAME_FIELD_STOP_KEYS
+
 
 def _name_parts(value):
     # isalpha() keeps every valid Unicode letter instead of silently dropping
@@ -4083,6 +4097,8 @@ def _r10_expected_name_patterns(info):
             if not isinstance(item, dict):
                 continue
             visible = _name_match_key(item.get("visible", ""))
+            if _is_r10_name_field_stop(visible):
+                break
             if len(visible) >= 2:
                 patterns.append({"visible": visible, "masked": bool(item.get("masked"))})
     if len(patterns) >= 2:
@@ -4107,6 +4123,8 @@ def _r10_expected_name_patterns(info):
         patterns = []
         for item in raw_prefixes:
             visible = _name_match_key(item)
+            if _is_r10_name_field_stop(visible):
+                break
             if len(visible) >= 2:
                 patterns.append({"visible": visible, "masked": True})
     if len(patterns) >= 2:
@@ -4119,6 +4137,64 @@ def _r10_expected_name_patterns(info):
         for item in (first, last)
         if len(item) >= 2
     ]
+
+
+def _r10_strip_birth_section(value):
+    """Remove R10 birthday/date text without touching the visible name tokens."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    marker = re.search(
+        r"(?i)(?:^|\s)(?:doğum\s*(?:günü|tarihi)|dogum\s*(?:gunu|tarihi)|birthday|birth\s*date)\b",
+        text,
+    )
+    return text[:marker.start()].strip(" \t\r\n:;|•-") if marker else text
+
+
+def _r10_clean_masked_name(value):
+    clean_value = _r10_strip_birth_section(value)
+    tokens = _r10_profile_name_tokens(clean_value) if "_r10_profile_name_tokens" in globals() else []
+    return " ".join(tokens).strip()
+
+
+def _r10_remove_birth_data(info):
+    """Drop birthday-related R10 data from new and legacy verification records."""
+    cleaned = dict(info or {})
+    for key in list(cleaned):
+        normalized_key = _name_match_key(key)
+        if (
+            normalized_key.startswith("dogum")
+            or normalized_key.startswith("birth")
+            or normalized_key in {"yas", "burc"}
+        ):
+            cleaned.pop(key, None)
+
+    for name_key in ("masked", "masked_name"):
+        if name_key in cleaned:
+            cleaned[name_key] = _r10_clean_masked_name(cleaned.get(name_key))
+
+    prefixes = []
+    for item in cleaned.get("name_prefixes") or []:
+        visible = _name_match_key(item)
+        if _is_r10_name_field_stop(visible):
+            break
+        if len(visible) >= 2:
+            prefixes.append(str(item))
+    if "name_prefixes" in cleaned:
+        cleaned["name_prefixes"] = prefixes
+
+    patterns = []
+    for item in cleaned.get("name_patterns") or []:
+        if not isinstance(item, dict):
+            continue
+        visible = _name_match_key(item.get("visible", ""))
+        if _is_r10_name_field_stop(visible):
+            break
+        if len(visible) >= 2:
+            patterns.append({"visible": str(item.get("visible") or ""), "masked": bool(item.get("masked"))})
+    if "name_patterns" in cleaned:
+        cleaned["name_patterns"] = patterns
+    return cleaned
 
 
 def _personal_name_matches(info, full_name):
@@ -4244,16 +4320,18 @@ def r10_status_class(value):
 
 def r10_hitap(uid, info=None):
     info = info if isinstance(info, dict) else (users.get(str(uid), {}).get("r10_verification", {}) or {})
+    info = _r10_remove_birth_data(info)
     custom = str(info.get("custom_salutation") or "").strip()
     if custom:
         return custom
     if info.get("account_type") == "corporate":
         return str(info.get("company_title") or info.get("masked_name") or "Kurumsal müşterimiz").strip()
-    return str(info.get("masked_name") or "Sayın kullanıcımız").strip()
+    return _r10_clean_masked_name(info.get("masked_name")) or "Sayın kullanıcımız"
 
 
 def r10_message(uid, message_key, info=None, **values):
     info = info if isinstance(info, dict) else (users.get(str(uid), {}).get("r10_verification", {}) or {})
+    info = _r10_remove_birth_data(info)
     context = {
         "hitap": r10_hitap(uid, info),
         "key": str(info.get("key") or ""),
@@ -4337,7 +4415,7 @@ def _refresh_r10_name_signature(uid, info):
                 "last2": parsed.get("last2", current.get("last2", "")),
                 "name_prefixes": list(parsed.get("name_prefixes") or []),
                 "name_patterns": list(parsed.get("name_patterns") or []),
-                "name_signature_version": 3,
+                "name_signature_version": 4,
                 "name_signature_refreshed_at": _r10_now_text(),
             })
             profile["r10_verification"] = current
@@ -4360,6 +4438,7 @@ def validate_r10_name(uid, full_name):
         print("R10 NAME PROFILE REFRESH ERROR:", exc)
 
     info = users.get(uid, {}).get("r10_verification", {}) or {}
+    info = _r10_remove_birth_data(info)
     if info.get("status") != "approved":
         return False
 
@@ -4371,7 +4450,7 @@ def validate_r10_name(uid, full_name):
 
     # Records created by older versions may contain missing or incorrectly
     # parsed prefixes. Refresh the identity once; Trade/R10+ is not involved.
-    if int(info.get("name_signature_version") or 0) < 3:
+    if int(info.get("name_signature_version") or 0) < 4:
         try:
             refreshed = _refresh_r10_name_signature(uid, info)
             return _personal_name_matches(refreshed, full_name)
@@ -4446,7 +4525,7 @@ def _r10_field(text, label):
     """
     stop_labels = (
         "Ad Soyad", "Unvan", "Üyelik Tarihi", "Son Giriş", "Son Görülme", "Şube", "İl",
-        "Meslek", "Cinsiyet", "Doğum Tarihi", "Konu Sayısı", "Mesaj Sayısı", "Şikayet",
+        "Meslek", "Cinsiyet", "Doğum Günü", "Doğum Tarihi", "Konu Sayısı", "Mesaj Sayısı", "Şikayet",
         "Beğeniler", "R10+", "Profil Ziyareti", "Hakkında", "Uzmanlıklar", "Arkadaşlar",
         "Son Ziyaretçiler", "Rozetler", "Ticaret", "Cezalar", "Diğer",
     )
@@ -4557,15 +4636,12 @@ def _r10_mask_name(first, last):
 
 
 def _r10_profile_name_tokens(value):
-    """Return only plausible person-name tokens from the R10 Ad Soyad field."""
-    blocked = {
-        "kapat", "profil", "mesaj", "gönder", "üyelik", "tarihi", "şube", "konu", "sayısı",
-        "şikayet", "beğeniler", "ziyareti", "hakkında", "arkadaşlar", "uzmanlıklar", "ticaret",
-    }
+    """Return only the actual name tokens from the R10 Ad Soyad field."""
     result = []
-    for token in re.findall(r"[A-Za-zÇĞİÖŞÜçğıöşü]{2,}(?:\*+)?", str(value or "")):
+    clean_value = _r10_strip_birth_section(value) if "_r10_strip_birth_section" in globals() else str(value or "")
+    for token in re.findall(r"[A-Za-zÇĞİÖŞÜçğıöşü]{2,}(?:\*+)?", clean_value):
         plain = re.sub(r"\*+", "", token)
-        if _tr_lower(plain) in blocked:
+        if _is_r10_name_field_stop(plain):
             break
         result.append(token)
         if len(result) >= 6:
@@ -4618,7 +4694,7 @@ def parse_r10_profile_name(html):
             "last2": "",
             "name_prefixes": [],
             "name_patterns": [],
-            "name_signature_version": 3,
+            "name_signature_version": 4,
             "company_title": clean_title,
         })
         return common
@@ -4655,7 +4731,7 @@ def parse_r10_profile_name(html):
         "last2": last_letters[:2],
         "name_prefixes": visible_prefixes,
         "name_patterns": name_patterns,
-        "name_signature_version": 3,
+        "name_signature_version": 4,
         "company_title": "",
     })
     return common
@@ -4796,6 +4872,8 @@ def _r10_complete_profile_check(chat_id, uid, profile_text, check_token, result_
         return
 
     parsed = result_box.get("parsed")
+    if isinstance(parsed, dict):
+        parsed = _r10_remove_birth_data(parsed)
     if not isinstance(parsed, dict):
         print("R10 PROFILE RESULT ERROR: parsed result is missing")
         send(chat_id, t(uid, "r10_fetch_failed"))
@@ -4838,7 +4916,7 @@ def _r10_complete_profile_check(chat_id, uid, profile_text, check_token, result_
                     "last2": parsed.get("last2", ""),
                     "name_prefixes": list(parsed.get("name_prefixes") or []),
                     "name_patterns": list(parsed.get("name_patterns") or []),
-                    "name_signature_version": int(parsed.get("name_signature_version") or 3),
+                    "name_signature_version": int(parsed.get("name_signature_version") or 4),
                     "key": key,
                     "key_hash": r10_key_digest(key),
                     "key_created_at": created.strftime("%Y-%m-%d %H:%M:%S"),
@@ -8815,6 +8893,7 @@ def render_r10_approval_list_item(uid, user, info, selected=False):
 
 
 def render_r10_approval_detail(uid, user, info):
+    info = _r10_remove_birth_data(info)
     status = str(info.get("status") or "")
     account_type = str(info.get("account_type") or "personal")
     username = username_label((user or {}).get("username"))
@@ -8914,7 +8993,7 @@ def render_r10_approval_detail(uid, user, info):
         <summary><span>Profil ve hitap ayarları</span><small>Gerekli olduğunda açın</small></summary>
         <div class='approval-secondary-content'>
           <div class='approval-profile-summary'>
-            <div><span>Profildeki hitap</span><b>{h(info.get('company_title') or info.get('masked_name') or '-')}</b></div>
+            <div><span>Profildeki hitap</span><b>{h(info.get('company_title') or _r10_clean_masked_name(info.get('masked_name')) or '-')}</b></div>
             <div><span>Üyelik tarihi</span><b>{h(info.get('membership_date') or '-')}</b></div>
             <div><span>IBAN hesap sahibi</span><b>{h(owner or '-')}</b></div>
             <a class='approval-profile-link approval-profile-button' href='{h(profile_url)}' target='_blank' rel='noopener'>R10 profilini aç</a>
@@ -9769,6 +9848,34 @@ def admin_user(uid):
     return redirect(f"/admin?view=users&manage_user_id={uid}")
 
 
+def purge_r10_birth_data_once():
+    """Remove birthday fields/suffixes from existing R10 verification records."""
+    if SERVICE_ROLE != "app":
+        return 0
+    changed = 0
+    profile_ids = list(exchange_load_r10_profiles())
+    for uid in profile_ids:
+        with _db_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT profile FROM exchange_profiles WHERE user_id=%s FOR UPDATE", (str(uid),))
+                row = cur.fetchone()
+                if not row:
+                    continue
+                current_profile = dict(row[0] or {})
+                original = dict(current_profile.get("r10_verification") or {})
+                if not original:
+                    continue
+                cleaned = _r10_remove_birth_data(original)
+                if cleaned == original:
+                    continue
+                current_profile["r10_verification"] = cleaned
+                exchange_save_profile(uid, current_profile, conn)
+            conn.commit()
+        users[str(uid)] = current_profile
+        changed += 1
+    return changed
+
+
 _background_services_started = False
 _background_services_lock = threading.Lock()
 
@@ -9805,6 +9912,12 @@ def start_background_services_once():
             print("TRON SWEEP ENABLED:", runtime.get("sweep_enabled"))
             print("TRON SWEEP READY:", runtime.get("sweep_ready"))
             return
+        try:
+            cleaned_r10_profiles = purge_r10_birth_data_once()
+            if cleaned_r10_profiles:
+                print("R10 BIRTHDAY DATA REMOVED:", cleaned_r10_profiles)
+        except Exception as exc:
+            print("R10 BIRTHDAY CLEANUP ERROR:", exc)
         if not BACKGROUND_SERVICES_ENABLED:
             _background_services_started = True
             print("BUILD VERSION:", BUILD_VERSION)
