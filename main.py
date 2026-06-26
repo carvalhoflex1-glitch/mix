@@ -122,12 +122,12 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-26-WEBPANEL-REDESIGN-V23"
-PANEL_RELEASE = "NERLO-CONTROL-CENTER-V17-SIMPLE-R10-WORKBENCH"
+BUILD_VERSION = "NERLO-2026-06-26-R10-VISIBLE-NAME-MATCH-V25"
+PANEL_RELEASE = "NERLO-CONTROL-CENTER-V18-R10-VISIBLE-NAME-MATCH"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
 SWEEP_RELEASE = "TRON-HD-DEPOSIT-SWEEP-V1"
-SOURCE_BASE_SHA256 = "e02572a5075f8b29236086eedc23ddefd97ec049855ac2229138e4cd4b92aea2"
+SOURCE_BASE_SHA256 = "b181e38a3b6a642fe18a27d547d4dc7600709d83373cef93a870c95a4bc837c7"
 
 CONFIRMATION_THRESHOLDS = {
     "BTC": max(1, int(os.getenv("BTC_CONFIRMATIONS", "3"))),
@@ -4028,10 +4028,124 @@ def _tr_lower(value):
     return str(value or "").translate(table).lower()
 
 
+def _name_match_key(value):
+    """Create a bank/R10-safe comparison key for Turkish personal names.
+
+    Banks and users may write the same name with or without Turkish characters
+    (İBRAHİM/IBRAHIM, ŞAHİN/SAHIN). This key treats those spellings as equal
+    without weakening the required first/surname prefix checks.
+    """
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    folded = normalized.casefold().translate(str.maketrans({
+        "ı": "i", "ç": "c", "ğ": "g", "ö": "o", "ş": "s", "ü": "u",
+        "â": "a", "î": "i", "û": "u",
+    }))
+    return re.sub(r"[^a-z0-9]", "", folded)
+
+
+_NAME_NOISE_KEYS = {
+    "sayin", "sn", "bay", "bayan", "hesap", "hesabi", "sahibi",
+    "adina", "ad", "soyad", "soyadi", "tc", "turkiye",
+}
+
+
 def _name_parts(value):
-    clean = re.sub(r"[^A-Za-zÇĞİÖŞÜçğıöşü\s]", " ", str(value or ""))
-    parts = [p for p in clean.split() if p]
+    # isalpha() keeps every valid Unicode letter instead of silently dropping
+    # names containing characters outside the old hand-written Turkish regex.
+    clean = "".join(char if char.isalpha() else " " for char in unicodedata.normalize("NFC", str(value or "")))
+    parts = []
+    for part in clean.split():
+        key = _name_match_key(part)
+        if len(key) < 2 or key in _NAME_NOISE_KEYS:
+            continue
+        parts.append(part)
     return parts
+
+
+def _name_key_parts(value):
+    return [_name_match_key(part) for part in _name_parts(value) if _name_match_key(part)]
+
+
+def _r10_expected_name_patterns(info):
+    """Return R10 name parts exactly as they were visible on the profile.
+
+    A masked token such as ``Ha*****`` means only that the supplied token must
+    start with ``Ha``. No hidden letters are guessed. An unmasked token must
+    match completely. Token count and token order must stay unchanged.
+    """
+    info = dict(info or {})
+    patterns = []
+
+    raw_patterns = info.get("name_patterns")
+    if isinstance(raw_patterns, (list, tuple)):
+        for item in raw_patterns:
+            if not isinstance(item, dict):
+                continue
+            visible = _name_match_key(item.get("visible", ""))
+            if len(visible) >= 2:
+                patterns.append({"visible": visible, "masked": bool(item.get("masked"))})
+    if len(patterns) >= 2:
+        return patterns
+
+    # Existing records already contain the R10 mask shown during verification.
+    # Rebuild the rule from that mask without inventing any hidden letters.
+    patterns = []
+    masked_name = str(info.get("masked_name") or "")
+    tokens = _r10_profile_name_tokens(masked_name) if "_r10_profile_name_tokens" in globals() else []
+    for token in tokens:
+        visible = _name_match_key(re.sub(r"\*+", "", token))
+        if len(visible) >= 2:
+            patterns.append({"visible": visible, "masked": "*" in token})
+    if len(patterns) >= 2:
+        return patterns
+
+    # Last-resort support for very old records. These fields contain only the
+    # letters that were saved, so they remain prefix checks and never guesses.
+    raw_prefixes = info.get("name_prefixes")
+    if isinstance(raw_prefixes, (list, tuple)):
+        patterns = []
+        for item in raw_prefixes:
+            visible = _name_match_key(item)
+            if len(visible) >= 2:
+                patterns.append({"visible": visible, "masked": True})
+    if len(patterns) >= 2:
+        return patterns
+
+    first = _name_match_key(info.get("first2", ""))
+    last = _name_match_key(info.get("last2", ""))
+    return [
+        {"visible": item, "masked": True}
+        for item in (first, last)
+        if len(item) >= 2
+    ]
+
+
+def _personal_name_matches(info, full_name):
+    expected = _r10_expected_name_patterns(info)
+    actual = _name_key_parts(full_name)
+    if len(expected) < 2 or len(actual) != len(expected):
+        return False
+
+    for rule, supplied in zip(expected, actual):
+        visible = rule["visible"]
+        if rule.get("masked"):
+            if not supplied.startswith(visible):
+                return False
+        elif supplied != visible:
+            return False
+    return True
+
+
+def _corporate_owner_matches(saved_name, supplied_name):
+    saved = _name_key_parts(saved_name)
+    supplied = _name_key_parts(supplied_name)
+    if len(saved) < 2 or len(supplied) < 2:
+        return False
+    if supplied == saved:
+        return True
+    # Accept the common SOYAD AD ordering, but still require every name token.
+    return supplied == [saved[-1], *saved[:-1]]
 
 
 def _r10_time(value=""):
@@ -4177,19 +4291,93 @@ def normalize_person_name(value):
     return " ".join(_name_parts(value)).strip()
 
 
+def _refresh_r10_name_signature(uid, info):
+    """Repair legacy/stale R10 name prefixes without depending on Trade data."""
+    uid = str(uid)
+    profile_url = str((info or {}).get("profile_url") or "").strip()
+    if not profile_url:
+        return dict(info or {})
+
+    canonical_url, _ = normalize_r10_profile_url(profile_url)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.7,en;q=0.6",
+        "Cache-Control": "no-cache",
+    }
+    response = requests.get(canonical_url, headers=headers, timeout=(7, 12), allow_redirects=True)
+    response.raise_for_status()
+    final_host = urlparse(response.url).netloc.lower().removeprefix("www.")
+    if final_host != "r10.net":
+        raise ValueError("invalid_link")
+    lowered = response.text.lower()
+    if "cf-chl-" in lowered or "just a moment" in lowered or "attention required" in lowered:
+        raise RuntimeError("r10_access_challenge")
+
+    parsed = parse_r10_profile_name(response.text)
+    if not parsed:
+        raise ValueError("name_not_found")
+    if str(parsed.get("account_type")) != str((info or {}).get("account_type")):
+        raise ValueError("account_type_changed")
+
+    with _db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT profile FROM exchange_profiles WHERE user_id=%s FOR UPDATE", (uid,))
+            row = cur.fetchone()
+            if not row:
+                return dict(info or {})
+            profile = dict(row[0] or {})
+            current = dict(profile.get("r10_verification") or {})
+            if current.get("status") != "approved":
+                return current
+            current.update({
+                "masked_name": parsed.get("masked", current.get("masked_name", "")),
+                "company_title": parsed.get("company_title", current.get("company_title", "")),
+                "first2": parsed.get("first2", current.get("first2", "")),
+                "last2": parsed.get("last2", current.get("last2", "")),
+                "name_prefixes": list(parsed.get("name_prefixes") or []),
+                "name_patterns": list(parsed.get("name_patterns") or []),
+                "name_signature_version": 3,
+                "name_signature_refreshed_at": _r10_now_text(),
+            })
+            profile["r10_verification"] = current
+            exchange_save_profile(uid, profile, conn)
+        conn.commit()
+    users[uid] = profile
+    return current
+
+
 def validate_r10_name(uid, full_name):
-    info = users.get(str(uid), {}).get("r10_verification", {}) or {}
+    uid = str(uid)
+
+    # The panel and Telegram worker may be separate processes. Always read the
+    # authoritative profile so a recent approval cannot remain stale in memory.
+    try:
+        stored_profile = exchange_load_profile(uid)
+        if stored_profile is not None:
+            users[uid] = stored_profile
+    except Exception as exc:
+        print("R10 NAME PROFILE REFRESH ERROR:", exc)
+
+    info = users.get(uid, {}).get("r10_verification", {}) or {}
     if info.get("status") != "approved":
         return False
+
     if info.get("account_type") == "corporate":
-        saved = normalize_person_name(info.get("iban_owner", ""))
-        return bool(saved) and _tr_lower(normalize_person_name(full_name)) == _tr_lower(saved)
-    first = _tr_lower(info.get("first2", ""))
-    last = _tr_lower(info.get("last2", ""))
-    parts = _name_parts(full_name)
-    if len(parts) < 2 or not first or not last:
-        return False
-    return _tr_lower(parts[0]).startswith(first) and _tr_lower(parts[-1]).startswith(last)
+        return _corporate_owner_matches(info.get("iban_owner", ""), full_name)
+
+    if _personal_name_matches(info, full_name):
+        return True
+
+    # Records created by older versions may contain missing or incorrectly
+    # parsed prefixes. Refresh the identity once; Trade/R10+ is not involved.
+    if int(info.get("name_signature_version") or 0) < 3:
+        try:
+            refreshed = _refresh_r10_name_signature(uid, info)
+            return _personal_name_matches(refreshed, full_name)
+        except Exception as exc:
+            print("R10 NAME SIGNATURE REFRESH ERROR:", exc)
+    return False
 
 
 def normalize_r10_profile_url(profile_url):
@@ -4428,6 +4616,9 @@ def parse_r10_profile_name(html):
             "masked": clean_title or "Kurumsal hesap",
             "first2": "",
             "last2": "",
+            "name_prefixes": [],
+            "name_patterns": [],
+            "name_signature_version": 3,
             "company_title": clean_title,
         })
         return common
@@ -4449,10 +4640,22 @@ def parse_r10_profile_name(html):
     if not masked_display:
         return None
 
+    visible_prefixes = []
+    name_patterns = []
+    for token in name_tokens:
+        plain = re.sub(r"\*+", "", token)
+        if len(plain) >= 2:
+            # Keep every visible letter. Never shorten it to two characters.
+            visible_prefixes.append(plain)
+            name_patterns.append({"visible": plain, "masked": "*" in token})
+
     common.update({
         "masked": masked_display,
         "first2": first_letters[:2],
         "last2": last_letters[:2],
+        "name_prefixes": visible_prefixes,
+        "name_patterns": name_patterns,
+        "name_signature_version": 3,
         "company_title": "",
     })
     return common
@@ -4633,6 +4836,9 @@ def _r10_complete_profile_check(chat_id, uid, profile_text, check_token, result_
                     "account_type": parsed.get("account_type", "personal"),
                     "first2": parsed.get("first2", ""),
                     "last2": parsed.get("last2", ""),
+                    "name_prefixes": list(parsed.get("name_prefixes") or []),
+                    "name_patterns": list(parsed.get("name_patterns") or []),
+                    "name_signature_version": int(parsed.get("name_signature_version") or 3),
                     "key": key,
                     "key_hash": r10_key_digest(key),
                     "key_created_at": created.strftime("%Y-%m-%d %H:%M:%S"),
