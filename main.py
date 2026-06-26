@@ -122,7 +122,7 @@ TRON_SWEEP_USDT_FEE_LIMIT_SUN = max(1_000_000, int(os.getenv("TRON_SWEEP_USDT_FE
 TRON_SWEEP_MAX_RETRIES = max(3, int(os.getenv("TRON_SWEEP_MAX_RETRIES", "12")))
 TRON_POOL_ADDRESS = os.getenv("TRON_POOL_ADDRESS", "").strip() or TRON_HOT_WALLET_ADDRESS
 
-BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V18"
+BUILD_VERSION = "NERLO-2026-06-26-TRX-ONLY-AUTO-WITHDRAW-V19"
 PANEL_RELEASE = "TREASURY-CONTROL-CENTER-V13-R10-PRO-STABLE"
 SECURITY_RELEASE = "INTERNAL-DEPOSIT-ADDRESS-GUARD-V2"
 SIGNER_RELEASE = "TRON-POOL-SWEEP-AND-WITHDRAW-SIGNER-V3"
@@ -3932,8 +3932,8 @@ def msg(uid, key):
     return EN_MESSAGES.get(key, DEFAULT_MESSAGES.get(key, key)) if lang_of(uid) == "en" else messages.get(key, DEFAULT_MESSAGES.get(key, key))
 
 
-def formatted_message(uid, key, **values):
-    template = msg(uid, key)
+def formatted_message(uid, message_key, **values):
+    template = msg(uid, message_key)
     try:
         return str(template).format_map(_SafeTemplateValues(values))
     except (ValueError, TypeError):
@@ -4134,7 +4134,7 @@ def r10_hitap(uid, info=None):
     return str(info.get("masked_name") or "Sayın kullanıcımız").strip()
 
 
-def r10_message(uid, key, info=None, **values):
+def r10_message(uid, message_key, info=None, **values):
     info = info if isinstance(info, dict) else (users.get(str(uid), {}).get("r10_verification", {}) or {})
     context = {
         "hitap": r10_hitap(uid, info),
@@ -4145,7 +4145,7 @@ def r10_message(uid, key, info=None, **values):
         "reason": str(info.get("decision_reason") or info.get("reverify_reason") or "Belirtilmedi"),
     }
     context.update(values)
-    return formatted_message(uid, key, **context)
+    return formatted_message(uid, message_key, **context)
 
 
 def r10_tl_ready(uid):
